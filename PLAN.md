@@ -7,8 +7,9 @@ for what to build.
 Phase 0 — Scaffolding & configuration
 
 ## Active Sub-Task
-Phase 0.2 complete. Next action: Phase 0.3 — author the pydantic v2 schemas in
-`src/srip_filter/models.py`: the four LLM contracts (Task A/B/C/D outputs) and `AuditRecord`.
+Phase 0.3 complete. Next action: Phase 0.4 — `src/srip_filter/llm/client.py`: an AsyncOpenAI
+wrapper with structured outputs (parse into the Task A/B/C/D models), in-run cache, bounded
+concurrency, and the retry-once -> NEEDS_REVIEW fallback; plus a fake client for tests.
 
 ---
 
@@ -58,18 +59,20 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       .gitignore (data/ + .env), git init + remote, pushed (commit: 8aacb28).
 - [x] Phase 0.2 — config.yaml (PRD §10.3 + pinned model IDs) + pydantic-settings loader with
       strict validation and Secrets (OPENAI_API_KEY from .env); tests (commit: 947f24c).
+- [x] Phase 0.3 — pydantic v2 schemas: LLM contracts (Task A/B/C/D) + AuditRecord, strict +
+      structured-output-ready (additionalProperties:false, all-required); tests (commit: e6867b5).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 0.3 — pydantic models
 - [ ] Phase 0.4 — LLM client wrapper + fake
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
 - Phase 0.1: `uv sync && uv run pytest -q && uv run ruff check .`
 - Phase 0.2: `uv run pytest tests/test_config.py`
+- Phase 0.3: `uv run pytest tests/test_models.py`
 - Phase 2:   `uv run pytest tests/gates/test_essays.py`
 - Phase 7:   `uv run pytest tests/scoring/test_aggregate.py` (covers all §12 invariants)
 - Phase 8:   `uv run pytest tests/test_pipeline.py` (synthetic CSV end-to-end)
