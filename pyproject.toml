@@ -1,0 +1,48 @@
+[project]
+name = "srip-filter"
+version = "0.1.0"
+description = "SRIP Track 2 application filtering & ranking system (stateless: reject + rank)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "openai>=1.40",
+    "rapidfuzz>=3.9",
+    "better-profanity>=0.7",
+    "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+# API layer (Phase 9). Install with: uv sync --extra api
+api = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/srip_filter"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
