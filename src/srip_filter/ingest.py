@@ -318,3 +318,56 @@ def _read_bytes(source: str | Path | bytes | IO[bytes]) -> bytes:
     if isinstance(source, (str, Path)):
         return Path(source).read_bytes()
     return source.read()
+
+
+# ================================================================================================
+# Identity validation (Phase 1.3)
+# ================================================================================================
+# An applicant we cannot identify cannot be reported on, deduped, or returned to the owner, so a
+# row missing first name, last name, OR email is *dropped at ingest* — distinct from the
+# pipeline's REJECTED/NEEDS_REVIEW outcomes, which only apply to identifiable applicants.
+#
+# Per the PLAN decisions log: a blank GPA or empty essay is NOT an identity problem and is kept —
+# those flow downstream (blank GPA -> NEEDS_REVIEW, empty essay -> REJECTED), preserving the
+# legitimate international contingent that leaves GPA unscalable.
+
+IDENTITY_ROLES: tuple[str, ...] = (FIRST_NAME, LAST_NAME, EMAIL)
+
+
+@dataclass(frozen=True)
+class DroppedRow:
+    """A row removed at ingest because it lacks the fields needed to identify an applicant."""
+
+    row_index: int  # 0-based position among the data rows that were read
+    submission_id: str  # may be "" if that cell was also blank
+    missing_fields: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class IdentityResult:
+    """Partition of input rows into identifiable (kept) and unidentifiable (dropped)."""
+
+    kept: list[ApplicantRow] = field(default_factory=list)
+    dropped: list[DroppedRow] = field(default_factory=list)
+
+    @property
+    def dropped_count(self) -> int:
+        return len(self.dropped)
+
+
+def validate_identity(rows: list[ApplicantRow]) -> IdentityResult:
+    """Split rows on whether they carry first name, last name, and email.
+
+    A row missing any of the three is dropped and recorded (index, submission id, which fields
+    were blank). Everything else is kept verbatim for dedup (Phase 1.4) and the pipeline.
+    """
+    result = IdentityResult()
+    for index, row in enumerate(rows):
+        missing = tuple(role for role in IDENTITY_ROLES if not getattr(row, role))
+        if missing:
+            result.dropped.append(
+                DroppedRow(row_index=index, submission_id=row.submission_id, missing_fields=missing)
+            )
+        else:
+            result.kept.append(row)
+    return result

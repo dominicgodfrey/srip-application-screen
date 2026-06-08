@@ -10,10 +10,13 @@ import pytest
 
 from srip_filter.ingest import (
     AFFIRMATION,
+    EMAIL,
     ESSAY1,
     ESSAY2,
+    FIRST_NAME,
     GPA_EXPLANATION,
     INSTITUTION,
+    LAST_NAME,
     REQUIRED_ROLES,
     ApplicantRow,
     HeaderValidationError,
@@ -21,7 +24,15 @@ from srip_filter.ingest import (
     read_csv_records,
     resolve_headers,
     validate_headers,
+    validate_identity,
 )
+
+
+def _row(**overrides: str) -> ApplicantRow:
+    """An identifiable ApplicantRow by default; override fields to make it deficient."""
+    base = dict(submission_id="id", first_name="Ann", last_name="Lee", email="a@b.com")
+    base.update(overrides)
+    return ApplicantRow(**base)
 
 # A full, well-formed header set resembling the reference export's 29 columns.
 GOOD_HEADERS = [
@@ -239,3 +250,46 @@ def test_read_then_build_rows_end_to_end() -> None:
     rows = [ApplicantRow.from_record(r, res) for r in records]
     assert len(rows) == 1
     assert rows[0].submission_id == "x"
+
+
+# --- Phase 1.3: identity validation --------------------------------------------------------------
+
+
+def test_identity_keeps_fully_identified_rows() -> None:
+    res = validate_identity([_row(), _row(submission_id="id2", email="c@d.com")])
+    assert res.dropped_count == 0
+    assert len(res.kept) == 2
+
+
+@pytest.mark.parametrize("missing", [FIRST_NAME, LAST_NAME, EMAIL])
+def test_identity_drops_row_missing_any_identity_field(missing: str) -> None:
+    res = validate_identity([_row(**{missing: ""})])
+    assert res.kept == []
+    assert res.dropped_count == 1
+    assert res.dropped[0].missing_fields == (missing,)
+
+
+def test_identity_records_index_and_submission_id_of_dropped() -> None:
+    rows = [_row(), _row(submission_id="bad", first_name=""), _row(submission_id="id3")]
+    res = validate_identity(rows)
+    assert [r.submission_id for r in res.kept] == ["id", "id3"]
+    assert res.dropped[0].row_index == 1
+    assert res.dropped[0].submission_id == "bad"
+
+
+def test_identity_reports_all_missing_fields() -> None:
+    res = validate_identity([_row(first_name="", email="")])
+    assert set(res.dropped[0].missing_fields) == {FIRST_NAME, EMAIL}
+
+
+def test_identity_does_not_drop_blank_gpa_or_essays() -> None:
+    # Blank GPA / empty essays are NOT identity problems — they must flow to the pipeline.
+    res = validate_identity([_row(gpa="", essay1="", essay2="")])
+    assert res.dropped_count == 0
+    assert len(res.kept) == 1
+
+
+def test_identity_blank_submission_id_still_dropped_if_unidentifiable() -> None:
+    res = validate_identity([_row(submission_id="", first_name="")])
+    assert res.dropped_count == 1
+    assert res.dropped[0].submission_id == ""
