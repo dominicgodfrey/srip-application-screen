@@ -4,12 +4,12 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 0 — Scaffolding & configuration
+Phase 1 — Ingest + dedup (Stage 0)
 
 ## Active Sub-Task
-Phase 0.3 complete. Next action: Phase 0.4 — `src/srip_filter/llm/client.py`: an AsyncOpenAI
-wrapper with structured outputs (parse into the Task A/B/C/D models), in-run cache, bounded
-concurrency, and the retry-once -> NEEDS_REVIEW fallback; plus a fake client for tests.
+Phase 0 complete (0.1–0.4). Next action: Phase 1 — `src/srip_filter/ingest.py`: load the CSV
+against the §2 data contract and deduplicate (email primary; flag — don't merge — duplicate
+name-pairs that lack a shared email).
 
 ---
 
@@ -61,18 +61,24 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       strict validation and Secrets (OPENAI_API_KEY from .env); tests (commit: 947f24c).
 - [x] Phase 0.3 — pydantic v2 schemas: LLM contracts (Task A/B/C/D) + AuditRecord, strict +
       structured-output-ready (additionalProperties:false, all-required); tests (commit: e6867b5).
+- [x] Phase 0.4 — LLM client: AsyncOpenAI structured outputs parsed into the contracts, in-run
+      cache, bounded-concurrency semaphore, retry-once -> LLMParseFailure; FakeLLMClient + tests
+      (commit: 7c9bae1).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 0.4 — LLM client wrapper + fake
+- [ ] Phase 1 — ingest.py: CSV load (§2 data contract) + dedup (email primary, name-pair flag)
+- [ ] Phase 2 — essay deterministic gates (length, profanity, cheap gibberish)
+- [ ] Phase 3 — GPA normalization + gate (deterministic + Task A/B)
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
 - Phase 0.1: `uv sync && uv run pytest -q && uv run ruff check .`
 - Phase 0.2: `uv run pytest tests/test_config.py`
 - Phase 0.3: `uv run pytest tests/test_models.py`
+- Phase 0.4: `uv run pytest tests/llm/test_client.py`
 - Phase 2:   `uv run pytest tests/gates/test_essays.py`
 - Phase 7:   `uv run pytest tests/scoring/test_aggregate.py` (covers all §12 invariants)
 - Phase 8:   `uv run pytest tests/test_pipeline.py` (synthetic CSV end-to-end)
