@@ -21,6 +21,7 @@ from srip_filter.ingest import (
     ApplicantRow,
     HeaderValidationError,
     deduplicate,
+    ingest_csv,
     normalize_cell,
     read_csv_records,
     resolve_headers,
@@ -370,3 +371,114 @@ def test_dedup_preserves_input_order() -> None:
     rows = [_row(submission_id=str(i), email=f"u{i}@x.com") for i in range(5)]
     res = deduplicate(rows)
     assert [k.row.submission_id for k in res.kept] == ["0", "1", "2", "3", "4"]
+
+
+# --- Phase 1.5: ingest_csv() orchestration -------------------------------------------------------
+
+# Header index for the synthetic CSV builder, aligned to GOOD_HEADERS positions.
+_H = {"sid": 0, "first": 1, "last": 2, "email": 3, "gpa": 9, "essay1": 14, "essay2": 15}
+
+
+def _data_row(**vals: str) -> list[str]:
+    """One CSV data row aligned to GOOD_HEADERS; unspecified columns are blank."""
+    cells = [""] * len(GOOD_HEADERS)
+    for alias, value in vals.items():
+        cells[_H[alias]] = value
+    return cells
+
+
+def _csv_with(rows: list[list[str]]) -> bytes:
+    return _csv_bytes([GOOD_HEADERS, *rows])
+
+
+def test_ingest_csv_happy_path() -> None:
+    data = _csv_with(
+        [
+            _data_row(sid="1", first="Ann", last="Lee", email="ann@x.com", gpa="3.9"),
+            _data_row(sid="2", first="Bob", last="Ng", email="bob@x.com", gpa="3.1"),
+        ]
+    )
+    result = ingest_csv(data)
+    assert result.report.total_rows_read == 2
+    assert result.report.kept_count == 2
+    assert [r.row.submission_id for r in result.rows] == ["1", "2"]
+    assert result.report.identity_dropped == []
+    assert result.report.duplicate_email_dropped == []
+
+
+def test_ingest_csv_drops_unidentifiable_and_reports() -> None:
+    data = _csv_with(
+        [
+            _data_row(sid="1", first="Ann", last="Lee", email="ann@x.com"),
+            _data_row(sid="2", first="", last="Ng", email="bob@x.com"),  # missing first name
+        ]
+    )
+    result = ingest_csv(data)
+    assert result.report.kept_count == 1
+    assert len(result.report.identity_dropped) == 1
+    assert result.report.identity_dropped[0].submission_id == "2"
+
+
+def test_ingest_csv_collapses_email_duplicates() -> None:
+    data = _csv_with(
+        [
+            _data_row(sid="1", first="Ann", last="Lee", email="dup@x.com"),
+            _data_row(sid="2", first="Ann", last="Lee", email="dup@x.com"),
+        ]
+    )
+    result = ingest_csv(data)
+    assert result.report.kept_count == 1
+    assert len(result.report.duplicate_email_dropped) == 1
+    assert result.report.duplicate_email_dropped[0].row.submission_id == "2"
+
+
+def test_ingest_csv_flags_name_dupes_without_dropping() -> None:
+    data = _csv_with(
+        [
+            _data_row(sid="1", first="Sam", last="Roy", email="sam1@x.com"),
+            _data_row(sid="2", first="Sam", last="Roy", email="sam2@x.com"),
+        ]
+    )
+    result = ingest_csv(data)
+    assert result.report.kept_count == 2
+    assert result.report.duplicate_name_flagged == 2
+
+
+def test_ingest_csv_keeps_blank_gpa_and_essays() -> None:
+    # Blank GPA / essays are not identity failures — the row survives ingest.
+    data = _csv_with([_data_row(sid="1", first="Ann", last="Lee", email="ann@x.com")])
+    result = ingest_csv(data)
+    assert result.report.kept_count == 1
+    assert result.rows[0].row.gpa == ""
+    assert result.rows[0].row.essay1 == ""
+
+
+def test_ingest_csv_raises_on_missing_required_column() -> None:
+    headers_no_gpa = [h for h in GOOD_HEADERS if h != "GPA"]
+    data = _csv_bytes([headers_no_gpa, ["x"] * len(headers_no_gpa)])
+    with pytest.raises(HeaderValidationError, match="gpa"):
+        ingest_csv(data)
+
+
+def test_ingest_csv_reports_unrecognized_and_missing_optional() -> None:
+    headers = [*GOOD_HEADERS, "Mystery Column"]
+    headers = [h for h in headers if h != "LinkedIn (optional)"]
+    data = _csv_bytes([headers, _data_row_padded(headers)])
+    result = ingest_csv(data)
+    assert "Mystery Column" in result.report.unrecognized_headers
+    assert "linkedin" in result.report.missing_optional_roles
+
+
+def _data_row_padded(headers: list[str]) -> list[str]:
+    """A row matching an arbitrary header list, with identity fields filled."""
+    cells = [""] * len(headers)
+    for i, h in enumerate(headers):
+        if h == "Submission ID":
+            cells[i] = "1"
+        elif h == "Student First Name":
+            cells[i] = "Ann"
+        elif h == "Student Last Name":
+            cells[i] = "Lee"
+        elif h == "What is your email address?":
+            cells[i] = "ann@x.com"
+    return cells

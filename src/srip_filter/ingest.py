@@ -454,3 +454,61 @@ def deduplicate(rows: list[ApplicantRow]) -> DedupResult:
                 f"{deduped.dedup.notes}; {name_note}" if deduped.dedup.notes else name_note
             )
     return result
+
+
+# ================================================================================================
+# Stage 0 orchestration (Phase 1.5)
+# ================================================================================================
+
+
+@dataclass(frozen=True)
+class IngestReport:
+    """Human-auditable summary of what ingest did — counts and the drop/dup ledger.
+
+    Surfaced to the owner so a shrinking row count is explained, never silent. Carries no
+    essay/GPA content, only structural facts (ids, indices, which fields were blank).
+    """
+
+    total_rows_read: int
+    kept_count: int
+    identity_dropped: list[DroppedRow]
+    duplicate_email_dropped: list[DedupedRow]
+    duplicate_name_flagged: int
+    unrecognized_headers: tuple[str, ...]
+    missing_optional_roles: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class IngestResult:
+    """Everything Stage 0 produces: the kept rows and the report explaining the rest."""
+
+    rows: list[DedupedRow]  # identifiable, deduped rows ready for the pipeline
+    resolution: HeaderResolution
+    report: IngestReport
+
+
+def ingest_csv(source: str | Path | bytes | IO[bytes]) -> IngestResult:
+    """Run Stage 0 end-to-end: read → validate headers → build rows → identity → dedup.
+
+    Raises :class:`HeaderValidationError` if the CSV's columns can't satisfy the data contract
+    (the only hard failure; the API layer turns this into a graceful 4xx). Otherwise returns
+    the kept rows plus an :class:`IngestReport` accounting for every row that was dropped or
+    flagged. Pure read pipeline — no LLM calls, no disk writes.
+    """
+    headers, records = read_csv_records(source)
+    resolution = validate_headers(headers)
+
+    rows = [ApplicantRow.from_record(record, resolution) for record in records]
+    identity = validate_identity(rows)
+    dedup = deduplicate(identity.kept)
+
+    report = IngestReport(
+        total_rows_read=len(rows),
+        kept_count=len(dedup.kept),
+        identity_dropped=identity.dropped,
+        duplicate_email_dropped=dedup.dropped,
+        duplicate_name_flagged=sum(1 for d in dedup.kept if d.dedup.is_duplicate_name),
+        unrecognized_headers=resolution.unrecognized_headers,
+        missing_optional_roles=resolution.missing_optional,
+    )
+    return IngestResult(rows=dedup.kept, resolution=resolution, report=report)
