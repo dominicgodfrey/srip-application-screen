@@ -4,12 +4,11 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 1 — Ingest + dedup (Stage 0)
+Phase 1 — Ingest + validation + dedup (Stage 0)
 
 ## Active Sub-Task
-Phase 0 complete (0.1–0.4). Next action: Phase 1 — `src/srip_filter/ingest.py`: load the CSV
-against the §2 data contract and deduplicate (email primary; flag — don't merge — duplicate
-name-pairs that lack a shared email).
+Phase 0 complete. Next action: Phase 1.1 — data contract in `src/srip_filter/ingest.py`: §2
+header constants, graceful header validation, and an `ApplicantRow` representation.
 
 ---
 
@@ -24,8 +23,15 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   - 0.3 `models.py` — pydantic v2 schemas for Task A/B/C/D outputs + `AuditRecord` (PRD §8, §9)
   - 0.4 `llm/client.py` — `AsyncOpenAI` wrapper: structured outputs, in-run cache, bounded
         concurrency, retry→`NEEDS_REVIEW` fallback; fake client for tests
-- **Phase 1 — Ingest + dedup (Stage 0)**
-  - pandas load against the §2 data contract; dedup by email (primary) + name-pair (flag, don't merge)
+- **Phase 1 — Ingest + validation + dedup (Stage 0)**
+  - 1.1 data contract: §2 header constants + header validation (graceful) + `ApplicantRow`
+  - 1.2 load + normalize: pandas read (encoding-safe); trim whitespace; blank/whitespace -> empty
+  - 1.3 identity validation: drop rows missing first name, last name, OR email (unidentifiable);
+        record dropped count/ids. GPA/essay blanks are NOT dropped — they flow to the pipeline
+        (blank GPA -> NEEDS_REVIEW, empty essay -> REJECTED per PRD)
+  - 1.4 dedup: email primary (keep first; mark + drop surplus as is_duplicate_email); name-pairs
+        without a shared email -> flag is_duplicate_name (keep, don't merge) -> DedupInfo
+  - 1.5 `ingest_csv()` orchestration (kept rows + drop/dup report) + synthetic-CSV tests
 - **Phase 2 — Essay deterministic gates (Stage 1)**
   - Length gate (hard_min/hard_max → REJECTED; soft penalty band); profanity gate
     (`better-profanity` + slur list + medical allowlist); cheap gibberish heuristics
@@ -69,7 +75,11 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - (none)
 
 ## Next Up
-- [ ] Phase 1 — ingest.py: CSV load (§2 data contract) + dedup (email primary, name-pair flag)
+- [ ] Phase 1.1 — data contract: §2 header constants + header validation + ApplicantRow
+- [ ] Phase 1.2 — load + normalize (pandas, encoding-safe, blank/whitespace handling)
+- [ ] Phase 1.3 — identity validation: drop rows missing first name / last name / email
+- [ ] Phase 1.4 — dedup: email-primary removal + name-pair flagging -> DedupInfo
+- [ ] Phase 1.5 — ingest_csv() orchestration + synthetic-CSV tests
 - [ ] Phase 2 — essay deterministic gates (length, profanity, cheap gibberish)
 - [ ] Phase 3 — GPA normalization + gate (deterministic + Task A/B)
 
@@ -119,6 +129,10 @@ Structural facts only — never real applicant content.
 - **Profanity:** using better-profanity's default list until the owner supplies a curated slur
   list + medical/anatomical allowlist (openissue.md #3).
 - **`openissue.md`** added at project root as the owner's running list of inputs to provide.
+- **Ingest validation (Phase 1.3):** drop a row only when first name, last name, OR email is
+  empty (unidentifiable submission). Blank GPA and empty essays are NOT dropped — they flow to
+  the pipeline (blank GPA -> NEEDS_REVIEW, empty essay -> REJECTED) per PRD §1/§6, preserving the
+  ~43 blank-GPA international applicants. (Owner decision.)
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
