@@ -19,7 +19,11 @@ and dedup are Phases 1.2–1.5.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from io import BytesIO
+from pathlib import Path
+from typing import IO
 
+import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 # ================================================================================================
@@ -209,10 +213,9 @@ def validate_headers(headers: list[str]) -> HeaderResolution:
 class ApplicantRow(BaseModel):
     """One CSV row mapped onto canonical roles.
 
-    Every field is a raw string straight from the cell (defaulting to ""); typing, GPA
-    normalization, and gating happen in later stages. Unknown keys are forbidden so a mapping
-    bug surfaces immediately. Whitespace normalization is Phase 1.2's job — this model only
-    fixes the *shape*.
+    Every field is a whitespace-normalized string (defaulting to ""); GPA normalization, essay
+    gating, and the rest of the pipeline run on these later. Unknown keys are forbidden so a
+    mapping bug surfaces immediately.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -240,11 +243,78 @@ class ApplicantRow(BaseModel):
         """Build a row from a raw header→value record using a resolved header mapping.
 
         Only resolved roles are populated; an unresolved optional role stays at its "" default.
-        Missing/NaN-like cell values become "". Values are ``str()``-coerced but otherwise left
-        untouched (no trimming yet — see Phase 1.2).
+        Each value is whitespace-normalized via :func:`normalize_cell` (missing / NaN / blank →
+        "", outer whitespace trimmed).
         """
         values: dict[str, str] = {}
         for role, header in resolution.role_to_header.items():
-            raw = record.get(header, "")
-            values[role] = "" if raw is None else str(raw)
+            values[role] = normalize_cell(record.get(header, ""))
         return cls(**values)
+
+
+# ================================================================================================
+# CSV loading + cell normalization (Phase 1.2)
+# ================================================================================================
+
+# Encodings tried in order. Fillout exports are UTF-8 (often BOM-prefixed); cp1252 is the
+# common Windows-spreadsheet fallback before a last-resort latin-1 that never raises.
+_ENCODINGS: tuple[str, ...] = ("utf-8-sig", "cp1252", "latin-1")
+
+
+def normalize_cell(value: object) -> str:
+    """Coerce a raw cell to a trimmed string; ``None``/NaN/whitespace-only → "".
+
+    Outer whitespace only — interior newlines/spacing in essays are preserved so word-count
+    and grading stages see the text as written.
+    """
+    if value is None:
+        return ""
+    # pandas NaN (a float) compares unequal to itself; treat as blank.
+    if isinstance(value, float) and value != value:  # noqa: PLR0124 - NaN check
+        return ""
+    return str(value).strip()
+
+
+def read_csv_records(
+    source: str | Path | bytes | IO[bytes],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Read a CSV into ``(headers, records)`` with every cell a normalized string.
+
+    Encoding-safe: tries UTF-8 (BOM-aware), then cp1252, then latin-1 (which cannot raise), so
+    a stray non-UTF-8 byte never crashes ingest. All columns are read as strings — no numeric
+    inference (a GPA of ``4.0`` must not become a float) — and blanks come back as "" rather
+    than NaN. Records keep the original CSV header strings as keys for
+    :meth:`ApplicantRow.from_record`.
+    """
+    raw = _read_bytes(source)
+    last_err: UnicodeDecodeError | None = None
+    for encoding in _ENCODINGS:
+        try:
+            frame = pd.read_csv(
+                BytesIO(raw),
+                dtype=str,
+                keep_default_na=False,
+                na_filter=False,
+                encoding=encoding,
+            )
+            break
+        except UnicodeDecodeError as err:  # try the next, more permissive encoding
+            last_err = err
+    else:  # pragma: no cover - latin-1 decodes any byte, so this is unreachable in practice
+        raise last_err  # type: ignore[misc]
+
+    headers = [str(col) for col in frame.columns]
+    records = [
+        {col: normalize_cell(val) for col, val in row.items()}
+        for row in frame.to_dict(orient="records")
+    ]
+    return headers, records
+
+
+def _read_bytes(source: str | Path | bytes | IO[bytes]) -> bytes:
+    """Read raw bytes from a path, a bytes blob, or an already-open binary buffer."""
+    if isinstance(source, bytes):
+        return source
+    if isinstance(source, (str, Path)):
+        return Path(source).read_bytes()
+    return source.read()

@@ -17,6 +17,8 @@ from srip_filter.ingest import (
     REQUIRED_ROLES,
     ApplicantRow,
     HeaderValidationError,
+    normalize_cell,
+    read_csv_records,
     resolve_headers,
     validate_headers,
 )
@@ -154,6 +156,86 @@ def test_applicant_row_coerces_none_and_nonstring() -> None:
     assert row.gpa == "3.97"
 
 
+def test_applicant_row_normalizes_whitespace() -> None:
+    res = resolve_headers(GOOD_HEADERS)
+    record = {"Submission ID": "  abc  ", "GPA": "   ", "What is your email address?": "\tx@y.z\n"}
+    row = ApplicantRow.from_record(record, res)
+    assert row.submission_id == "abc"
+    assert row.gpa == ""  # whitespace-only -> empty
+    assert row.email == "x@y.z"
+
+
 def test_applicant_row_forbids_unknown_fields() -> None:
     with pytest.raises(ValueError):
         ApplicantRow(bogus="x")  # type: ignore[call-arg]
+
+
+# --- Phase 1.2: cell normalization + CSV loading -------------------------------------------------
+
+
+def test_normalize_cell_handles_blanks_and_types() -> None:
+    assert normalize_cell(None) == ""
+    assert normalize_cell(float("nan")) == ""
+    assert normalize_cell("   ") == ""
+    assert normalize_cell("  hi  ") == "hi"
+    assert normalize_cell(3.97) == "3.97"
+
+
+def test_normalize_cell_preserves_interior_newlines() -> None:
+    assert normalize_cell("  line1\nline2  ") == "line1\nline2"
+
+
+def _csv_bytes(rows: list[list[str]], encoding: str = "utf-8") -> bytes:
+    import csv
+    import io
+
+    buf = io.StringIO()
+    csv.writer(buf).writerows(rows)
+    return buf.getvalue().encode(encoding)
+
+
+def test_read_csv_records_basic() -> None:
+    data = _csv_bytes(
+        [
+            ["Submission ID", "GPA", "What is your email address?"],
+            ["abc", "4.0", "  a@b.com "],
+            ["def", "", "c@d.com"],
+        ]
+    )
+    headers, records = read_csv_records(data)
+    assert headers == ["Submission ID", "GPA", "What is your email address?"]
+    assert len(records) == 2
+    # Strings stay strings (no numeric inference), cells are trimmed, blanks are "".
+    assert records[0]["GPA"] == "4.0"
+    assert records[0]["What is your email address?"] == "a@b.com"
+    assert records[1]["GPA"] == ""
+
+
+def test_read_csv_records_no_na_inference() -> None:
+    # "N/A" is meaningful GPA content and must survive as the literal string.
+    data = _csv_bytes([["Submission ID", "GPA"], ["abc", "N/A"]])
+    _, records = read_csv_records(data)
+    assert records[0]["GPA"] == "N/A"
+
+
+def test_read_csv_records_utf8_bom() -> None:
+    data = _csv_bytes([["Submission ID", "GPA"], ["abc", "3.5"]], encoding="utf-8-sig")
+    headers, records = read_csv_records(data)
+    assert headers[0] == "Submission ID"  # BOM stripped, not glued to the first header
+    assert records[0]["GPA"] == "3.5"
+
+
+def test_read_csv_records_non_utf8_fallback() -> None:
+    # cp1252 smart-quote byte (0x92) is invalid UTF-8; loader must fall back, not crash.
+    data = _csv_bytes([["Submission ID", "GPA"], ["o’brien", "3.5"]], encoding="cp1252")
+    _, records = read_csv_records(data)
+    assert records[0]["GPA"] == "3.5"
+    assert records[0]["Submission ID"]  # decoded to *something* non-empty
+
+
+def test_read_then_build_rows_end_to_end() -> None:
+    headers, records = read_csv_records(_csv_bytes([GOOD_HEADERS, ["x"] * len(GOOD_HEADERS)]))
+    res = validate_headers(headers)
+    rows = [ApplicantRow.from_record(r, res) for r in records]
+    assert len(rows) == 1
+    assert rows[0].submission_id == "x"
