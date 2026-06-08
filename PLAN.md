@@ -4,11 +4,13 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 1 — Ingest + validation + dedup (Stage 0)
+Phase 2 — Essay deterministic gates (Stage 1)
 
 ## Active Sub-Task
-Phase 0 complete. Next action: Phase 1.1 — data contract in `src/srip_filter/ingest.py`: §2
-header constants, graceful header validation, and an `ApplicantRow` representation.
+Phase 1 complete (all of Stage 0 ingest). Next action: Phase 2 — essay deterministic gates in
+`src/srip_filter/gates/essays.py`: length gate (hard_min/hard_max → REJECTED; soft-penalty
+band), profanity gate (`better-profanity` + slur list + medical allowlist), cheap gibberish
+heuristics (entropy / consonant runs / repeated chars — no dictionary).
 
 ---
 
@@ -70,16 +72,21 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - [x] Phase 0.4 — LLM client: AsyncOpenAI structured outputs parsed into the contracts, in-run
       cache, bounded-concurrency semaphore, retry-once -> LLMParseFailure; FakeLLMClient + tests
       (commit: 7c9bae1).
+- [x] Phase 1.1 — ingest data contract: §2 header constants + graceful resolver
+      (`resolve_headers`/`validate_headers`) + `ApplicantRow` (commit: d32a52b).
+- [x] Phase 1.2 — load + normalize: encoding-safe `read_csv_records` (utf-8-sig→cp1252→latin-1,
+      all-string, no NA inference) + `normalize_cell`; from_record normalizes (commit: c140a11).
+- [x] Phase 1.3 — identity validation: `validate_identity` drops rows missing first/last/email,
+      records index+id+missing fields; blank GPA/essays kept (commit: c79d852).
+- [x] Phase 1.4 — dedup: `deduplicate` email-primary removal + name-pair flagging -> DedupInfo
+      (commit: ba4c780).
+- [x] Phase 1.5 — `ingest_csv()` orchestration (kept rows + IngestReport) + synthetic-CSV
+      integration tests (commit: 21992c5).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 1.1 — data contract: §2 header constants + header validation + ApplicantRow
-- [ ] Phase 1.2 — load + normalize (pandas, encoding-safe, blank/whitespace handling)
-- [ ] Phase 1.3 — identity validation: drop rows missing first name / last name / email
-- [ ] Phase 1.4 — dedup: email-primary removal + name-pair flagging -> DedupInfo
-- [ ] Phase 1.5 — ingest_csv() orchestration + synthetic-CSV tests
 - [ ] Phase 2 — essay deterministic gates (length, profanity, cheap gibberish)
 - [ ] Phase 3 — GPA normalization + gate (deterministic + Task A/B)
 
@@ -89,6 +96,8 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - Phase 0.2: `uv run pytest tests/test_config.py`
 - Phase 0.3: `uv run pytest tests/test_models.py`
 - Phase 0.4: `uv run pytest tests/llm/test_client.py`
+- Phase 1 (all): `uv run pytest tests/test_ingest.py` (header resolution, load/normalize,
+  identity, dedup, and the `ingest_csv` synthetic-CSV integration tests)
 - Phase 2:   `uv run pytest tests/gates/test_essays.py`
 - Phase 7:   `uv run pytest tests/scoring/test_aggregate.py` (covers all §12 invariants)
 - Phase 8:   `uv run pytest tests/test_pipeline.py` (synthetic CSV end-to-end)
@@ -133,6 +142,22 @@ Structural facts only — never real applicant content.
   empty (unidentifiable submission). Blank GPA and empty essays are NOT dropped — they flow to
   the pipeline (blank GPA -> NEEDS_REVIEW, empty essay -> REJECTED) per PRD §1/§6, preserving the
   ~43 blank-GPA international applicants. (Owner decision.)
+- **Header matching (Phase 1.1):** short, stable headers match exactly; the long Fillout
+  question columns (both essays, extenuating-circumstances, affirmation) match by a distinctive
+  substring because the PRD only quotes them in part and form copy drifts per cycle. The
+  resolver enforces a 1:1 role↔header mapping and *reports* missing/ambiguous/unrecognized
+  without raising; only `validate_headers`/`ingest_csv` raise (`HeaderValidationError`) and only
+  when the contract is unsatisfiable (missing-required or ambiguous). Required roles = identity
+  (first/last/email) + core graded signals (GPA + both essays); everything else optional.
+- **CSV reading (Phase 1.2):** `read_csv_records` reads every cell as a string with pandas
+  NA-inference OFF, so a literal `N/A`/`4.0` GPA survives verbatim (no float coercion, no NaN).
+  Encoding fallback utf-8-sig → cp1252 → latin-1 (last never raises) so a non-UTF-8 byte can't
+  500 the upload. Accepts path/bytes/binary-buffer for the future API. Outer-whitespace trim
+  only; interior essay newlines preserved.
+- **Dedup flagging (Phase 1.4):** `is_duplicate_email` is set True on BOTH the kept canonical
+  and the dropped surplus (honest "this applicant submitted more than once"); only `kept`
+  differs. Name-pair duplicates are flagged on all members and kept (never merged) — by
+  construction they have distinct emails (siblings / re-applications).
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
