@@ -20,6 +20,7 @@ from srip_filter.ingest import (
     REQUIRED_ROLES,
     ApplicantRow,
     HeaderValidationError,
+    deduplicate,
     normalize_cell,
     read_csv_records,
     resolve_headers,
@@ -293,3 +294,79 @@ def test_identity_blank_submission_id_still_dropped_if_unidentifiable() -> None:
     res = validate_identity([_row(submission_id="", first_name="")])
     assert res.dropped_count == 1
     assert res.dropped[0].submission_id == ""
+
+
+# --- Phase 1.4: deduplication --------------------------------------------------------------------
+
+
+def test_dedup_keeps_distinct_applicants() -> None:
+    res = deduplicate(
+        [
+            _row(submission_id="1"),
+            _row(submission_id="2", first_name="Bob", last_name="Ng", email="c@d.com"),
+        ]
+    )
+    assert len(res.kept) == 2
+    assert res.dropped == []
+    assert all(not k.dedup.is_duplicate_email for k in res.kept)
+    assert all(not k.dedup.is_duplicate_name for k in res.kept)
+
+
+def test_dedup_email_keeps_first_drops_surplus() -> None:
+    rows = [
+        _row(submission_id="1", email="dup@x.com"),
+        _row(submission_id="2", email="dup@x.com", last_name="Other"),
+        _row(submission_id="3", email="dup@x.com", last_name="Third"),
+    ]
+    res = deduplicate(rows)
+    assert [k.row.submission_id for k in res.kept] == ["1"]
+    assert [d.row.submission_id for d in res.dropped] == ["2", "3"]
+    assert res.kept[0].dedup.is_duplicate_email is True
+    assert res.kept[0].dedup.kept is True
+    assert all(d.dedup.is_duplicate_email and not d.dedup.kept for d in res.dropped)
+
+
+def test_dedup_email_is_case_and_whitespace_insensitive() -> None:
+    rows = [_row(submission_id="1", email="A@B.com"), _row(submission_id="2", email="  a@b.COM ")]
+    res = deduplicate(rows)
+    assert len(res.kept) == 1
+    assert len(res.dropped) == 1
+
+
+def test_dedup_name_pair_different_email_is_flagged_not_dropped() -> None:
+    rows = [
+        _row(submission_id="1", first_name="Sam", last_name="Roy", email="sam1@x.com"),
+        _row(submission_id="2", first_name="Sam", last_name="Roy", email="sam2@x.com"),
+    ]
+    res = deduplicate(rows)
+    assert len(res.kept) == 2  # kept, not merged
+    assert res.dropped == []
+    assert all(k.dedup.is_duplicate_name for k in res.kept)
+    assert all(not k.dedup.is_duplicate_email for k in res.kept)
+
+
+def test_dedup_name_match_is_case_insensitive() -> None:
+    rows = [
+        _row(submission_id="1", first_name="Sam", last_name="Roy", email="a@x.com"),
+        _row(submission_id="2", first_name="sam", last_name="ROY", email="b@x.com"),
+    ]
+    res = deduplicate(rows)
+    assert all(k.dedup.is_duplicate_name for k in res.kept)
+
+
+def test_dedup_same_email_does_not_trigger_name_flag() -> None:
+    # Same name AND same email -> collapsed by email dedup, so only one kept; no name flag.
+    rows = [
+        _row(submission_id="1", first_name="Sam", last_name="Roy", email="same@x.com"),
+        _row(submission_id="2", first_name="Sam", last_name="Roy", email="same@x.com"),
+    ]
+    res = deduplicate(rows)
+    assert len(res.kept) == 1
+    assert res.kept[0].dedup.is_duplicate_name is False
+    assert res.kept[0].dedup.is_duplicate_email is True
+
+
+def test_dedup_preserves_input_order() -> None:
+    rows = [_row(submission_id=str(i), email=f"u{i}@x.com") for i in range(5)]
+    res = deduplicate(rows)
+    assert [k.row.submission_id for k in res.kept] == ["0", "1", "2", "3", "4"]

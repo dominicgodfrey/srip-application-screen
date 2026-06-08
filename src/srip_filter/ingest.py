@@ -18,6 +18,7 @@ and dedup are Phases 1.2–1.5.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -25,6 +26,8 @@ from typing import IO
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
+
+from .models import DedupInfo
 
 # ================================================================================================
 # Canonical field roles
@@ -370,4 +373,84 @@ def validate_identity(rows: list[ApplicantRow]) -> IdentityResult:
             )
         else:
             result.kept.append(row)
+    return result
+
+
+# ================================================================================================
+# Deduplication (Phase 1.4)
+# ================================================================================================
+# Two independent signals, handled differently per PRD §2:
+#   * Email duplicates (6 in the reference set): same person submitting twice. Keep the FIRST
+#     occurrence, drop the surplus, flag both ends with is_duplicate_email.
+#   * Name-pair duplicates without a shared email (8 in the reference set): likely siblings or
+#     re-applications under a new email. Flag is_duplicate_name but KEEP all — never auto-merge,
+#     since they may be genuinely different applicants.
+
+
+@dataclass
+class DedupedRow:
+    """An ApplicantRow paired with its dedup audit info (PRD §9 'dedup' block)."""
+
+    row: ApplicantRow
+    dedup: DedupInfo
+
+
+@dataclass(frozen=True)
+class DedupResult:
+    """Outcome of dedup: rows retained for the pipeline, and surplus email dupes removed."""
+
+    kept: list[DedupedRow] = field(default_factory=list)
+    dropped: list[DedupedRow] = field(default_factory=list)
+
+
+def _norm_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _norm_name(row: ApplicantRow) -> tuple[str, str]:
+    return (row.first_name.strip().lower(), row.last_name.strip().lower())
+
+
+def deduplicate(rows: list[ApplicantRow]) -> DedupResult:
+    """Collapse email duplicates and flag (but keep) same-name, different-email applicants.
+
+    Email is the primary key: the first row for a given (case-insensitive) email is kept and
+    every later one is dropped as surplus, both flagged ``is_duplicate_email``. Among the kept
+    rows, any shared name-pair is flagged ``is_duplicate_name`` and all members are retained —
+    by construction these have distinct emails, so they may be siblings or re-applications and
+    must not be merged. Input order is preserved.
+    """
+    email_counts = Counter(_norm_email(r.email) for r in rows if _norm_email(r.email))
+
+    seen_emails: set[str] = set()
+    result = DedupResult()
+    for row in rows:
+        email = _norm_email(row.email)
+        if email and email in seen_emails:
+            note = f"surplus submission; first of {email_counts[email]} sharing this email kept"
+            result.dropped.append(
+                DedupedRow(row, DedupInfo(is_duplicate_email=True, kept=False, notes=note))
+            )
+            continue
+        if email:
+            seen_emails.add(email)
+        is_email_dup = bool(email) and email_counts[email] > 1
+        notes = (
+            f"kept first of {email_counts[email]} submissions sharing this email"
+            if is_email_dup
+            else ""
+        )
+        result.kept.append(
+            DedupedRow(row, DedupInfo(is_duplicate_email=is_email_dup, kept=True, notes=notes))
+        )
+
+    # Name-pair flagging runs only over the kept set (surplus emails already removed).
+    name_counts = Counter(_norm_name(d.row) for d in result.kept)
+    for deduped in result.kept:
+        if name_counts[_norm_name(deduped.row)] > 1:
+            deduped.dedup.is_duplicate_name = True
+            name_note = "shares name with another applicant (different email); not merged"
+            deduped.dedup.notes = (
+                f"{deduped.dedup.notes}; {name_note}" if deduped.dedup.notes else name_note
+            )
     return result
