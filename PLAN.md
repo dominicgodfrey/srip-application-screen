@@ -7,7 +7,8 @@ for what to build.
 Phase 0 — Scaffolding & configuration
 
 ## Active Sub-Task
-Nothing in progress yet. Next action: stand up the project skeleton (Phase 0.1).
+Phase 0.1 complete. Next action: Phase 0.2 — author `config.yaml` (PRD §10.3 + model IDs) and
+a pydantic-settings loader (`src/srip_filter/config.py`).
 
 ---
 
@@ -53,18 +54,20 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 
 ## Completed
 - [x] Pre-work — stack decisions captured in CLAUDE.md; PRD reviewed.
+- [x] Phase 0.1 — uv project scaffold: pyproject + deps, ruff, pytest, src/tests skeleton,
+      .gitignore (data/ + .env), git init + remote, pushed (commit: 8aacb28).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 0.1 — project skeleton + deps + gitignore + git init
 - [ ] Phase 0.2 — config.yaml + config loader
 - [ ] Phase 0.3 — pydantic models
 - [ ] Phase 0.4 — LLM client wrapper + fake
 
 ## How to Verify Completed Work
-(Fill in one command per sub-task as it lands. Examples once built:)
+(Fill in one command per sub-task as it lands.)
+- Phase 0.1: `uv sync && uv run pytest -q && uv run ruff check .`
 - Phase 0.2: `uv run python -c "from srip_filter.config import load_config; print(load_config())"`
 - Phase 2:   `uv run pytest tests/gates/test_essays.py`
 - Phase 7:   `uv run pytest tests/scoring/test_aggregate.py` (covers all §12 invariants)
