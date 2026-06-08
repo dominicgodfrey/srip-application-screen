@@ -1,0 +1,53 @@
+# SRIP Track 2 filter — tunable configuration (PRD §10.3).
+# Every magic number in the pipeline lives here; logic reads these, never hard-codes them.
+# Secrets (OPENAI_API_KEY) are NOT in this file — they come from .env (see .env.example).
+
+# Essay length gate (Stage 1) — units are words
+essay_length:
+  target_min: 100
+  target_max: 350
+  hard_min: 60          # word count < this -> REJECTED
+  hard_max: 500         # word count > this -> REJECTED
+  len_penalty_max: 5    # max soft penalty applied near the hard bounds
+
+# GPA gate + gradient (Stages 2-3, §8.1)
+gpa:
+  threshold: 3.0        # B average; deny line AND bottom of the scoring gradient
+  score_max: 40         # points awarded at a normalized GPA of 4.0
+
+# Essay quality scoring (Stage 4, Task D)
+essay_scoring:
+  quality_max_each: 20  # per essay; 40 total
+  grammar_penalty_max: 3
+
+# Coursework bonus (Stage 5, Task C) — additive only, never subtracts
+coursework:
+  bonus_max: 15
+  weight_cs: 1.0
+  weight_math: 0.8
+  weight_data: 0.6
+  weight_other: 0.0
+  min_grade_pct: 80     # courses graded below this are ignored (weight 0)
+  unit: 3.0
+
+# School bonus (Stage 7) — additive only, never subtracts
+school:
+  bonus_us_top20: 15
+  bonus_intl_top50: 12
+  fuzzy_match_threshold: 88
+
+# Resume bonus (Stage 6) — DEFERRED, inert. Set bonus_max > 0 only once PDF parsing exists.
+resume:
+  bonus_max: 0
+
+# LLM tasks (OpenAI). Model IDs are pinned here and swappable — verify against OpenAI's catalog.
+llm:
+  models:
+    task_a: gpt-4.1-mini   # A: GPA normalization (mechanical extraction)
+    task_b: gpt-4.1        # B: low-GPA explanation adequacy (judgment, can reject)
+    task_c: gpt-4.1-mini   # C: coursework decomposition (mechanical extraction)
+    task_d: gpt-4.1        # D: essay grading / gibberish / relevance (judgment, can reject)
+  temperature: 0.2         # <= 0.2 for repeatability
+  max_concurrency: 8       # bound for the asyncio.Semaphore around LLM calls
+  max_retries: 2
+  request_timeout_s: 60.0
