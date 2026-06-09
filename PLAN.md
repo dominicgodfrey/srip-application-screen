@@ -269,9 +269,39 @@ with the API. Build in order — fail-fast ordering means later stages depend on
         Asserts the five PRD §12 invariants hold **end-to-end** (the full pass deferred from Phase
         7) and that fail-fast holds: a row rejected at Stage 1 (or routed by the affirmation check)
         makes **zero** LLM calls (assert against the fake's call log). Deterministic, no real spend.
-- **Phase 9 — API layer (FastAPI, stateless)**
-  - Upload CSV → background job (in-memory registry) → progress poll → downloadable results;
-    nothing persisted; input validation + size caps
+- **Phase 9 — API layer (FastAPI, stateless)** — `api/main.py` (thin shell over
+  `pipeline.grade_batch`), tests `tests/api/test_api.py` (FastAPI `TestClient`, injected
+  `FakeLLMClient`, no spend). The core stays HTTP-free; the API only uploads → schedules a
+  background job → polls → streams the in-memory artifacts back, persisting nothing. Upload size +
+  row caps and §2 header validation are enforced at the edge; malformed input is a graceful 4xx,
+  never a 500. In-memory job registry only: an interrupted run is abandoned (matches the stateless
+  robustness decision — no DB, no queue). Split:
+  - 9.1 App scaffold + `ApiConfig` + schemas + in-memory job registry (no grading yet):
+        create the `api/` package and a FastAPI app with a health check; pydantic request/response
+        models (`JobCreated`, `JobStatus`, error envelope); a `JobRegistry` (dict keyed by UUID)
+        holding lifecycle state (`queued`/`running`/`succeeded`/`failed`), progress counts, the
+        `BatchResult` when done, error detail, and created/finished timestamps, with TTL eviction +
+        discard-after-download. New `ApiConfig` CONFIG section (`max_upload_bytes`, `max_rows`,
+        `job_ttl_seconds`) in `config.yaml` + `config.py` — these are magic numbers and belong in
+        config. `TestClient` tests over the registry + health.
+  - 9.2 Upload + validation + background kickoff: `POST /jobs` (multipart CSV) enforces the size
+        cap (→ 413), the row cap (~2000, → 413/422), and §2 header validation
+        (`HeaderValidationError` → 422; unreadable/garbled CSV → 422; **never** 500); on success it
+        creates a job, schedules `grade_batch` as an `asyncio` background task, and returns 202 +
+        `job_id`. One `OpenAILLMClient` is built at app startup from config/secrets (the client's
+        semaphore already bounds LLM concurrency); tests inject a `FakeLLMClient`. Synthetic-CSV
+        tests: good CSV → 202; oversize → 413; bad headers → 422; non-CSV → 422.
+  - 9.3 Progress polling + status: `GET /jobs/{id}` returns the lifecycle state, progress
+        (`rows_done`/`rows_total`), and the run `summary` counts once done; unknown/evicted id →
+        404; a failed job reports `failed` + a safe error message (never PII, never a stack trace).
+        Wires fine-grained progress via an **optional `progress` callback on `grade_batch`** — the
+        single, HTTP-free core touch (signature-compatible default `None`). Tests drive a job to
+        completion through a scripted `FakeLLMClient` and assert the state transitions + 404.
+  - 9.4 Result download + lifecycle/TTL: `GET /jobs/{id}/results/{artifact}` streams each of the
+        five in-memory artifacts (`decisions.jsonl`, the three CSVs, `summary.json`) with correct
+        content types/filenames; download before completion → 409; after download (or past TTL) the
+        job is evicted → subsequent fetch 404. A background sweeper drops expired jobs so PII is not
+        held. Tests: download each artifact; download-before-done → 409; eviction → 404.
 - **Phase 10 — Frontend SPA (FUTURE, not an immediate concern)**
   - React + Vite: upload, render each application's audit record on open, download results CSV
 
@@ -370,7 +400,10 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - (none)
 
 ## Next Up
-- [ ] Phase 9 — API layer (FastAPI, stateless): upload → in-memory job → poll → download; caps
+- [ ] Phase 9.1 — App scaffold + `ApiConfig` + schemas + in-memory job registry
+- [ ] Phase 9.2 — `POST /jobs` upload + validation (caps, header) + background kickoff
+- [ ] Phase 9.3 — `GET /jobs/{id}` progress polling + status (+ `grade_batch` progress callback)
+- [ ] Phase 9.4 — result download + lifecycle/TTL eviction
 - [ ] Phase 10 — Frontend SPA (future)
 
 ## How to Verify Completed Work
@@ -659,6 +692,27 @@ Structural facts only — never real applicant content.
   the summary dict + the `IngestReport`, all in memory (the Phase 9 API streams them; `write_outputs`
   is the opt-in disk path). The 8.4 suite drives Task B end-to-end via a scripted handler, so the
   test CSV harness adds the extenuating-circumstances column.
+
+- **Phase 9 breakdown (plan-time):** the API is a thin stateless shell over `pipeline.grade_batch`;
+  split 9.1 scaffold/registry → 9.2 upload+validation+kickoff → 9.3 polling → 9.4 download+TTL.
+  Decisions to settle in implementation:
+  (a) **New `ApiConfig` CONFIG section** (`max_upload_bytes`, `max_rows`, `job_ttl_seconds`) in
+  `config.yaml` + `config.py` — edge caps are magic numbers and belong in config, not the handlers.
+  (b) **One core touch, HTTP-free:** an optional `progress: Callable[[int, int], None] | None = None`
+  on `grade_batch` so the job can report `rows_done/rows_total` to the poll. Everything else lives in
+  `api/`; the core never imports FastAPI. (Deferred to 9.3 so 9.1/9.2 don't change the core.)
+  (c) **In-memory job registry only** — a dict keyed by UUID with lifecycle state + TTL eviction +
+  discard-after-download. No DB, no queue; an interrupted run (host restart / page refresh) is
+  abandoned and nothing is persisted (the §0/Privacy stateless decision). PII (essays, GPAs) lives
+  only inside the transient `BatchResult` and is evicted on download or TTL.
+  (d) **Graceful 4xx, never 500:** oversize upload → 413; row cap exceeded, `HeaderValidationError`,
+  and unreadable/garbled CSV → 422; download-before-done → 409; unknown/evicted job → 404. A failed
+  background job is captured on the job (`status="failed"` + a safe message — never a stack trace or
+  PII), surfaced via the poll, not raised.
+  (e) **One `OpenAILLMClient` at app startup** from config/secrets (its semaphore already bounds LLM
+  concurrency, so the background task just awaits `grade_batch`); tests inject a `FakeLLMClient` via
+  dependency override so the whole suite is zero-spend. **No auth initially** (nothing is stored);
+  serve over HTTPS at deploy. No new framework beyond FastAPI/uvicorn (already settled in CLAUDE.md).
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
