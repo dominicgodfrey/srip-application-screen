@@ -7,10 +7,11 @@ for what to build.
 Phase 2 — Essay deterministic gates (Stage 1)
 
 ## Active Sub-Task
-Phase 1 complete (all of Stage 0 ingest). Next action: Phase 2 — essay deterministic gates in
-`src/srip_filter/gates/essays.py`: length gate (hard_min/hard_max → REJECTED; soft-penalty
-band), profanity gate (`better-profanity` + slur list + medical allowlist), cheap gibberish
-heuristics (entropy / consonant runs / repeated chars — no dictionary).
+Phase 1 complete (all of Stage 0 ingest). Phase 2 now broken into 2.1–2.4 (see Phase Map).
+Next action: Phase 2.1 — word count + length gate in `src/srip_filter/gates/essays.py`:
+`word_count` (`re.findall(r"[\w'-]+")`) and `length_gate(text, cfg)` returning
+`(wc, ok, hard_fail, length_penalty)` — hard fail outside [hard_min, hard_max], soft penalty
+ramp across the off-target band, zero inside 100–350.
 
 ---
 
@@ -34,10 +35,26 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   - 1.4 dedup: email primary (keep first; mark + drop surplus as is_duplicate_email); name-pairs
         without a shared email -> flag is_duplicate_name (keep, don't merge) -> DedupInfo
   - 1.5 `ingest_csv()` orchestration (kept rows + drop/dup report) + synthetic-CSV tests
-- **Phase 2 — Essay deterministic gates (Stage 1)**
-  - Length gate (hard_min/hard_max → REJECTED; soft penalty band); profanity gate
-    (`better-profanity` + slur list + medical allowlist); cheap gibberish heuristics
-    (entropy / consonant runs / repeated chars — no dictionary)
+- **Phase 2 — Essay deterministic gates (Stage 1)** — `src/srip_filter/gates/essays.py`,
+  tests `tests/gates/test_essays.py`. Runs on BOTH essays; either essay failing a *hard* check
+  → `REJECTED`. Soft length penalties are computed here but carried forward (applied in Stage 4
+  scoring, §8.3), never a rejection. No LLM calls in this stage.
+  - 2.1 Word count + length gate (PRD §4.1): `word_count` tokenizer (`re.findall(r"[\w'-]+")`);
+        `length_gate(text, cfg)` → `(wc, ok, hard_fail, length_penalty)`. Hard fail when
+        `wc < hard_min` or `wc > hard_max` (empty essay → hard fail); soft penalty ramps 0 →
+        `len_penalty_max` across the off-target band (100–350 = 0). Pure functions.
+  - 2.2 Profanity gate (PRD §4.2): `resources/profanity.txt` scaffold (medical/anatomical
+        allowlist + curated-slur placeholder, per openissue #3); `profanity_gate(text)` over
+        `better-profanity`, whole-token case-insensitive + light leetspeak normalization, with
+        the medical/anatomical allowlist exempting clinical terms. Returns a hit bool.
+  - 2.3 Gibberish heuristics (PRD §4.2, no dictionary): cheap deterministic signals
+        (long consonant runs, low char-entropy / repeated-char runs, low unique-word ratio);
+        fires only when **≥2** signals trip (ESL-safe). Adds a `gibberish` CONFIG section
+        (thresholds) to `config.yaml` + `config.py`. Returns a hit bool.
+  - 2.4 Stage 1 aggregator: `run_essay_gates(row, cfg) -> Stage1Result` runs 2.1–2.3 on both
+        essays, sets the verdict (REJECTED if either essay hard-fails length OR any profanity/
+        gibberish hit), carries the two soft length penalties forward, and fills the audit
+        `Gates` blocks (`essay_length`, `profanity`, `gibberish`). Integration tests.
 - **Phase 3 — GPA normalization + gate (Stages 2–3)**
   - Deterministic parsing (4.0 / %, /5, /10, label-strip); Task A for ambiguous; Task B for
     sub-3.0 + explanation; unscalable → `NEEDS_REVIEW`
@@ -87,7 +104,10 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - (none)
 
 ## Next Up
-- [ ] Phase 2 — essay deterministic gates (length, profanity, cheap gibberish)
+- [ ] Phase 2.1 — word count + length gate (hard fail vs soft-penalty band)
+- [ ] Phase 2.2 — profanity gate (better-profanity + medical allowlist + leetspeak)
+- [ ] Phase 2.3 — gibberish heuristics (≥2 cheap signals, no dictionary) + gibberish CONFIG
+- [ ] Phase 2.4 — Stage 1 aggregator `run_essay_gates` + integration tests
 - [ ] Phase 3 — GPA normalization + gate (deterministic + Task A/B)
 
 ## How to Verify Completed Work
