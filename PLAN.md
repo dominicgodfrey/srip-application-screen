@@ -4,15 +4,14 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 5 — Coursework bonus (Stage 5, Task C)
+Phase 6 — School bonus + resume stub (Stages 7, 6)
 
 ## Active Sub-Task
-Phase 4 complete (all of Stage 4: Task D essay grading — prompt, pure post-processing math, LLM
-aggregator). Phase 5 now broken into 5.1–5.3 (see Phase Map). Next action: Phase 5.1 — create
-`llm/prompts/task_c.py` (`SYSTEM` per §8.4 + `user_prompt(coursework_cell)` emitting
-`COURSEWORK_RAW: """{…}"""`). Pure template only; the deterministic bonus math is 5.2 and the LLM
-aggregator is 5.3. No new config — `CourseworkConfig` + the `CourseItem`/`TaskCOutput` models
-already exist from Phase 0.
+Phase 5 complete (all of Stage 5: Task C coursework bonus — prompt, pure recompute-from-config
+bonus math, LLM aggregator). Next action: Phase 6 — `rapidfuzz` school match against
+`resources/schools.json` (Stage 7, bonus-only) + the inert `resume_bonus = 0` stub (Stage 6,
+clearly TODO). `SchoolConfig`/`ResumeConfig`, `resources/schools.json`, and the `SchoolMatch`
+audit model already exist from Phase 0.
 
 ---
 
@@ -219,14 +218,20 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       essays via Task D; reject on gibberish/off-topic either essay, fail-fast gibberish→relevance;
       parse-failure → NEEDS_REVIEW; essay_relevance/gibberish audit blocks + subscores). Landed
       together (shared module + test file) (commit: 2b86820).
+- [x] Phase 5.1 — Task C prompt (`prompts/task_c.py`): §8.4 SYSTEM (faithful course/grade
+      extraction, classify cs/math/data/other, normalize each grade to 0-100 pct, decompose for
+      a human reviewer) + `user_prompt(coursework_cell)` emitting `COURSEWORK_RAW: """{…}"""`.
+      Pure template (commit: 90a81c5).
+- [x] Phase 5.2 + 5.3 — `scoring/coursework.py`: `coursework_bonus` pure math (weights + counts
+      recomputed from config, `per_course = weight*(grade_pct/100)*unit`, cap + never-negative,
+      reconciled `courses[]`) and `score_coursework` Stage 5 aggregator (empty cell → 0, no token;
+      Task C otherwise; parse-failure → 0 bonus + audit error note, never NEEDS_REVIEW). Landed
+      together (shared module + test file) (commit: 90a81c5).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 5.1 — Task C prompt (`prompts/task_c.py`); §8.4 template, pure
-- [ ] Phase 5.2 — `coursework_bonus` math (weights/counts recomputed from config, cap, pure, no LLM)
-- [ ] Phase 5.3 — `score_coursework` Stage 5 aggregator (LLM, mocked): empty→0, parse-failure→0, cap
 - [ ] Phase 6 — School bonus + resume stub (Stages 7, 6)
 - [ ] Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
 
@@ -369,6 +374,18 @@ Structural facts only — never real applicant content.
   `e2_grade`) for the Phase 8 audit `reasons` builder; they are `None` on a parse failure. The
   Task-D `gibberish` HitGate is Stage 4's own finding — Phase 8 reconciles it with the Stage 1
   cheap-heuristic gibberish block (both can independently reject).
+
+- **Phase 5 (implementation):** `score_coursework` short-circuits a blank/whitespace cell with
+  zero spend (`bonus=0, courses=[]`). `coursework_bonus` **recomputes** each course's
+  `category_weight` (from `CourseworkConfig`) and `counts` (`category != "other" and grade_pct >=
+  min_grade_pct`) and returns the courses with those reconciled values via `model_copy(update=…)`,
+  so the audit `coursework_breakdown` shows exactly what the system applied (the model's own
+  `counts`/`category_weight` are ignored — only its `category` + `grade_pct` are trusted). The cap
+  uses `min(bonus_max, …)` and a `max(0, …)` floor (never negative); the floor test is `>=` so a
+  course at exactly 80% counts. A Task C `LLMParseFailure` degrades to `bonus=0` + a non-empty
+  `Stage5Result.error` note for `AuditRecord.errors` — never `NEEDS_REVIEW`/`REJECTED` (narrows
+  §8's general parse-failure→NEEDS_REVIEW to gating tasks B/D; bonus-only C and the future resume
+  degrade to 0).
 
 - **Phase 5 breakdown (plan-time):** split Stage 5 into 5.1 Task C prompt, 5.2 pure bonus math,
   5.3 the LLM aggregator — same isolate-the-LLM pattern as Phases 3–4. Two decisions to settle in
