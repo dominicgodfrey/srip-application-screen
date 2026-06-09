@@ -25,18 +25,22 @@ committed to the repo. See `CLAUDE.md` → Privacy & Security.
 
 ## Blocking — specific stage, has a working stopgap
 
-### 3. Curated profanity / slur list  ·  STATUS: USING DEFAULT FOR NOW
+### 3. Curated profanity / slur list  ·  STATUS: PLACEHOLDER FILE AWAITING CONTENT
 - **Current:** using `better-profanity`'s **default built-in list** (owner approved "use the
   current list for now"). The Stage 1 profanity gate works today with it.
-- **Needed eventually:** `resources/profanity.txt` containing —
+- **Scaffold in place:** `resources/profanity.txt` now exists as an inert, documented
+  placeholder (committed). It is **not loaded yet** and contains no curated terms — it defines
+  the format (`BLOCK` terms one per line; `ALLOW:`-prefixed medical/anatomical exemptions) and
+  is ready to be filled.
+- **Needed from owner:** populate `resources/profanity.txt` with —
   - **slurs to block** (the primary concern),
   - **profane exclamations**,
   - a **medical / anatomical ALLOWLIST** — clinical/anatomical terms must NOT trip the gate
     (PRD §4.2; e.g. legitimate medical vocabulary in an extenuating-circumstances explanation).
 - **Why it matters:** the default list may miss the specific slurs you want gated and may
   false-positive on clinical terms, which would wrongly reject good-faith applicants.
-- **Action:** provide the list (a plain newline-separated file is fine — a LDNOOBW-style base
-  is easy to retrofit); Phase 2 will load it and subtract the allowlist.
+- **Action:** fill in the placeholder (a plain newline-separated file is fine — a LDNOOBW-style
+  base is easy to retrofit); Phase 2.2 will load it and subtract the allowlist.
 
 ---
 

@@ -181,8 +181,9 @@ Structural facts only — never real applicant content.
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
-- [~] Profanity list — using `better-profanity` DEFAULT list for now (owner approved). Curated
-      slur list + medical/anatomical allowlist still needed (openissue.md #3).
+- [~] Profanity list — using `better-profanity` DEFAULT list for now (owner approved).
+      `resources/profanity.txt` placeholder scaffold committed (format documented, not yet
+      loaded); curated slur list + medical/anatomical allowlist still needed (openissue.md #3).
 - [ ] `OPENAI_API_KEY` in `.env` (openissue.md #1).
 - [ ] OpenAI account set to zero/minimal data retention (openissue.md #2).
 - [x] GPA threshold — settled at 3.0 (PRD §1). No decision needed.
