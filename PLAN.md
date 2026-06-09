@@ -7,12 +7,12 @@ for what to build.
 Phase 4 — Essay LLM grading (Stage 4, Task D)
 
 ## Active Sub-Task
-Phase 3 complete (all of Stages 2–3: GPA normalize + gate, deterministic + Task A/B). Next:
-Phase 4 — essay LLM grading in `src/srip_filter/scoring/essays.py` (Task D). Per essay, in order:
-gibberish check (LLM backstop) → relevance gate (off-topic → REJECTED) → quality score; then
-apply the soft length penalty (carried from Stage 1) and the Task D grammar penalty. Add a
-`prompts/task_d.py` template; `essay_score = max(0, quality - grammar_penalty - length_penalty)`;
-total = e1 + e2. Wire the `essay_relevance` audit block. `FakeLLMClient` tests, no API spend.
+Phase 3 complete (all of Stages 2–3: GPA normalize + gate, deterministic + Task A/B). Phase 4 now
+broken into 4.1–4.3 (see Phase Map). Next action: Phase 4.1 — create `src/srip_filter/scoring/`
+and `llm/prompts/task_d.py` (`SYSTEM` per §8.3 + `user_prompt(prompt_text, word_count, essay_text)`
+emitting the §8.3 template). `prompt_text` is the resolved CSV essay-question header (supplied by
+the orchestrator from `HeaderResolution.role_to_header`) — no new config, no owner dependency.
+Pure template only; the post-processing math is 4.2 and the LLM aggregator is 4.3.
 
 ---
 
@@ -94,9 +94,38 @@ with the API. Build in order — fail-fast ordering means later stages depend on
         cfg)` tying Stage 2 → Stage 3. PRD §12 invariant tests: GPA < 3.0 never yields points
         without an approved Task B and never scores above the bottom of the gradient; nothing
         unscoreable is `REJECTED`. `FakeLLMClient`, no spend.
-- **Phase 4 — Essay LLM grading (Stage 4, Task D)**
-  - Gibberish check first, then relevance gate (off-topic → REJECTED), then quality score;
-    soft length/grammar penalties applied
+- **Phase 4 — Essay LLM grading (Stage 4, Task D)** — `src/srip_filter/scoring/essays.py`,
+  tests `tests/scoring/test_essays.py`. Runs only on Stage 1–3 survivors. Per essay, Task D
+  applies the gibberish backstop and the relevance gate (either → `REJECTED`) plus a 0–20 quality
+  score; the carried Stage-1 soft length penalty and the Task-D grammar penalty are then
+  subtracted. Gibberish OR off-topic on *either* essay rejects the whole application (§4/§8.3); a
+  Task-D `LLMParseFailure` → `NEEDS_REVIEW`, never a rejection. The two Task-D calls per applicant
+  are the only spend in this stage. The LLM-touching sub-task (4.3) is isolated so the §8.3
+  post-processing math (4.2) stays fully testable with zero API spend; LLM tests use `FakeLLMClient`.
+  - 4.1 Task D prompt (no scoring logic): create `src/srip_filter/scoring/` (+ `__init__.py`) and
+        `llm/prompts/task_d.py` with `SYSTEM` (PRD §8.3 essence: gibberish-first, relevance gate,
+        quality on clarity/specificity/coherence/saliency, *slight* grammar penalty, ESL-safe —
+        never flag accent-of-writing) and `user_prompt(prompt_text, word_count, essay_text)`
+        emitting the §8.3 template (`PROMPT` / `WORD_COUNT` / `TARGET_RANGE: 100-350` / `ESSAY`).
+        `prompt_text` is the **resolved CSV essay-question header** (exactly what the applicant
+        answered), supplied by the orchestrator from `HeaderResolution.role_to_header` (Phase 8) —
+        no new config, no owner dependency, no drift. Pure template; tests assert the rendered shape.
+  - 4.2 Per-essay post-processing math (pure, no LLM): `score_one_essay(out: TaskDOutput,
+        length_penalty: float, cfg) -> EssayScoreResult` implementing §8.3 — gate flags
+        (`is_gibberish`, `not on_topic`) and `essay_score = max(0, quality_score -
+        grammar_spelling_penalty - length_penalty)`, floored at 0 and capped at
+        `essay_scoring.quality_max_each`. Pure function; tests cover the gate flags, the penalty
+        arithmetic, the `max(0, …)` floor (a length penalty never drives a score negative), and
+        that a gated essay contributes 0.
+  - 4.3 Stage 4 aggregator (LLM): async `grade_essays(row, length_penalty_e1, length_penalty_e2,
+        prompt_e1, prompt_e2, client, cfg) -> Stage4Result`. Calls Task D for both essays
+        (concurrency handled by the client), applies 4.2, and reduces to a verdict — `REJECTED` if
+        gibberish OR off-topic on either essay, with `primary_reason` naming the failing essay/gate
+        in deterministic fail-fast order (gibberish → relevance). Fills the audit `essay_relevance`
+        block and the Task-D `gibberish` finding, and the `EssaySubscores` (e1/e2/total). A Task-D
+        `LLMParseFailure` (after the client's retry) → `NEEDS_REVIEW` with reason `LLM_PARSE_FAILURE`,
+        never a rejection. `FakeLLMClient` tests, no spend: reject-on-either-essay, parse-failure
+        routing, total-score composition, and that an off-topic essay yields no score.
 - **Phase 5 — Coursework bonus (Stage 5, Task C)**
   - Decompose courses, classify cs/math/data/other, normalize grades, <80% ignored, additive cap
 - **Phase 6 — School bonus + resume stub (Stages 7, 6)**
@@ -159,8 +188,9 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - (none)
 
 ## Next Up
-- [ ] Phase 4 — Essay LLM grading (Stage 4, Task D): gibberish → relevance gate → quality;
-      apply soft length + grammar penalties; `essay_relevance` audit block
+- [ ] Phase 4.1 — Task D prompt (`prompts/task_d.py`) + `scoring/` package; §8.3 template, pure
+- [ ] Phase 4.2 — `score_one_essay` post-processing math (gates + penalties, pure, no LLM)
+- [ ] Phase 4.3 — `grade_essays` Stage 4 aggregator (LLM, mocked): verdict + subscores + audit blocks
 - [ ] Phase 5 — Coursework bonus (Stage 5, Task C)
 - [ ] Phase 6 — School bonus + resume stub (Stages 7, 6)
 
@@ -175,6 +205,8 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - Phase 2:   `uv run pytest tests/gates/test_essays.py`
 - Phase 3:   `uv run pytest tests/gates/test_gpa.py` (deterministic normalize, Task A/B mocked
   fallback, gradient endpoints, gate branches, and the §12 GPA invariants)
+- Phase 4:   `uv run pytest tests/scoring/test_essays.py` (Task D post-processing math, mocked
+  Task D aggregator: reject-on-either-essay, parse-failure → NEEDS_REVIEW, total-score composition)
 - Phase 7:   `uv run pytest tests/scoring/test_aggregate.py` (covers all §12 invariants)
 - Phase 8:   `uv run pytest tests/test_pipeline.py` (synthetic CSV end-to-end)
 
@@ -274,6 +306,18 @@ Structural facts only — never real applicant content.
   and the scale/route thresholds (the ≈4.5 "route to Task A" line, /5 and /10 handling) will live
   in a new `gpa.normalization` CONFIG block — they are magic numbers and belong in config.yaml,
   not logic. Hard line preserved: an unresolvable/blank scale is `NEEDS_REVIEW`, never `REJECTED`.
+- **Phase 4 breakdown (plan-time):** split Stage 4 into 4.1 Task D prompt, 4.2 pure per-essay
+  post-processing math, 4.3 the LLM aggregator — same pattern as Phases 2–3 (isolate the LLM call
+  so the §8.3 scoring math is zero-spend testable). Decision: the Task D **PROMPT is the resolved
+  CSV essay-question header** (what the applicant actually answered), plumbed from
+  `HeaderResolution.role_to_header` by the orchestrator and passed into `grade_essays` — *not* a
+  frozen copy in config. Rationale: most faithful, zero owner dependency, immune to per-cycle form
+  drift; avoids storing question content as a "magic string." `essay1`/`essay2` are required roles,
+  so the header is always present after a successful ingest. Consequence: no config or
+  `openissue.md` change is needed for Phase 4; the only new wiring is the orchestrator reading the
+  two resolved headers (Phase 8). Gibberish is detected in *both* Stage 1 (cheap deterministic) and
+  Task D (LLM backstop, per the Phase 0.3 model deviation); Stage 4 contributes its finding to the
+  audit `gibberish` block and the pipeline reconciles the two.
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
