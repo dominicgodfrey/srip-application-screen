@@ -5,8 +5,25 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from better_profanity import Profanity
+
 from srip_filter.config import EssayLengthConfig
-from srip_filter.gates.essays import LengthResult, length_gate, word_count
+from srip_filter.gates.essays import (
+    LengthResult,
+    build_profanity_matcher,
+    length_gate,
+    load_profanity_wordlist,
+    profanity_gate,
+    word_count,
+)
+
+
+def _write_wordlist(tmp_path: Path, lines: list[str]) -> Path:
+    path = tmp_path / "profanity.txt"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
 
 
 def _essay(n: int) -> str:
@@ -102,3 +119,74 @@ def test_empty_essay_hard_fails():
 def test_penalty_never_exceeds_max_below_hard_min():
     # Even past the hard bound the reported penalty is clamped (hard_fail carries the rejection).
     assert length_gate(_essay(10), CFG).length_penalty == CFG.len_penalty_max
+
+
+# ------------------------------------------------------------------ profanity wordlist loader
+
+
+def test_load_wordlist_parses_block_and_allow(tmp_path):
+    path = _write_wordlist(
+        tmp_path,
+        [
+            "# a comment",
+            "",
+            "FrobSlur",
+            "another-term",
+            "ALLOW: breast",
+            "allow: rectal",  # case-insensitive prefix
+            "   ",  # blank-ish, ignored
+        ],
+    )
+    wl = load_profanity_wordlist(path)
+    assert wl.block == ("frobslur", "another-term")  # lowercased, comments/blanks dropped
+    assert wl.allow == ("breast", "rectal")
+
+
+def test_load_wordlist_missing_file_is_empty(tmp_path):
+    wl = load_profanity_wordlist(tmp_path / "does_not_exist.txt")
+    assert wl.block == ()
+    assert wl.allow == ()
+
+
+# ------------------------------------------------------------------ profanity gate behaviour
+
+
+def test_gate_clean_text_no_hit():
+    matcher = build_profanity_matcher(Path("does_not_exist.txt"))  # == default list
+    assert profanity_gate("I research breast cancer biology in my free time", matcher) is False
+
+
+def test_gate_empty_or_whitespace_no_hit():
+    matcher = Profanity()
+    assert profanity_gate("", matcher) is False
+    assert profanity_gate("   \n\t ", matcher) is False
+
+
+def test_block_term_is_flagged(tmp_path):
+    path = _write_wordlist(tmp_path, ["frobslur"])
+    matcher = build_profanity_matcher(path)
+    assert profanity_gate("you are a frobslur", matcher) is True
+    assert profanity_gate("you are fine", matcher) is False
+
+
+def test_block_term_matches_whole_token_only(tmp_path):
+    path = _write_wordlist(tmp_path, ["frob"])
+    matcher = build_profanity_matcher(path)
+    # "frob" as a standalone token hits; embedded in a longer word it does not.
+    assert profanity_gate("what a frob", matcher) is True
+    assert profanity_gate("this is frobnication", matcher) is False
+
+
+def test_block_term_leetspeak_normalized(tmp_path):
+    path = _write_wordlist(tmp_path, ["frobslur"])
+    matcher = build_profanity_matcher(path)
+    assert profanity_gate("you fr0bslur", matcher) is True
+
+
+def test_allow_term_exempts_default_clinical_word(tmp_path):
+    # 'anal' is in better-profanity's default list but is also a clinical/anatomical prefix.
+    assert Profanity().contains_profanity("anal") is True  # sanity: default flags it
+
+    path = _write_wordlist(tmp_path, ["ALLOW: anal"])
+    matcher = build_profanity_matcher(path)
+    assert profanity_gate("anal fissure recovery affected my term", matcher) is False
