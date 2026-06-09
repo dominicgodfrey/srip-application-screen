@@ -8,11 +8,11 @@ Phase 5 — Coursework bonus (Stage 5, Task C)
 
 ## Active Sub-Task
 Phase 4 complete (all of Stage 4: Task D essay grading — prompt, pure post-processing math, LLM
-aggregator). Next: Phase 5 — coursework bonus. Task C decomposes the free-text `Relevant
-Coursework` cell into courses, classifies each cs/math/data/other, normalizes grades, ignores
-anything <80%, and contributes an additive (never-negative) bonus capped at `coursework_bonus_max`.
-Same isolate-the-LLM pattern: a pure deterministic bonus calc from the Task C output, plus a thin
-LLM-touching orchestrator, so the math is zero-spend testable. Empty coursework → 0, no penalty.
+aggregator). Phase 5 now broken into 5.1–5.3 (see Phase Map). Next action: Phase 5.1 — create
+`llm/prompts/task_c.py` (`SYSTEM` per §8.4 + `user_prompt(coursework_cell)` emitting
+`COURSEWORK_RAW: """{…}"""`). Pure template only; the deterministic bonus math is 5.2 and the LLM
+aggregator is 5.3. No new config — `CourseworkConfig` + the `CourseItem`/`TaskCOutput` models
+already exist from Phase 0.
 
 ---
 
@@ -126,8 +126,36 @@ with the API. Build in order — fail-fast ordering means later stages depend on
         `LLMParseFailure` (after the client's retry) → `NEEDS_REVIEW` with reason `LLM_PARSE_FAILURE`,
         never a rejection. `FakeLLMClient` tests, no spend: reject-on-either-essay, parse-failure
         routing, total-score composition, and that an off-topic essay yields no score.
-- **Phase 5 — Coursework bonus (Stage 5, Task C)**
-  - Decompose courses, classify cs/math/data/other, normalize grades, <80% ignored, additive cap
+- **Phase 5 — Coursework bonus (Stage 5, Task C)** — `src/srip_filter/scoring/coursework.py`,
+  tests `tests/scoring/test_coursework.py`. Runs only on Stage 1–4 survivors and is **bonus-only**:
+  it can add to `final_score`, never subtract, and can never change a `REJECTED`/`NEEDS_REVIEW`
+  outcome (PRD §0.3/§7). Empty `Relevant Coursework` → 0 bonus, no LLM call (56 applicants have it
+  blank). Task C decomposes the free-text cell into courses, classifies each cs/math/data/other,
+  and normalizes each grade to a 0–100 percentage; the deterministic layer then applies the config
+  weights + the 80% floor and sums a capped bonus. The `courses[]` array is stored verbatim in the
+  audit `coursework_breakdown` for the future UI. No new config — `CourseworkConfig` and the
+  `CourseItem`/`TaskCOutput` models already exist (Phase 0). Same isolate-the-LLM pattern as Phases
+  3–4: the bonus math (5.2) is pure/zero-spend; only 5.3 spends a token. `FakeLLMClient` tests.
+  - 5.1 Task C prompt (no scoring logic): `llm/prompts/task_c.py` with `SYSTEM` (§8.4 essence —
+        faithful course/grade extraction, classify cs > math > data > other, normalize each grade
+        to a 0–100 pct via the §6 scale logic, decompose so a human reviewer sees each course) and
+        `user_prompt(coursework_cell)` emitting `COURSEWORK_RAW: """{…}"""`. Pure template; tests
+        assert the rendered shape. Uses the mini tier (`task_c` model — mechanical extraction).
+  - 5.2 Pure coursework bonus math (no LLM): `coursework_bonus(out: TaskCOutput, cfg) ->
+        CourseworkResult` implementing §8.4/§5. **Weights + counts are recomputed from config**, not
+        trusted from the LLM: `weight = course_weight_<category>` and
+        `counts = category != "other" and grade_pct >= course_min_grade_pct`; then
+        `per_course = weight * (grade_pct/100) * course_unit` for counting courses, summed and
+        `min(coursework_bonus_max, …)`, floored at 0 (never negative). Returns the bonus + the
+        reconciled `courses[]` for the audit. Pure; tests cover weight-by-category, the <80% and
+        `other` zero-outs, the cap, never-negative, and empty→0.
+  - 5.3 Stage 5 aggregator (LLM): async `score_coursework(row, client, cfg) -> Stage5Result`.
+        Empty cell → `(bonus=0, courses=[])` with no token spent. Otherwise call Task C, apply 5.2,
+        and fill `Scores.coursework_bonus` + `AuditRecord.coursework_breakdown`. A Task C
+        `LLMParseFailure` (after the client's retry) → `bonus=0` + an audit error note, **never**
+        `NEEDS_REVIEW`/`REJECTED` — a bonus-only signal that cannot be extracted is neutral, and the
+        applicant stays scoreable on the required signals (GPA + essays). `FakeLLMClient` tests, no
+        spend: empty→no call, parse-failure→0 bonus, bonus composition, cap.
 - **Phase 6 — School bonus + resume stub (Stages 7, 6)**
   - `rapidfuzz` match against `resources/schools.json`; resume = inert `0` stub (clearly TODO)
 - **Phase 7 — Aggregation, ranking, outputs (Stages 8–9)**
@@ -196,7 +224,9 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - (none)
 
 ## Next Up
-- [ ] Phase 5 — Coursework bonus (Stage 5, Task C): decompose + classify + grade-normalize + cap
+- [ ] Phase 5.1 — Task C prompt (`prompts/task_c.py`); §8.4 template, pure
+- [ ] Phase 5.2 — `coursework_bonus` math (weights/counts recomputed from config, cap, pure, no LLM)
+- [ ] Phase 5.3 — `score_coursework` Stage 5 aggregator (LLM, mocked): empty→0, parse-failure→0, cap
 - [ ] Phase 6 — School bonus + resume stub (Stages 7, 6)
 - [ ] Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
 
@@ -213,6 +243,9 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   fallback, gradient endpoints, gate branches, and the §12 GPA invariants)
 - Phase 4:   `uv run pytest tests/scoring/test_essays.py` (Task D post-processing math, mocked
   Task D aggregator: reject-on-either-essay, parse-failure → NEEDS_REVIEW, total-score composition)
+- Phase 5:   `uv run pytest tests/scoring/test_coursework.py` (Task C prompt shape, the pure bonus
+  math — weights, <80%/`other` zero-out, cap, never-negative, empty→0 — and the mocked aggregator:
+  empty→no call, parse-failure→0 bonus, bonus composition)
 - Phase 7:   `uv run pytest tests/scoring/test_aggregate.py` (covers all §12 invariants)
 - Phase 8:   `uv run pytest tests/test_pipeline.py` (synthetic CSV end-to-end)
 
@@ -336,6 +369,20 @@ Structural facts only — never real applicant content.
   `e2_grade`) for the Phase 8 audit `reasons` builder; they are `None` on a parse failure. The
   Task-D `gibberish` HitGate is Stage 4's own finding — Phase 8 reconciles it with the Stage 1
   cheap-heuristic gibberish block (both can independently reject).
+
+- **Phase 5 breakdown (plan-time):** split Stage 5 into 5.1 Task C prompt, 5.2 pure bonus math,
+  5.3 the LLM aggregator — same isolate-the-LLM pattern as Phases 3–4. Two decisions to settle in
+  implementation: (a) the deterministic layer **recomputes** each course's `category_weight` and
+  `counts` from `CourseworkConfig` (using the LLM's `category` + `grade_pct`) rather than trusting
+  the model's own `category_weight`/`counts` fields — keeps the weights and the 80% floor tunable
+  in `config.yaml` and authoritative, mirroring how Phase 3 computes `gpa_points` deterministically
+  instead of asking the model. (b) A Task C `LLMParseFailure` yields **0 bonus + an audit error
+  note, not `NEEDS_REVIEW`** — coursework is bonus-only (§0.3: "non-required signals can only add,
+  never subtract"; absence is neutral), so a failed *bonus* extraction must not block an applicant
+  who is fully scoreable on the required signals (GPA + essays). This narrows §8's general
+  "parse failure → NEEDS_REVIEW" to gating/required tasks (B, D); bonus-only tasks (C, and the
+  future resume) degrade to 0. No new config — `CourseworkConfig` and the `CourseItem`/`TaskCOutput`
+  models already exist (Phase 0).
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
