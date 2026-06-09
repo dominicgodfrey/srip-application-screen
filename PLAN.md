@@ -8,10 +8,13 @@ Phase 6 — School bonus + resume stub (Stages 7, 6)
 
 ## Active Sub-Task
 Phase 5 complete (all of Stage 5: Task C coursework bonus — prompt, pure recompute-from-config
-bonus math, LLM aggregator). Next action: Phase 6 — `rapidfuzz` school match against
-`resources/schools.json` (Stage 7, bonus-only) + the inert `resume_bonus = 0` stub (Stage 6,
-clearly TODO). `SchoolConfig`/`ResumeConfig`, `resources/schools.json`, and the `SchoolMatch`
-audit model already exist from Phase 0.
+bonus math, LLM aggregator). Phase 6 now broken into 6.1–6.3 (see Phase Map). Next action: Phase
+6.1 — `scoring/school.py` `match_school(institution, cfg) -> SchoolMatch`: load
+`resources/schools.json` (cached), normalize the institution string, `rapidfuzz` token-set match
+(name + aliases) ≥ `fuzzy_match_threshold`, both-lists tiebreak = higher-bonus list; blank /
+"High School" / no match → empty `SchoolMatch`. Bonus mapping is 6.2, the resume stub is 6.3.
+No new config — `SchoolConfig`/`ResumeConfig`, `resources/schools.json`, and `SchoolMatch` already
+exist from Phase 0.
 
 ---
 
@@ -155,8 +158,38 @@ with the API. Build in order — fail-fast ordering means later stages depend on
         `NEEDS_REVIEW`/`REJECTED` — a bonus-only signal that cannot be extracted is neutral, and the
         applicant stays scoreable on the required signals (GPA + essays). `FakeLLMClient` tests, no
         spend: empty→no call, parse-failure→0 bonus, bonus composition, cap.
-- **Phase 6 — School bonus + resume stub (Stages 7, 6)**
-  - `rapidfuzz` match against `resources/schools.json`; resume = inert `0` stub (clearly TODO)
+- **Phase 6 — School bonus (Stage 7) + resume stub (Stage 6)** — `src/srip_filter/scoring/school.py`
+  + `src/srip_filter/scoring/resume.py`, tests `tests/scoring/test_school.py` +
+  `tests/scoring/test_resume.py`. Both stages are **bonus-only** (PRD §0.3/§7): they add to
+  `final_score`, never subtract, and can never change a `REJECTED`/`NEEDS_REVIEW` outcome.
+  Entirely **deterministic — no LLM**, so no isolate-the-LLM split; instead Phase 6 splits along the
+  two stages (match → bonus → stub). "High School" (364/466 applicants), blanks, and unmatched
+  schools → 0, **never negative**. No new config — `SchoolConfig` (`bonus_us_top20`,
+  `bonus_intl_top50`, `fuzzy_match_threshold`), `ResumeConfig` (`bonus_max=0`), the `SchoolMatch`
+  audit model, and `resources/schools.json` (Top-20 US + Top-50 Intl, names + aliases, frozen for
+  Summer 2026) all already exist from Phase 0.
+  - 6.1 School resource loader + normalize + fuzzy match (PRD §7.1/§13): `match_school(institution,
+        cfg) -> SchoolMatch`. Load `resources/schools.json` once (`lru_cache`); normalize the
+        institution string (lowercase, strip punctuation/extra whitespace); build the candidate set
+        per list = each school's `name` + its `aliases`; score with `rapidfuzz` token-set ratio and
+        keep the best match ≥ `fuzzy_match_threshold` (88). Blank / "High School" / no
+        ≥-threshold match → empty `SchoolMatch` (`matched_name=None, list=None, fuzzy_score=0`).
+        **Both-lists tiebreak:** a school matching in both lists is reported under the list whose
+        configured bonus is higher (so `SchoolMatch.list` is authoritative and 6.2 is a pure
+        lookup); `match_school` takes `cfg` and owns this resolution. Returns the matched canonical
+        name + list + score for the audit + human verification. Pure (given the cached resource);
+        tests over exact, alias (`MIT`, `UCLA`), light misspelling, "High School" → no match, blank
+        → no match, and a both-lists school → higher-bonus list.
+  - 6.2 School bonus + Stage 7 aggregator (PRD §7.1): `score_school(row, cfg) -> Stage7Result`.
+        Runs 6.1, then maps the matched list to its bonus (`us_top20` → `bonus_us_top20`,
+        `intl_top50` → `bonus_intl_top50`); `list is None` → 0. Fills `Scores.school_bonus` + the
+        `SchoolMatch` audit block. Deterministic; tests: US-top20 → its bonus, Intl-top50 → its
+        bonus, unmatched/"High School"/blank → 0, bonus is never negative, and (a §12 invariant) a
+        school bonus can neither manufacture nor rescue a `REJECTED` outcome.
+  - 6.3 Resume inert stub (Stage 6, PRD §7.2 — DEFERRED): `resume_bonus(row, cfg) -> float`
+        returning `cfg.resume.bonus_max` (0) for everyone, with a clearly-labeled `TODO` that the
+        slot exists but PDF download + parsing is unplanned. Absence of a resume is neutral (148
+        blanks). Pure; one test: always 0 regardless of the `Resume (optional)` cell.
 - **Phase 7 — Aggregation, ranking, outputs (Stages 8–9)**
   - Compose `final_score`; deterministic tiebreaker; emit `decisions.jsonl`, `ranked.csv`,
     `rejected.csv`, `needs_review.csv`, `summary.json`; all §12 invariant tests
@@ -232,7 +265,9 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - (none)
 
 ## Next Up
-- [ ] Phase 6 — School bonus + resume stub (Stages 7, 6)
+- [ ] Phase 6.1 — `match_school` (load + normalize + rapidfuzz match; both-lists → higher-bonus list)
+- [ ] Phase 6.2 — `score_school` Stage 7 aggregator (list → bonus; unmatched → 0; never negative)
+- [ ] Phase 6.3 — resume inert stub (Stage 6): `resume_bonus` → 0, clearly TODO
 - [ ] Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
 
 ## How to Verify Completed Work
@@ -251,6 +286,9 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - Phase 5:   `uv run pytest tests/scoring/test_coursework.py` (Task C prompt shape, the pure bonus
   math — weights, <80%/`other` zero-out, cap, never-negative, empty→0 — and the mocked aggregator:
   empty→no call, parse-failure→0 bonus, bonus composition)
+- Phase 6:   `uv run pytest tests/scoring/test_school.py tests/scoring/test_resume.py` (exact/alias/
+  fuzzy/both-lists match + normalization; list→bonus mapping; unmatched/"High School"/blank→0;
+  never-negative; bonus can't change an outcome; resume stub always 0)
 - Phase 7:   `uv run pytest tests/scoring/test_aggregate.py` (covers all §12 invariants)
 - Phase 8:   `uv run pytest tests/test_pipeline.py` (synthetic CSV end-to-end)
 
@@ -400,6 +438,23 @@ Structural facts only — never real applicant content.
   "parse failure → NEEDS_REVIEW" to gating/required tasks (B, D); bonus-only tasks (C, and the
   future resume) degrade to 0. No new config — `CourseworkConfig` and the `CourseItem`/`TaskCOutput`
   models already exist (Phase 0).
+
+- **Phase 6 breakdown (plan-time):** Phase 6 is entirely deterministic (no LLM), so there is no
+  isolate-the-LLM split like Phases 3–5; instead split along the two stages — 6.1 `match_school`
+  (load + normalize + rapidfuzz), 6.2 `score_school` (list → bonus, Stage 7 aggregator), 6.3 the
+  inert resume stub (Stage 6). Decisions to settle in implementation: (a) **`match_school` owns the
+  both-lists tiebreak**, not the bonus layer — a school appearing in both `us_top20` and
+  `intl_top50` is reported under whichever list has the higher *configured* bonus, so `match_school`
+  takes `cfg` and `SchoolMatch.list` is authoritative; 6.2 then becomes a pure `list → bonus`
+  lookup. (b) The schools resource is **loaded once via `lru_cache`** (committed, non-PII), matching
+  the profanity-matcher pattern from Phase 2.2; a single canonical candidate set = each school's
+  `name` + its `aliases`. (c) **"High School", blanks, and any below-threshold match → empty
+  `SchoolMatch` + 0 bonus, never negative** — the §0.3 "absence is neutral / can only add" invariant,
+  and a §12 invariant test asserts a school bonus can neither manufacture nor rescue a `REJECTED`
+  outcome. (d) The resume stub returns `ResumeConfig.bonus_max` (0) for everyone with a clear `TODO`
+  — the slot exists but PDF download + parsing stays unplanned (PRD §7.2). No new config or owner
+  dependency — `SchoolConfig`, `ResumeConfig`, `SchoolMatch`, and `resources/schools.json` already
+  exist (Phase 0).
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
