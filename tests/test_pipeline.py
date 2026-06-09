@@ -30,6 +30,8 @@ from srip_filter.llm.client import FakeLLMClient, LLMParseFailure
 from srip_filter.models import (
     CourseItem,
     DedupInfo,
+    TaskAOutput,
+    TaskBOutput,
     TaskCOutput,
     TaskDOutput,
 )
@@ -273,6 +275,8 @@ _CSV_HEADERS = [
     "What is your email address?",
     "Please list your undergraduate institution of study below.",
     "GPA",
+    "If your cumulative GPA is below 3.3, please briefly describe any extenuating circumstances "
+    "that may have affected it.",
     "What motivates you to apply to Track 2 of the SRIP program? (100-350 words)",
     "Track 2 is designed as a foundation for future research. (100-350 words)",
     "Relevant Coursework",
@@ -285,6 +289,10 @@ _H = dict(
     email="What is your email address?",
     institution="Please list your undergraduate institution of study below.",
     gpa="GPA",
+    gpa_explanation=(
+        "If your cumulative GPA is below 3.3, please briefly describe any extenuating "
+        "circumstances that may have affected it."
+    ),
     essay1="What motivates you to apply to Track 2 of the SRIP program? (100-350 words)",
     essay2="Track 2 is designed as a foundation for future research. (100-350 words)",
     coursework="Relevant Coursework",
@@ -314,6 +322,7 @@ def _csv_row(
     coursework: str = "AP Computer Science A: A",
     affirmation: str = "I affirm this is truthful.",
     institution: str = "High School",
+    gpa_explanation: str = "",
 ) -> dict[str, str]:
     return {
         _H["sid"]: sid,
@@ -321,6 +330,7 @@ def _csv_row(
         _H["last"]: last,
         _H["email"]: email or f"{sid}@example.com",
         _H["gpa"]: gpa,
+        _H["gpa_explanation"]: gpa_explanation,
         _H["essay1"]: essay1,
         _H["essay2"]: essay2,
         _H["coursework"]: coursework,
@@ -371,3 +381,147 @@ async def test_grade_batch_dedups_surplus_email_before_grading() -> None:
     assert len(result.records) == 1  # only the first of the shared email survives ingest
     assert result.ingest_report.total_rows_read == 2
     assert len(result.ingest_report.duplicate_email_dropped) == 1
+
+
+# ------------------------------------------------------------------------------------------------
+# 8.4 — end-to-end §12 invariant + fail-fast spend suite
+# ------------------------------------------------------------------------------------------------
+# The full PRD §12 pass over grade_batch (deferred from Phase 7), plus the fail-fast guarantee that
+# a Stage-1/affirmation stop spends zero LLM tokens. Scripted FakeLLMClient, no real spend.
+
+
+def _full_handler(*, task_b_outcome: str = "rank"):  # type: ignore[no-untyped-def]
+    """A handler covering every task; Task B's verdict is parametrized for the low-GPA cases."""
+
+    def handler(task, user, schema):  # type: ignore[no-untyped-def]
+        if task == "task_d":
+            return _task_d()
+        if task == "task_c":
+            return _task_c()
+        if task == "task_b":
+            return TaskBOutput(
+                explanation_adequate=task_b_outcome == "rank",
+                strength_of_reason=0.8,
+                realistic=True,
+                severity_vs_reason_balanced=True,
+                recommended_outcome=task_b_outcome,  # type: ignore[arg-type]
+                rationale="scripted",
+            )
+        if task == "task_a":
+            return TaskAOutput(
+                normalized_gpa=3.5,
+                original_scale="weighted_gt_4",
+                conversion_method="scripted",
+                confidence="med",
+                requires_manual_review=False,
+                rationale="scripted",
+            )
+        raise AssertionError(f"unexpected task {task}")
+
+    return handler
+
+
+async def test_inv1_optional_absence_never_reduces_score() -> None:
+    # Two identical applicants except optional bonuses; absence is neutral, never a deduction.
+    rows = [
+        _csv_row(
+            "s-bonus",
+            coursework="AP Computer Science A: A",
+            institution="Massachusetts Institute of Technology",
+        ),
+        _csv_row("s-nobonus", coursework="", institution="High School"),
+    ]
+    client = FakeLLMClient(APP, handler=_good_handler)
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    by_id = {r.submission_id: r for r in result.records}
+    bonus, nobonus = by_id["s-bonus"], by_id["s-nobonus"]
+
+    # The no-bonus applicant's score is exactly the required-signal total — bonuses default to 0,
+    # never below it; the bonus applicant scores strictly higher.
+    assert nobonus.final_score == pytest.approx(
+        nobonus.scores.gpa_points + nobonus.scores.essay.total
+    )
+    assert bonus.final_score > nobonus.final_score
+    assert nobonus.scores.coursework_bonus == 0.0 and nobonus.scores.school_bonus == 0.0
+
+
+async def test_inv2_bonus_never_changes_a_rejection() -> None:
+    # A Stage-1 reject carrying strong optional signals stays REJECTED, unscored, unranked.
+    rows = [
+        _csv_row(
+            "s-rej",
+            essay1="too short",
+            coursework="AP Computer Science A: A",
+            institution="Massachusetts Institute of Technology",
+        )
+    ]
+    client = FakeLLMClient(APP, handler=_good_handler)
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    rec = result.records[0]
+    assert rec.outcome == "REJECTED"
+    assert rec.final_score is None and rec.rank is None
+
+
+async def test_inv3_every_rejection_names_the_gate() -> None:
+    rows = [
+        _csv_row("s-len", essay1="too short"),  # length gate
+        _csv_row("s-gpa", gpa="2.4", gpa_explanation=""),  # GPA gate, no explanation
+    ]
+    client = FakeLLMClient(APP, handler=_good_handler)
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    rejected = [r for r in result.records if r.outcome == "REJECTED"]
+    assert len(rejected) == 2
+    assert all(r.primary_reason for r in rejected)  # §12 #3: the failing gate is always named
+
+
+async def test_inv4_low_gpa_points_only_with_approval_and_at_gradient_bottom() -> None:
+    rows = [
+        _csv_row("s-low-ok", gpa="2.5", gpa_explanation="Documented family medical emergency."),
+        _csv_row("s-low-no", gpa="2.5", gpa_explanation=""),
+    ]
+    client = FakeLLMClient(APP, handler=_full_handler(task_b_outcome="rank"))
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    by_id = {r.submission_id: r for r in result.records}
+
+    # Approved (Task B rank): RANKED, but the sub-3.0 deficit clamps GPA points to the bottom (0).
+    assert by_id["s-low-ok"].outcome == "RANKED"
+    assert by_id["s-low-ok"].scores.gpa_points == 0.0
+    # No explanation: no points, and rejected rather than scored.
+    assert by_id["s-low-no"].outcome == "REJECTED"
+
+
+async def test_inv4_low_gpa_rejected_when_task_b_rejects() -> None:
+    rows = [_csv_row("s-low", gpa="2.5", gpa_explanation="I was simply not interested.")]
+    client = FakeLLMClient(APP, handler=_full_handler(task_b_outcome="reject"))
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    assert result.records[0].outcome == "REJECTED"
+    assert result.records[0].final_score is None
+
+
+async def test_inv5_ranking_is_stable_across_reruns() -> None:
+    rows = [
+        _csv_row("s-hi", gpa="4.0"),
+        _csv_row("s-mid", gpa="3.5"),
+        _csv_row("s-lo", gpa="3.1"),
+    ]
+    blob = _csv_bytes(rows)
+    first = await grade_batch(blob, FakeLLMClient(APP, handler=_good_handler), APP)
+    second = await grade_batch(blob, FakeLLMClient(APP, handler=_good_handler), APP)
+    # A fresh client (cold cache) each run still produces byte-identical artifacts.
+    assert first.ranked_csv == second.ranked_csv
+    assert first.decisions_jsonl == second.decisions_jsonl
+    # Sanity: higher GPA ranks ahead of lower.
+    ranks = {r.submission_id: r.rank for r in first.records}
+    assert ranks["s-hi"] < ranks["s-mid"] < ranks["s-lo"]
+
+
+async def test_failfast_stage1_reject_spends_zero_tokens_in_batch() -> None:
+    client = FakeLLMClient(APP, handler=_good_handler)
+    await grade_batch(_csv_bytes([_csv_row("s-short", essay1="too short")]), client, APP)
+    assert client.calls == []  # nothing past the Stage-1 hard gate
+
+
+async def test_failfast_affirmation_route_spends_zero_tokens_in_batch() -> None:
+    client = FakeLLMClient(APP, handler=_good_handler)
+    await grade_batch(_csv_bytes([_csv_row("s-aff", affirmation="")]), client, APP)
+    assert client.calls == []  # the affirmation check precedes every LLM stage
