@@ -76,3 +76,9 @@ llm:
   max_concurrency: 8       # bound for the asyncio.Semaphore around LLM calls
   max_retries: 2
   request_timeout_s: 60.0
+
+# API edge caps (Phase 9) — the stateless FastAPI shell. Magic numbers, not in the handlers.
+api:
+  max_upload_bytes: 26214400  # 25 MiB cap on the uploaded CSV body -> 413 above this
+  max_rows: 2000              # parsed-row cap (PRD scale target) -> 413/422 above this
+  job_ttl_seconds: 3600       # finished job + in-memory results evicted after this (or on download)

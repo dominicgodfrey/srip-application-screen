@@ -135,6 +135,20 @@ class LlmConfig(_Strict):
     request_timeout_s: float = 60.0
 
 
+class ApiConfig(_Strict):
+    """Edge caps for the stateless FastAPI shell (Phase 9).
+
+    These are magic numbers and belong in config, not the request handlers. ``max_upload_bytes``
+    bounds the multipart body; ``max_rows`` caps the parsed CSV (~2000, PRD §12 scale target);
+    ``job_ttl_seconds`` is how long a finished job (with its in-memory PII-bearing results) lives
+    before the sweeper evicts it — a download evicts it immediately regardless.
+    """
+
+    max_upload_bytes: int = 26_214_400  # 25 MiB — comfortably fits ~2000 rows with long essays
+    max_rows: int = 2000
+    job_ttl_seconds: float = 3600.0  # 1 hour; results are discarded on download or at TTL
+
+
 class AppConfig(_Strict):
     """All tunable knobs. Defaults mirror PRD §10.3 exactly."""
 
@@ -146,6 +160,7 @@ class AppConfig(_Strict):
     school: SchoolConfig = Field(default_factory=SchoolConfig)
     resume: ResumeConfig = Field(default_factory=ResumeConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
+    api: ApiConfig = Field(default_factory=ApiConfig)
 
 
 class Secrets(BaseSettings):
