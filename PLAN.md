@@ -4,14 +4,16 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 9 — API layer (FastAPI, stateless) — IN PROGRESS
+Phase 9 — API layer (FastAPI, stateless) — COMPLETE
 
 ## Active Sub-Task
-Phase 9.1 complete (app scaffold + `ApiConfig` + `JobRegistry` + `/health`). Next action:
-**Phase 9.2** — `POST /jobs` (multipart CSV): enforce the size cap (→413), the row cap (→413/422),
-and §2 header validation (`HeaderValidationError` → 422; unreadable CSV → 422; never 500); on
-success create a job, schedule `grade_batch` as an `asyncio` background task, return 202 + `job_id`.
-Build one `OpenAILLMClient` at app startup from config/secrets; tests inject a `FakeLLMClient`.
+Phase 9 complete (the full stateless FastAPI shell: `/health`, `POST /jobs` upload+validation+
+background kickoff, `GET /jobs/{id}` polling, `GET /jobs/{id}/results/{artifact}` download,
+`DELETE /jobs/{id}` discard, and the TTL sweeper). The transport-agnostic core has exactly one
+HTTP-free seam — the optional `progress` callback on `grade_batch`. Next action: **Phase 10** —
+the React + Vite SPA frontend (FUTURE; not an immediate concern). No backend work remains unless
+the owner supplies the open dependencies (OPENAI_API_KEY, curated profanity list) or schedules
+the deferred resume parser.
 
 ---
 
@@ -400,15 +402,22 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       in-memory `BatchResult`, TTL eviction + discard-after-download, lockless single-loop),
       `schemas.py` (JobCreated/JobStatus/ErrorResponse/HealthResponse), `main.py` `create_app`
       factory + `/health`; tests over registry lifecycle/sweep + JobStatus + health (commit: 6c75924).
+- [x] Phase 9.2 — `POST /jobs`: `read_upload_capped` (streaming 413), `validate_csv` (parseability/
+      header/row-cap → 422/413, never 500), `run_job` background task awaiting `grade_batch`; one
+      `OpenAILLMClient` built at startup via lifespan, `FakeLLMClient` injected in tests; added
+      python-multipart to the api extra; status codes as int literals (commit: 7f6d002).
+- [x] Phase 9.3 — `GET /jobs/{id}` polling + status; the one HTTP-free core seam: optional
+      `progress(rows_done, rows_total)` callback on `grade_batch` (default None) → live poll
+      progress; failed job → safe message; 404 unknown/evicted (commit: 586e27a).
+- [x] Phase 9.4 — `GET /jobs/{id}/results/{artifact}` (five artifacts, Enum path param → 422 on
+      bad name; 409 before-done; 404 unknown), `DELETE /jobs/{id}` discard (→204/404), background
+      `sweeper_loop` (lifespan-managed, `api.job_sweep_seconds`) for TTL eviction (commit: bf3b275).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 9.2 — `POST /jobs` upload + validation (caps, header) + background kickoff
-- [ ] Phase 9.3 — `GET /jobs/{id}` progress polling + status (+ `grade_batch` progress callback)
-- [ ] Phase 9.4 — result download + lifecycle/TTL eviction
-- [ ] Phase 10 — Frontend SPA (future)
+- [ ] Phase 10 — Frontend SPA (future): React + Vite — upload, render each audit record, download results
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
@@ -432,8 +441,10 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - Phase 7:   `uv run pytest tests/scoring/test_aggregate.py tests/test_outputs.py` (score
   composition, deterministic ranking + tiebreaker, the five output artifacts, and all §12 invariants)
 - Phase 8:   `uv run pytest tests/test_pipeline.py` (synthetic CSV end-to-end)
-- Phase 9:   `uv sync --extra api && uv run pytest tests/api/test_api.py` (registry lifecycle/TTL,
-  JobStatus projection, `/health`; FastAPI `TestClient`, no LLM spend)
+- Phase 9:   `uv sync --extra api && uv run pytest tests/api/` (registry lifecycle/TTL + health
+  (test_api), upload validation/caps 413/422/503 (test_upload), polling + run_job failure + the
+  core progress callback (test_status), artifact download/409/404 + DELETE discard + sweeper
+  (test_download); FastAPI `TestClient`, injected `FakeLLMClient`, no LLM spend)
 
 ---
 
@@ -737,6 +748,54 @@ Structural facts only — never real applicant content.
   introduced. `JobState` is a `StrEnum` (py311+) so it serializes to its string value for free.
   `fastapi`/`uvicorn` is the `api` optional-dependency extra — run `uv sync --extra api` before the
   API suite (CI/deploy installs it; the core suite doesn't need it).
+
+- **Phase 9.2 (implementation):** `read_upload_capped` streams the multipart body in 1 MiB chunks
+  and aborts with 413 the moment it passes `max_upload_bytes` (peak memory = cap + one chunk) — no
+  reliance on a client-supplied `Content-Length`. `validate_csv` parses the CSV **once at the edge**
+  (via the Stage-0 `read_csv_records`/`validate_headers`, so edge and core agree on "valid"); the
+  CSV is then parsed **again** inside `grade_batch` (Stage 0). That double-parse is deliberate —
+  it keeps the core untouched and a re-parse of a ≤25 MiB blob is cheap next to LLM grading. Order
+  of checks = cost order: parseability (`ValueError`/`UnicodeDecodeError`, covers pandas
+  `EmptyDataError`/`ParserError` which subclass `ValueError`) → 422; header contract
+  (`HeaderValidationError`) → 422; row cap → 413. **Never 500** for a bad upload (PRD Privacy).
+  Status codes are **plain int literals** (413/422) not `fastapi.status.*` — Starlette renamed the
+  413/422 constants and the old names warn on access; literals stay correct across the supported
+  FastAPI range. **`File` is `Annotated[UploadFile, File()]`** (not a default arg) to satisfy ruff
+  B008. The real `OpenAILLMClient` is built **once in the lifespan** (not at import, so importing
+  `api.main` never needs an API key); if a test injects a client, the lifespan skips the build, so
+  the whole suite is zero-spend. Background tasks are held in an `app.state.background_tasks` set
+  (strong refs) with a done-callback discard, so a fire-and-forget `asyncio.create_task` isn't GC'd
+  mid-run. A missing client at request time → 503 (only reachable if startup was skipped without an
+  injected client). `run_job` captures any whole-run failure as a **safe** generic message (never
+  PII/stack trace) and always stamps `finished_at` (starts the TTL clock); per-row errors are
+  already absorbed inside the pipeline, so reaching the `except` means an unexpected whole-run
+  failure (e.g. `grade_batch`'s re-ingest hitting a `HeaderValidationError`).
+
+- **Phase 9.3 (implementation):** the **one HTTP-free core touch** is an optional
+  `progress: Callable[[int,int],None] | None = None` on `grade_batch` (default keeps the signature
+  compatible; the core never imports the API). It fires `(0, total)` after ingest and `(done,
+  total)` after each row, ending at `(total, total)`. Safe under the concurrent `asyncio.gather`
+  because the `nonlocal done` increments happen at `await` boundaries on the single event loop — no
+  data race, no lock. `run_job` passes a closure writing `rows_done`/`rows_total` onto the `Job`,
+  so the poll reflects live progress. (Note: under the sync `FakeLLMClient` a whole batch can finish
+  in one loop turn, so HTTP tests usually observe QUEUED→SUCCEEDED; the *core* progress test asserts
+  the full tick sequence directly.) `GET /jobs/{id}` returns the lifecycle + progress and, once
+  `SUCCEEDED`, the run `summary`; a failed job surfaces `state="failed"` + the safe message; unknown/
+  evicted id → 404.
+
+- **Phase 9.4 (implementation):** **discard-after-download is explicit, not per-artifact.** There
+  are five artifacts, so auto-evicting on the first download would strand the other four — instead
+  `GET …/results/{artifact}` is **non-evicting** (all five retrievable) and the client calls
+  `DELETE /jobs/{id}` once it has saved everything (→ 204; a double-discard is an honest 404). The
+  background `sweeper_loop` (lifespan-managed task, interval = new `api.job_sweep_seconds`, default
+  300 s) is the automatic TTL backstop so PII isn't held even if the client never deletes. The
+  artifact name is an **`ArtifactName` StrEnum path param** so FastAPI rejects an unknown name with
+  422 and self-documents the valid set in OpenAPI; the `summary` dict is JSON-encoded on the way
+  out, the four string artifacts served verbatim, each with its content type +
+  `Content-Disposition: attachment; filename=…`. Download before `SUCCEEDED` (queued/running/failed)
+  → 409; unknown/evicted job → 404. The `ttl_seconds=0` sweeper test makes every job immediately
+  expired so one tick evicts deterministically (no long sleep). **New config key**
+  `api.job_sweep_seconds` (the sweep interval is a magic number → config, like the other caps).
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
