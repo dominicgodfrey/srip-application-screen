@@ -4,15 +4,15 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 3 — GPA normalization + gate (Stages 2–3)
+Phase 4 — Essay LLM grading (Stage 4, Task D)
 
 ## Active Sub-Task
-Phase 2 complete (all of Stage 1 essay gates). Phase 3 now broken into 3.1–3.4 (see Phase Map).
-Next action: Phase 3.1 — deterministic GPA normalizer in `src/srip_filter/gates/gpa.py`:
-`normalize_gpa_deterministic(raw, cfg)` → `GpaNormalization` (clean 4.0, §6.1 percentage table,
-/5 and /10 scales, trailing-label strip; `needs_llm` flag when it can't confidently resolve).
-Add a `gpa.normalization` CONFIG block (percentage→4.0 table + scale/route thresholds) to
-config.py + config.yaml. Pure functions, no LLM; tests over the messy §2 GPA cases.
+Phase 3 complete (all of Stages 2–3: GPA normalize + gate, deterministic + Task A/B). Next:
+Phase 4 — essay LLM grading in `src/srip_filter/scoring/essays.py` (Task D). Per essay, in order:
+gibberish check (LLM backstop) → relevance gate (off-topic → REJECTED) → quality score; then
+apply the soft length penalty (carried from Stage 1) and the Task D grammar penalty. Add a
+`prompts/task_d.py` template; `essay_score = max(0, quality - grammar_penalty - length_penalty)`;
+total = e1 + e2. Wire the `essay_relevance` audit block. `FakeLLMClient` tests, no API spend.
 
 ---
 
@@ -145,16 +145,24 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       ≥`min_signals`); `GibberishConfig` added to config.py + config.yaml (commit: a6bbffe).
 - [x] Phase 2.4 — Stage 1 aggregator `run_essay_gates(row, cfg)` → `Stage1Result` (verdict +
       audit Gates blocks + carried soft penalties); integration tests (commit: d6c429a).
+- [x] Phase 3.1 — deterministic GPA normalizer `normalize_gpa_deterministic` (clean 4.0, % /100,
+      /5 linear, /10 ×10 table, label-strip; `needs_llm` routing; blank → manual review) +
+      `gpa.normalization` CONFIG (percentage table + clean-scale ceiling) (commit: e46b685).
+- [x] Phase 3.2 — Task A prompt + async `normalize_gpa` orchestration (deterministic-first, Task A
+      only for `needs_llm`; caps at gpa_max; unplaceable/parse-failure → manual review) (commit: db59947).
+- [x] Phase 3.3 — `gpa_points` gradient (§8.1) + `gpa_gate_deterministic` (→ `GpaGateResult`;
+      needs_review / pass+points / reject branches; Task B branch returns None) (commit: eb713d8).
+- [x] Phase 3.4 — Task B prompt + async `assess_gpa` Stage 2–3 aggregator (sub-3.0 + explanation
+      → Task B rank/reject; bottom-of-gradient points; §12 GPA invariants) (commit: 98c3bca).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 3.1 — deterministic GPA normalizer (4.0 / %, /5, /10, label-strip) + gpa CONFIG
-- [ ] Phase 3.2 — Task A fallback + `normalize_gpa` orchestration (LLM, mocked)
-- [ ] Phase 3.3 — GPA points gradient (§8.1) + deterministic gate paths
-- [ ] Phase 3.4 — Task B low-GPA adequacy + Stage 2–3 aggregator `assess_gpa` (LLM, mocked)
-- [ ] Phase 4 — Essay LLM grading (Stage 4, Task D)
+- [ ] Phase 4 — Essay LLM grading (Stage 4, Task D): gibberish → relevance gate → quality;
+      apply soft length + grammar penalties; `essay_relevance` audit block
+- [ ] Phase 5 — Coursework bonus (Stage 5, Task C)
+- [ ] Phase 6 — School bonus + resume stub (Stages 7, 6)
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
@@ -245,6 +253,20 @@ Structural facts only — never real applicant content.
   LLM stages, not these. Reject if either essay hard-fails length OR profanity/gibberish hits
   either essay; soft length penalties are carried to Stage 4, never a rejection. `primary_reason`
   names the failing gate in fail-fast order (length → profanity → gibberish) so no reject is silent.
+- **Phase 3 (implementation):** `GpaNormalization` (frozen dataclass) is the Stage-2 result with a
+  three-way disposition — *resolved* / *needs_llm* (route to Task A, no decision) / *manual review*
+  (empty cell, no token). Scale routing line: a bare numeric in `[0, gpa_max]` is clean 4.0; a bare
+  value **> gpa_max (4.0) routes to Task A** (treated as weighted) — this supersedes the PRD §6.1
+  "> 4.5" example, honoring "weighted >4.0 → Task A". Fraction scale is chosen by denominator
+  (100→%, 10→×10 table, 5→linear, 4→4-point; other→Task A). A truly empty cell goes straight to
+  manual review (no LLM); a non-empty unparseable string (e.g. `N/A`, IGCSE letters) routes to
+  Task A, which then returns `requires_manual_review`. The §6.1 percentage→4.0 table is data in
+  `config.yaml` (`gpa.normalization`), table-driven incl. the "<73 → linear toward 0" segment
+  (anchored on the lowest band). `gpa_points` clamps below threshold to 0, so an approved sub-3.0
+  applicant lands at the gradient bottom (0) — deficit reflected, never erased (§8.1). The Stage-3
+  verdict is an internal `GpaGateVerdict` (`pass`/`reject`/`needs_review`), distinct from the final
+  `Outcome` (a `pass` is not yet RANKED — essays still run). Hard line held throughout: an
+  unresolvable/blank scale and every LLM parse failure → `needs_review`, never `REJECTED`.
 - **Phase 3 breakdown (plan-time):** split Stage 2–3 into 3.1 deterministic normalize, 3.2 Task A
   fallback, 3.3 points-gradient + deterministic gate paths, 3.4 Task B + aggregator. Rationale:
   isolate the two LLM-touching sub-tasks (A, B) so the deterministic majority (most GPAs resolve
