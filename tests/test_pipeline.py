@@ -8,6 +8,9 @@ land in later commits with a scripted :class:`FakeLLMClient`.
 
 from __future__ import annotations
 
+import csv
+import io
+
 import pytest
 
 from srip_filter.config import AppConfig
@@ -30,7 +33,7 @@ from srip_filter.models import (
     TaskCOutput,
     TaskDOutput,
 )
-from srip_filter.pipeline import affirmation_ok, build_base_record, grade_one
+from srip_filter.pipeline import affirmation_ok, build_base_record, grade_batch, grade_one
 
 APP = AppConfig()
 
@@ -256,3 +259,115 @@ async def test_unexpected_error_becomes_needs_review() -> None:
     assert rec.outcome == "NEEDS_REVIEW"
     assert rec.decided_at_stage == "error"
     assert rec.errors and "KeyError" in rec.errors[0]
+
+
+# ------------------------------------------------------------------------------------------------
+# 8.3 — grade_batch end-to-end on a synthetic CSV (mocked LLM)
+# ------------------------------------------------------------------------------------------------
+
+# Minimal header set resolving every required role + affirmation/institution/coursework.
+_CSV_HEADERS = [
+    "Submission ID",
+    "Student First Name",
+    "Student Last Name",
+    "What is your email address?",
+    "Please list your undergraduate institution of study below.",
+    "GPA",
+    "What motivates you to apply to Track 2 of the SRIP program? (100-350 words)",
+    "Track 2 is designed as a foundation for future research. (100-350 words)",
+    "Relevant Coursework",
+    "I affirm that the information provided above is truthful and accurate.",
+]
+_H = dict(
+    sid="Submission ID",
+    first="Student First Name",
+    last="Student Last Name",
+    email="What is your email address?",
+    institution="Please list your undergraduate institution of study below.",
+    gpa="GPA",
+    essay1="What motivates you to apply to Track 2 of the SRIP program? (100-350 words)",
+    essay2="Track 2 is designed as a foundation for future research. (100-350 words)",
+    coursework="Relevant Coursework",
+    affirmation="I affirm that the information provided above is truthful and accurate.",
+)
+
+
+def _csv_bytes(rows: list[dict[str, str]]) -> bytes:
+    """Render rows (header→value dicts) into a UTF-8 CSV blob for grade_batch."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=_CSV_HEADERS)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({header: row.get(header, "") for header in _CSV_HEADERS})
+    return buffer.getvalue().encode("utf-8")
+
+
+def _csv_row(
+    sid: str,
+    *,
+    first: str = "Ann",
+    last: str = "Lee",
+    email: str = "",
+    gpa: str = "3.8",
+    essay1: str = _GOOD_ESSAY,
+    essay2: str = _GOOD_ESSAY_2,
+    coursework: str = "AP Computer Science A: A",
+    affirmation: str = "I affirm this is truthful.",
+    institution: str = "High School",
+) -> dict[str, str]:
+    return {
+        _H["sid"]: sid,
+        _H["first"]: first,
+        _H["last"]: last,
+        _H["email"]: email or f"{sid}@example.com",
+        _H["gpa"]: gpa,
+        _H["essay1"]: essay1,
+        _H["essay2"]: essay2,
+        _H["coursework"]: coursework,
+        _H["affirmation"]: affirmation,
+        _H["institution"]: institution,
+    }
+
+
+async def test_grade_batch_spans_three_outcomes() -> None:
+    rows = [
+        _csv_row("s-good"),  # survivor → RANKED
+        _csv_row("s-short", essay1="too short"),  # Stage-1 length hard fail → REJECTED
+        _csv_row("s-aff", affirmation=""),  # unchecked affirmation → NEEDS_REVIEW
+    ]
+    client = FakeLLMClient(APP, handler=_good_handler)
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+
+    by_id = {r.submission_id: r for r in result.records}
+    assert by_id["s-good"].outcome == "RANKED"
+    assert by_id["s-short"].outcome == "REJECTED"
+    assert by_id["s-aff"].outcome == "NEEDS_REVIEW"
+
+    assert result.summary["counts"] == {
+        "total": 3,
+        "RANKED": 1,
+        "REJECTED": 1,
+        "NEEDS_REVIEW": 1,
+    }
+    # The lone survivor is ranked #1 and scored; the other two stay unscored.
+    assert by_id["s-good"].rank == 1
+    assert by_id["s-good"].final_score is not None
+    assert by_id["s-short"].final_score is None and by_id["s-aff"].final_score is None
+
+    # Artifacts are in-memory and reconcile with the records.
+    assert result.decisions_jsonl.count("\n") == 3
+    assert result.ranked_csv.count("\n") == 2  # header + one RANKED row
+    assert result.ingest_report.total_rows_read == 3
+    assert result.ingest_report.kept_count == 3
+
+
+async def test_grade_batch_dedups_surplus_email_before_grading() -> None:
+    rows = [
+        _csv_row("s1", email="dup@example.com"),
+        _csv_row("s2", email="dup@example.com"),  # surplus email → dropped at ingest
+    ]
+    client = FakeLLMClient(APP, handler=_good_handler)
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    assert len(result.records) == 1  # only the first of the shared email survives ingest
+    assert result.ingest_report.total_rows_read == 2
+    assert len(result.ingest_report.duplicate_email_dropped) == 1

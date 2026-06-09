@@ -27,12 +27,34 @@ the deterministic affirmation check, isolated so they are fully testable without
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
+from pathlib import Path
+from typing import IO
+
 from .config import AppConfig
 from .gates.essays import run_essay_gates
 from .gates.gpa import assess_gpa
-from .ingest import AFFIRMATION, ESSAY1, ESSAY2, ApplicantRow, DedupedRow, HeaderResolution
+from .ingest import (
+    AFFIRMATION,
+    ESSAY1,
+    ESSAY2,
+    ApplicantRow,
+    DedupedRow,
+    HeaderResolution,
+    IngestReport,
+    ingest_csv,
+)
 from .llm.client import BaseLLMClient
 from .models import AuditRecord, HitGate, ProgramChoices
+from .outputs import (
+    build_summary,
+    decisions_jsonl,
+    needs_review_csv,
+    ranked_csv,
+    rejected_csv,
+)
+from .scoring.aggregate import rank_records
 from .scoring.coursework import score_coursework
 from .scoring.essays import grade_essays
 from .scoring.resume import resume_bonus
@@ -224,3 +246,64 @@ async def grade_one(
         return _terminal(
             record, "NEEDS_REVIEW", _STAGE_ERROR, "Unexpected error during grading"
         )
+
+
+# ================================================================================================
+# 8.3 — Batch runner (LLM)
+# ================================================================================================
+# grade_batch runs Stage 0 ingest, fires grade_one for every kept row concurrently (the client's
+# Semaphore bounds real concurrency, so no extra pool here), then Stage 8 ranking and Stage 9
+# output emission. It returns everything in memory — the records, the five artifacts, and the
+# Stage-0 report — so a stateless API can stream them back and never persist to disk.
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """Everything a run produces, in memory (PRD §10/§12 + the Stage-0 report).
+
+    ``records`` are the finalized, ranked :class:`AuditRecord`s (the source of truth). The four
+    string artifacts and ``summary`` dict are the §12 deliverables; ``ingest_report`` accounts for
+    every input row dropped or flagged before grading so a shrinking row count is explained.
+    Nothing is written to disk — :func:`~srip_filter.outputs.write_outputs` is the opt-in path.
+    """
+
+    records: list[AuditRecord]
+    decisions_jsonl: str
+    ranked_csv: str
+    rejected_csv: str
+    needs_review_csv: str
+    summary: dict
+    ingest_report: IngestReport
+
+
+async def grade_batch(
+    source: str | Path | bytes | IO[bytes],
+    client: BaseLLMClient,
+    cfg: AppConfig,
+) -> BatchResult:
+    """Run the whole pipeline over an uploaded CSV: ingest → grade → rank → emit (Stages 0-9).
+
+    Stage 0 :func:`~srip_filter.ingest.ingest_csv` reads, validates, de-identifies, and dedups the
+    upload (raising :class:`~srip_filter.ingest.HeaderValidationError` if the columns can't satisfy
+    the contract — the API turns that into a 4xx). Every kept row is graded by :func:`grade_one`
+    concurrently (bounded by the client's semaphore); per-row ``try/except`` means one bad row
+    becomes a ``NEEDS_REVIEW`` record, never an aborted batch. Stage 8
+    :func:`~srip_filter.scoring.aggregate.rank_records` composes scores and assigns ranks, then the
+    Stage 9 serializers build the five in-memory artifacts. Stateless — nothing is persisted.
+    """
+    ingest = ingest_csv(source)
+    records = list(
+        await asyncio.gather(
+            *(grade_one(deduped, ingest.resolution, client, cfg) for deduped in ingest.rows)
+        )
+    )
+    rank_records(records, cfg)
+    return BatchResult(
+        records=records,
+        decisions_jsonl=decisions_jsonl(records),
+        ranked_csv=ranked_csv(records),
+        rejected_csv=rejected_csv(records),
+        needs_review_csv=needs_review_csv(records),
+        summary=build_summary(records),
+        ingest_report=ingest.report,
+    )
