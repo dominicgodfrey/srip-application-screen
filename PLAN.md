@@ -4,16 +4,14 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
+Phase 8 — Orchestration (`pipeline.grade_batch`) — COMPLETE
 
 ## Active Sub-Task
-Phase 7 complete (Stages 8–9). Phase 8 (orchestration, `pipeline.py`) now broken into 8.1–8.4
-(see Phase Map). Next action: **Phase 8.1** — deterministic, pure orchestration glue in
-`src/srip_filter/pipeline.py`: `build_base_record(deduped, resolution) -> AuditRecord` (identity /
-email / `program_choices` / `dedup` block, no scoring) and the affirmation validity check
-`affirmation_ok(row, resolution) -> bool` (unchecked truthfulness affirmation → `NEEDS_REVIEW`, but
-**only when the affirmation column actually resolved** — an absent column must not flag everyone).
-Pure, zero-spend tests (`tests/test_pipeline.py`). No new config, no owner dependency.
+Phase 8 complete (Stages 0→9 wired in `pipeline.py`: `build_base_record`/`affirmation_ok`,
+`grade_one`, `grade_batch`/`BatchResult`, full §12 + fail-fast suite). Next action: **Phase 9** —
+the thin stateless FastAPI shell (`api/main.py`) over `pipeline.grade_batch`: upload CSV → in-memory
+background job → progress poll → downloadable results; input validation + size/row caps; nothing
+persisted. Confirm the active Phase 9 sub-task split with the user before starting.
 
 ---
 
@@ -354,16 +352,26 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       deterministic; tests pin columns/sort/reconciliation (commit: 75e7ee1).
 - [x] Phase 7.4 — consolidated §12 invariant suite over a synthetic three-outcome population
       (`tests/scoring/test_aggregate.py`); all five invariants asserted end-to-end (commit: f1ac0b6).
+- [x] Phase 8.1 — `pipeline.build_base_record` (identity/dedup/program_choices assembly, RANKED
+      placeholder) + `affirmation_ok` (unchecked → NEEDS_REVIEW, only when the column resolved);
+      pure zero-spend tests (commit: c8f795a).
+- [x] Phase 8.2 — `grade_one` per-applicant fail-fast runner: sequences Stage 1 → affirmation →
+      GPA → essays → bonuses, fills every audit block, stamps terminal outcome on the first gate to
+      fire, survivor → RANKED/`final_score=None`; per-row try/except → NEEDS_REVIEW; `llm_calls`
+      inferred from stage results. `FakeLLMClient` branch tests (commit: db52f73).
+- [x] Phase 8.3 — `grade_batch` batch runner + `BatchResult`: ingest → concurrent `grade_one`
+      (`asyncio.gather`, client semaphore bounds concurrency) → `rank_records` → in-memory Stage 9
+      artifacts + `IngestReport`; synthetic-CSV integration tests (commit: c3dc6bc).
+- [x] Phase 8.4 — end-to-end §12 invariant + fail-fast spend suite (`tests/test_pipeline.py`): all
+      five PRD §12 invariants over `grade_batch`, plus zero-token assertions for Stage-1/affirmation
+      stops (commit: 0557ed3).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 8.1 — `build_base_record` + `affirmation_ok` (deterministic glue, pure)
-- [ ] Phase 8.2 — `grade_one` per-applicant fail-fast runner (LLM)
-- [ ] Phase 8.3 — `grade_batch` batch runner (ingest → concurrent grade_one → rank → emit)
-- [ ] Phase 8.4 — end-to-end §12 invariant + fail-fast spend suite (`tests/test_pipeline.py`)
-- [ ] Phase 9 — API layer (FastAPI, stateless)
+- [ ] Phase 9 — API layer (FastAPI, stateless): upload → in-memory job → poll → download; caps
+- [ ] Phase 10 — Frontend SPA (future)
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
@@ -631,6 +639,26 @@ Structural facts only — never real applicant content.
   it). Concurrency is bounded by the existing `llm.max_concurrency` semaphore inside the client, so
   `grade_batch` can `asyncio.gather` all rows without its own pool. No new config, no owner
   dependency — Phase 8 is pure wiring over stages that already exist.
+
+- **Phase 8 (implementation):** `grade_one` fills the audit Gates blocks for *every* path (Stage 1
+  is token-free so all three blocks are always set before the reject check; GPA/essay-relevance
+  blocks set as those stages run). Terminal outcomes go through a small `_terminal` helper that also
+  force-clears `final_score`/`rank` to `None`, so a REJECTED/NEEDS_REVIEW row is never carried with a
+  stale score. **`llm_calls` is inferred from stage *results*, not by instrumenting the client**
+  (the stage fns don't report calls): `gpa.assessment.source == "llm"` ⇒ `task_a`, a populated
+  `explanation_eval` ⇒ `task_b`, reaching Stage 4 ⇒ `task_d_e1`+`task_d_e2` (both attempted even on a
+  parse failure), a non-empty coursework cell ⇒ `task_c`. `decided_at_stage` labels: `stage1` /
+  `affirmation` / `stage3` (both GPA reject and the unscalable-scale needs_review) / `stage4` /
+  `stage8` (survivor) / `error` (the per-row isolation fallback). The gibberish audit block is the
+  reconciliation `HitGate(stage1.gibberish.hit or task_d.gibberish.hit)` (both can independently
+  reject; a Stage-1 gibberish hit would already have rejected, so at Stage 4 only Task D can flip it).
+  Survivors are stamped `RANKED` + `decided_at_stage="stage8"` + `primary_reason="Survived all gates"`
+  with `final_score=None`; `rank_records` then fills score + rank. The outer `try/except` only ever
+  catches *unexpected* errors — `LLMParseFailure` is already converted to verdicts inside the GPA/
+  essay stages, so it never reaches it. `BatchResult` bundles records + the four string artifacts +
+  the summary dict + the `IngestReport`, all in memory (the Phase 9 API streams them; `write_outputs`
+  is the opt-in disk path). The 8.4 suite drives Task B end-to-end via a scripted handler, so the
+  test CSV harness adds the extenuating-circumstances column.
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
