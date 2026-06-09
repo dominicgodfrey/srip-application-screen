@@ -4,15 +4,15 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 4 — Essay LLM grading (Stage 4, Task D)
+Phase 5 — Coursework bonus (Stage 5, Task C)
 
 ## Active Sub-Task
-Phase 3 complete (all of Stages 2–3: GPA normalize + gate, deterministic + Task A/B). Phase 4 now
-broken into 4.1–4.3 (see Phase Map). Next action: Phase 4.1 — create `src/srip_filter/scoring/`
-and `llm/prompts/task_d.py` (`SYSTEM` per §8.3 + `user_prompt(prompt_text, word_count, essay_text)`
-emitting the §8.3 template). `prompt_text` is the resolved CSV essay-question header (supplied by
-the orchestrator from `HeaderResolution.role_to_header`) — no new config, no owner dependency.
-Pure template only; the post-processing math is 4.2 and the LLM aggregator is 4.3.
+Phase 4 complete (all of Stage 4: Task D essay grading — prompt, pure post-processing math, LLM
+aggregator). Next: Phase 5 — coursework bonus. Task C decomposes the free-text `Relevant
+Coursework` cell into courses, classifies each cs/math/data/other, normalizes grades, ignores
+anything <80%, and contributes an additive (never-negative) bonus capped at `coursework_bonus_max`.
+Same isolate-the-LLM pattern: a pure deterministic bonus calc from the Task C output, plus a thin
+LLM-touching orchestrator, so the math is zero-spend testable. Empty coursework → 0, no penalty.
 
 ---
 
@@ -183,16 +183,22 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       needs_review / pass+points / reject branches; Task B branch returns None) (commit: eb713d8).
 - [x] Phase 3.4 — Task B prompt + async `assess_gpa` Stage 2–3 aggregator (sub-3.0 + explanation
       → Task B rank/reject; bottom-of-gradient points; §12 GPA invariants) (commit: 98c3bca).
+- [x] Phase 4.1 — Task D prompt (`prompts/task_d.py`): §8.3 SYSTEM (gibberish-first, relevance
+      gate, ESL-safe slight grammar penalty) + `user_prompt(prompt_text, word_count, essay_text)`;
+      `prompt_text` = resolved CSV essay-question header. Pure template (commit: ebb4cd0).
+- [x] Phase 4.2 + 4.3 — `scoring/essays.py`: `score_one_essay` post-processing math (gates +
+      `max(0, quality − grammar − length)`, capped) and `grade_essays` Stage 4 aggregator (both
+      essays via Task D; reject on gibberish/off-topic either essay, fail-fast gibberish→relevance;
+      parse-failure → NEEDS_REVIEW; essay_relevance/gibberish audit blocks + subscores). Landed
+      together (shared module + test file) (commit: 2b86820).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 4.1 — Task D prompt (`prompts/task_d.py`) + `scoring/` package; §8.3 template, pure
-- [ ] Phase 4.2 — `score_one_essay` post-processing math (gates + penalties, pure, no LLM)
-- [ ] Phase 4.3 — `grade_essays` Stage 4 aggregator (LLM, mocked): verdict + subscores + audit blocks
-- [ ] Phase 5 — Coursework bonus (Stage 5, Task C)
+- [ ] Phase 5 — Coursework bonus (Stage 5, Task C): decompose + classify + grade-normalize + cap
 - [ ] Phase 6 — School bonus + resume stub (Stages 7, 6)
+- [ ] Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
@@ -318,6 +324,18 @@ Structural facts only — never real applicant content.
   two resolved headers (Phase 8). Gibberish is detected in *both* Stage 1 (cheap deterministic) and
   Task D (LLM backstop, per the Phase 0.3 model deviation); Stage 4 contributes its finding to the
   audit `gibberish` block and the pipeline reconciles the two.
+
+- **Phase 4 (implementation):** `grade_essays` fires both Task D calls via `asyncio.gather` (the
+  client's semaphore bounds real concurrency). Cache key is left at the default (the rendered user
+  prompt = PROMPT + WORD_COUNT + ESSAY), so identical (prompt, essay) pairs dedup but two different
+  prompts over the same essay text do NOT collide — safer than keying on essay text alone. Caveat:
+  the in-run cache is not lock-guarded, so two *concurrent* identical inputs can both miss and
+  double-call against the real API; with the sync `FakeLLMClient` no suspension occurs so the
+  dedup test is deterministic. Same-applicant identical essays are rare, so this is accepted (matches
+  the existing stateless cache design). `Stage4Result` carries the raw `TaskDOutput`s (`e1_grade`/
+  `e2_grade`) for the Phase 8 audit `reasons` builder; they are `None` on a parse failure. The
+  Task-D `gibberish` HitGate is Stage 4's own finding — Phase 8 reconciles it with the Stage 1
+  cheap-heuristic gibberish block (both can independently reject).
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
