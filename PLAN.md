@@ -4,14 +4,14 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 2 — Essay deterministic gates (Stage 1)
+Phase 3 — GPA normalization + gate (Stages 2–3)
 
 ## Active Sub-Task
-Phase 1 complete (all of Stage 0 ingest). Phase 2 now broken into 2.1–2.4 (see Phase Map).
-Next action: Phase 2.1 — word count + length gate in `src/srip_filter/gates/essays.py`:
-`word_count` (`re.findall(r"[\w'-]+")`) and `length_gate(text, cfg)` returning
-`(wc, ok, hard_fail, length_penalty)` — hard fail outside [hard_min, hard_max], soft penalty
-ramp across the off-target band, zero inside 100–350.
+Phase 2 complete (all of Stage 1 essay gates — length / profanity / gibberish / aggregator).
+Next action: Phase 3 — GPA normalization + gate in `src/srip_filter/gates/gpa.py`. Start with
+the deterministic normalizer (clean 4.0 values, percentage table §6.1, /5 and /10 scales,
+trailing-label strip) producing the §6.1 output dict; route ambiguous/non-standard values to
+LLM Task A, sub-3.0-with-explanation to Task B, and unscalable → `NEEDS_REVIEW` (never reject).
 
 ---
 
@@ -99,16 +99,23 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       (commit: ba4c780).
 - [x] Phase 1.5 — `ingest_csv()` orchestration (kept rows + IngestReport) + synthetic-CSV
       integration tests (commit: 21992c5).
+- [x] Phase 2.0 — `resources/profanity.txt` placeholder scaffold (inert; format documented) +
+      openissue.md #3 update (commit: a48f6cd).
+- [x] Phase 2.1 — essay length gate: `word_count` + `length_gate` → `LengthResult`
+      (hard fail outside [hard_min, hard_max]; soft penalty ramp; pure) (commit: 90822d3).
+- [x] Phase 2.2 — profanity gate: `profanity_gate` over better-profanity (default list + BLOCK
+      − ALLOW from `resources/profanity.txt`); cached matcher; leetspeak/whole-token (commit: 4ed0bc9).
+- [x] Phase 2.3 — gibberish heuristics: `gibberish_gate` (4 dictionary-free signals, hit at
+      ≥`min_signals`); `GibberishConfig` added to config.py + config.yaml (commit: a6bbffe).
+- [x] Phase 2.4 — Stage 1 aggregator `run_essay_gates(row, cfg)` → `Stage1Result` (verdict +
+      audit Gates blocks + carried soft penalties); integration tests (commit: d6c429a).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 2.1 — word count + length gate (hard fail vs soft-penalty band)
-- [ ] Phase 2.2 — profanity gate (better-profanity + medical allowlist + leetspeak)
-- [ ] Phase 2.3 — gibberish heuristics (≥2 cheap signals, no dictionary) + gibberish CONFIG
-- [ ] Phase 2.4 — Stage 1 aggregator `run_essay_gates` + integration tests
 - [ ] Phase 3 — GPA normalization + gate (deterministic + Task A/B)
+- [ ] Phase 4 — Essay LLM grading (Stage 4, Task D)
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
@@ -178,6 +185,25 @@ Structural facts only — never real applicant content.
   and the dropped surplus (honest "this applicant submitted more than once"); only `kept`
   differs. Name-pair duplicates are flagged on all members and kept (never merged) — by
   construction they have distinct emails (siblings / re-applications).
+- **Profanity matcher (Phase 2.2):** the gate = better-profanity's DEFAULT list + curated BLOCK
+  terms − medical/anatomical ALLOW terms from `resources/profanity.txt`. ALLOW exemption is
+  applied by filtering `Profanity.CENSOR_WORDSET` (a plain list; `VaryingString == str` powers
+  the match) rather than depending on better-profanity's internal wordlist reader — fewer
+  internals coupled. The default list already contains clinical-ish entries (e.g. `anal`), so
+  the allowlist is genuinely load-bearing. Matcher built once per run (`lru_cache`); a missing
+  file → empty BLOCK/ALLOW → behaves exactly as the default list. File format: `#` comments,
+  `ALLOW:`-prefixed allow terms, every other line a block term (lowercased).
+- **Gibberish signals (Phase 2.3):** four dictionary-free signals — long consonant run (`y`
+  counted as a vowel to avoid false runs like "rhythm"), low letter entropy, long identical-char
+  run, low unique-word ratio. A hit needs ≥`min_signals` (default 2) so ordinary awkward/ESL
+  prose (≤1 signal) passes; text below `min_chars` letters is never flagged. Thresholds live in
+  the new `gibberish` CONFIG section. `GibberishResult` keeps per-signal booleans for the audit
+  trail; only `.hit` gates.
+- **Stage 1 verdict (Phase 2.4):** all three checks are token-free, so `run_essay_gates` computes
+  *all* of them (complete audit Gates block) rather than short-circuiting — fail-fast governs the
+  LLM stages, not these. Reject if either essay hard-fails length OR profanity/gibberish hits
+  either essay; soft length penalties are carried to Stage 4, never a rejection. `primary_reason`
+  names the failing gate in fail-fast order (length → profanity → gibberish) so no reject is silent.
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
