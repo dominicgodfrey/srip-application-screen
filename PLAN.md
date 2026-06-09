@@ -4,16 +4,16 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 9 — API layer (FastAPI, stateless) — COMPLETE
+Phase 11 — Cohort assignment (PRD §11) — COMPLETE
 
 ## Active Sub-Task
-Phase 9 complete (the full stateless FastAPI shell: `/health`, `POST /jobs` upload+validation+
-background kickoff, `GET /jobs/{id}` polling, `GET /jobs/{id}/results/{artifact}` download,
-`DELETE /jobs/{id}` discard, and the TTL sweeper). The transport-agnostic core has exactly one
-HTTP-free seam — the optional `progress` callback on `grade_batch`. Next action: **Phase 10** —
-the React + Vite SPA frontend (FUTURE; not an immediate concern). No backend work remains unless
-the owner supplies the open dependencies (OPENAI_API_KEY, curated profanity list) or schedules
-the deferred resume parser.
+Phase 11 complete (the PRD §11 downstream layer, built ahead of the Phase 10 frontend): pure
+`assign_cohorts` (rank-greedy + displacement chains = maximum matching with rank priority),
+`cohort_assignments_csv`, and two synchronous what-if endpoints — `POST /jobs/{id}/cohorts`
+(chained, non-evicting) and `POST /cohorts` (re-uploaded `decisions.jsonl`), capacities as query
+params. Next action: **Phase 10** — the React + Vite SPA frontend (FUTURE; not an immediate
+concern). No backend work remains unless the owner supplies the open dependencies
+(OPENAI_API_KEY, curated profanity list) or schedules the deferred resume parser.
 
 ---
 
@@ -306,6 +306,24 @@ with the API. Build in order — fail-fast ordering means later stages depend on
         held. Tests: download each artifact; download-before-done → 409; eviction → 404.
 - **Phase 10 — Frontend SPA (FUTURE, not an immediate concern)**
   - React + Vite: upload, render each application's audit record on open, download results CSV
+- **Phase 11 — Cohort assignment (PRD §11; executes before Phase 10)** — `src/srip_filter/cohort.py`
+  + two API routes, tests `tests/test_cohort.py` + `tests/api/test_cohorts.py`. The downstream
+  layer that turns the ranked output into honors/intensive/regular placements under configurable
+  per-tier capacities. Entirely deterministic, pure, LLM-free, and instant (live what-if recompute
+  for the future frontend). Owner decisions: maximize matches (displacement chains), both entry
+  points, NEEDS_REVIEW warn-and-proceed, manual pinning deferred.
+  - 11.1 `normalize_choices` (tier-token containment parse of the messy free-text choice strings,
+        order-preserving dedupe) + cohort pydantic models (`CohortCapacities`/`CohortAssignment`/
+        `TierSummary`/`CohortSummary`/`CohortResult`) + `cohort.tiers` CONFIG section.
+  - 11.2 `assign_cohorts`: rank-greedy walk + displacement chains (augmenting paths) = maximum-
+        cardinality matching with rank priority; only `RANKED` assignable; rank-ordered waitlist;
+        `unassignable` bucket for unparseable choices; invariant tests (capacity, monotonicity,
+        determinism, 2-hop chains, weakest-displaced).
+  - 11.3 `cohort_assignments_csv` — one rank-ordered CSV across all statuses (per-tier rosters and
+        the waitlist are filters of it); summary embedded in the JSON result.
+  - 11.4 API: `POST /jobs/{id}/cohorts` (chained off a completed job, non-evicting so staff can
+        iterate capacities) + `POST /cohorts` (re-uploaded `decisions.jsonl`, the durable entry
+        point); capacities + `format=json|csv` as query params; graceful 413/422, never 500.
 
 ---
 
@@ -412,6 +430,14 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - [x] Phase 9.4 — `GET /jobs/{id}/results/{artifact}` (five artifacts, Enum path param → 422 on
       bad name; 409 before-done; 404 unknown), `DELETE /jobs/{id}` discard (→204/404), background
       `sweeper_loop` (lifespan-managed, `api.job_sweep_seconds`) for TTL eviction (commit: bf3b275).
+- [x] Phase 11.1 — `normalize_choices` (containment parse, both dash formats, repeats dedupe,
+      ambiguous/garbage dropped) + cohort models + `cohort.tiers` CONFIG (commit: 52e504e).
+- [x] Phase 11.2 — `assign_cohorts` rank-greedy + displacement chains (max matching); invariant
+      tests incl. brute-force capacity/monotonicity sweeps (commit: 52f0c12).
+- [x] Phase 11.3 — `cohort_assignments_csv` single rank-ordered artifact (commit: 0a40e31).
+- [x] Phase 11.4 — `POST /jobs/{id}/cohorts` (non-evicting what-if) + `POST /cohorts`
+      (decisions.jsonl re-upload); capacities/format query params; 404/409/413/422 edges
+      (commit: 3943b6c).
 
 ## In Progress
 - (none)
@@ -445,6 +471,9 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   (test_api), upload validation/caps 413/422/503 (test_upload), polling + run_job failure + the
   core progress callback (test_status), artifact download/409/404 + DELETE discard + sweeper
   (test_download); FastAPI `TestClient`, injected `FakeLLMClient`, no LLM spend)
+- Phase 11:  `uv run pytest tests/test_cohort.py` (normalization, assignment invariants, CSV) and
+  `uv sync --extra api && uv run pytest tests/api/test_cohorts.py` (both endpoints, lifecycle +
+  malformed-upload edges; no LLM spend)
 
 ---
 
@@ -796,6 +825,33 @@ Structural facts only — never real applicant content.
   → 409; unknown/evicted job → 404. The `ttl_seconds=0` sweeper test makes every job immediately
   expired so one tick evicts deterministically (no long sleep). **New config key**
   `api.job_sweep_seconds` (the sweep interval is a magic number → config, like the other caps).
+
+- **Phase 11 (owner decisions, this cycle):** (a) **Maximize matches** — when a student's listed
+  tiers are all full, an already-seated student may be displaced to another tier *they themselves
+  listed* to make room (single- or two-hop chains); the goal is filling cohorts to capacity, with
+  constrained (fewer-choice) students beating flexible ones for contested seats. Displacement
+  never fires to upgrade anyone's choice — only to seat an otherwise-unmatched student — and the
+  weakest (lowest-ranked) movable occupant is the one displaced. (b) **Both entry points**:
+  chained `POST /jobs/{id}/cohorts` + standalone `POST /cohorts` over a re-uploaded
+  `decisions.jsonl` (survives TTL eviction / restarts / later sessions). (c) **NEEDS_REVIEW →
+  warn and proceed** (assignment over `RANKED` only, prominent warning + count in the summary)
+  so staff can preview sizing before every review case is resolved. (d) **Manual pinning/
+  overrides deferred** to the frontend phase; the result model accommodates a future pinned-
+  assignments map non-breaking.
+- **Phase 11 (implementation):** rank-greedy + augmenting-path displacement = maximum-cardinality
+  matching with rank priority (greedy-with-augmentation processed in rank order); deterministic
+  via fixed tiebreaks (rank → submission_id; chain search explores tiers in configured order;
+  displaced occupant moves to *their* highest-listed open choice). Tier tokens are parsed by
+  case-insensitive **containment** (the form emits `Summer 2026- X` and `Summer 2026 - X`
+  inconsistently); a slot with zero or two tokens is dropped; repeated tiers dedupe (28 real
+  applicants list one tier three times). Capacities are **per-request query params, not config**
+  (`None`/omitted = unlimited) — they are the staff's live what-if knob; only the canonical
+  `cohort.tiers` token list is config. Both endpoints are synchronous (pure core, milliseconds —
+  no job/registry entry; the response is the whole result, nothing stored) and **non-evicting**
+  on the chained route so capacities can be iterated against one job. One CSV artifact
+  (`cohort_assignments.csv`, rank-ordered across assigned/waitlisted/unassignable; rosters are
+  filters of it) via `?format=csv`; JSON (`CohortResult`) is the default. decisions.jsonl
+  re-upload errors echo line numbers only, never applicant content.
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
