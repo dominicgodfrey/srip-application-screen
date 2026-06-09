@@ -4,17 +4,15 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 6 — School bonus + resume stub (Stages 7, 6)
+Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
 
 ## Active Sub-Task
-Phase 5 complete (all of Stage 5: Task C coursework bonus — prompt, pure recompute-from-config
-bonus math, LLM aggregator). Phase 6 now broken into 6.1–6.3 (see Phase Map). Next action: Phase
-6.1 — `scoring/school.py` `match_school(institution, cfg) -> SchoolMatch`: load
-`resources/schools.json` (cached), normalize the institution string, `rapidfuzz` token-set match
-(name + aliases) ≥ `fuzzy_match_threshold`, both-lists tiebreak = higher-bonus list; blank /
-"High School" / no match → empty `SchoolMatch`. Bonus mapping is 6.2, the resume stub is 6.3.
-No new config — `SchoolConfig`/`ResumeConfig`, `resources/schools.json`, and `SchoolMatch` already
-exist from Phase 0.
+Phase 6 complete (Stage 7 school bonus + Stage 6 resume stub — `scoring/school.py` `match_school`
++ `score_school`, `scoring/resume.py` `resume_bonus`). Next action: Phase 7 — compose
+`final_score` (gpa_points + essay_total + coursework_bonus + school_bonus + resume_bonus),
+deterministic tiebreaker (gpa_points → essay_total → submission timestamp), outcome assignment,
+and emit `decisions.jsonl` / `ranked.csv` / `rejected.csv` / `needs_review.csv` / `summary.json`
+(PRD §10/§12). All §12 invariant tests land here.
 
 ---
 
@@ -260,14 +258,17 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       reconciled `courses[]`) and `score_coursework` Stage 5 aggregator (empty cell → 0, no token;
       Task C otherwise; parse-failure → 0 bonus + audit error note, never NEEDS_REVIEW). Landed
       together (shared module + test file) (commit: 90a81c5).
+- [x] Phase 6.1 + 6.2 — `scoring/school.py`: `match_school` (lru_cache load of `schools.json`,
+      normalize, rapidfuzz token-set match of name+aliases ≥ threshold, both-lists tiebreak →
+      higher-bonus list) + `score_school` Stage 7 aggregator (list → bonus; unmatched/"High
+      School"/blank → 0, never negative). Landed together (shared module + test file).
+- [x] Phase 6.3 — `scoring/resume.py`: `resume_bonus` inert stub → `resume.bonus_max` (0) for
+      everyone, clearly-labeled DEFERRED TODO; test always-0.
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 6.1 — `match_school` (load + normalize + rapidfuzz match; both-lists → higher-bonus list)
-- [ ] Phase 6.2 — `score_school` Stage 7 aggregator (list → bonus; unmatched → 0; never negative)
-- [ ] Phase 6.3 — resume inert stub (Stage 6): `resume_bonus` → 0, clearly TODO
 - [ ] Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
 
 ## How to Verify Completed Work
@@ -455,6 +456,18 @@ Structural facts only — never real applicant content.
   — the slot exists but PDF download + parsing stays unplanned (PRD §7.2). No new config or owner
   dependency — `SchoolConfig`, `ResumeConfig`, `SchoolMatch`, and `resources/schools.json` already
   exist (Phase 0).
+
+- **Phase 6 (implementation):** `match_school` flattens `schools.json` once via `lru_cache` into
+  per-(name/alias) candidates tagged with the school's canonical `name` + list, then scores the
+  normalized institution against every candidate with `rapidfuzz.fuzz.token_set_ratio`, keeping
+  the **best score per canonical school** (so a short alias like `MIT`=100 wins over the long
+  full-name candidate for the same school). The winning school = `max` by `(score, name)` —
+  the canonical-name tiebreak keeps equal-score ties deterministic. Below `fuzzy_match_threshold`
+  → empty `SchoolMatch`. Both-lists tiebreak is resolved by canonical-name set membership →
+  `max` list by *configured bonus* (so Harvard/MIT/etc. report `us_top20` at 15 > `intl_top50`
+  at 12), making `SchoolMatch.list` authoritative and `score_school` a pure list→bonus lookup.
+  Normalization = lowercase + non-word→space + whitespace-collapse (matches PRD §7.1). Resume
+  stub lives in its own `scoring/resume.py` per the project structure (not folded into school.py).
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
