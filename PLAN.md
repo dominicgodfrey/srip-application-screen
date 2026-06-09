@@ -8,11 +8,12 @@ Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
 
 ## Active Sub-Task
 Phase 6 complete (Stage 7 school bonus + Stage 6 resume stub — `scoring/school.py` `match_school`
-+ `score_school`, `scoring/resume.py` `resume_bonus`). Next action: Phase 7 — compose
-`final_score` (gpa_points + essay_total + coursework_bonus + school_bonus + resume_bonus),
-deterministic tiebreaker (gpa_points → essay_total → submission timestamp), outcome assignment,
-and emit `decisions.jsonl` / `ranked.csv` / `rejected.csv` / `needs_review.csv` / `summary.json`
-(PRD §10/§12). All §12 invariant tests land here.
++ `score_school`, `scoring/resume.py` `resume_bonus`). Phase 7 now broken into 7.1–7.4 (see Phase
+Map). Next action: Phase 7.1 — `scoring/aggregate.py` `compose_final_score(scores, cfg) -> float`
+(pure sum of the five §10.1 components, each ≥ 0, none subtracted) + `finalize_score(record, cfg)`
+writing it into `AuditRecord.final_score`. Tests assert the §10.1 composition and §12 #1 (no
+optional-signal absence lowers the total). No new config — `final_score` is a pure sum of existing
+subscores.
 
 ---
 
@@ -188,9 +189,40 @@ with the API. Build in order — fail-fast ordering means later stages depend on
         returning `cfg.resume.bonus_max` (0) for everyone, with a clearly-labeled `TODO` that the
         slot exists but PDF download + parsing is unplanned. Absence of a resume is neutral (148
         blanks). Pure; one test: always 0 regardless of the `Resume (optional)` cell.
-- **Phase 7 — Aggregation, ranking, outputs (Stages 8–9)**
-  - Compose `final_score`; deterministic tiebreaker; emit `decisions.jsonl`, `ranked.csv`,
-    `rejected.csv`, `needs_review.csv`, `summary.json`; all §12 invariant tests
+- **Phase 7 — Aggregation, ranking, outputs (Stages 8–9)** — `src/srip_filter/scoring/aggregate.py`
+  (Stage 8) + `src/srip_filter/outputs.py` (Stage 9), tests `tests/scoring/test_aggregate.py` +
+  `tests/test_outputs.py`. Entirely **deterministic — no LLM**. Composes the additive `final_score`
+  for gate-survivors *only*, finalizes the three outcomes, ranks `RANKED` applicants with a
+  deterministic tiebreaker, and emits the five output artifacts (PRD §9/§10/§12). All PRD §12
+  invariants are asserted here. Split: pure composition (7.1) → outcome + ranking (7.2) → output
+  emission (7.3) → consolidated §12 invariant suite (7.4).
+  - 7.1 Pure score composition (PRD §10.1): `compose_final_score(scores: Scores, cfg) -> float`
+        summing the five components (`gpa_points + essay.total + coursework_bonus + school_bonus +
+        resume_bonus`), each ≥ 0, none subtracted; plus a thin `finalize_score(record, cfg)` writing
+        it into `AuditRecord.final_score`. Pure; tests assert the §10.1 composition and §12 #1 (no
+        optional-signal absence — coursework/school/resume = 0 — ever lowers the total).
+  - 7.2 Outcome finalization + deterministic ranking (Stage 8 aggregator, PRD §10.2):
+        `rank_records(records, cfg) -> list[AuditRecord]`. Each gate-survivor not already
+        `REJECTED`/`NEEDS_REVIEW` gets `final_score` (7.1) and `outcome="RANKED"`; sort `RANKED`
+        by `final_score` desc with the deterministic tiebreaker (`gpa_points` → `essay.total` →
+        `submission_id`, since the §2 contract carries no submission timestamp) and assign `rank`
+        1..N. `REJECTED`/`NEEDS_REVIEW` keep `final_score=None`, `rank=None`. **No acceptance
+        cutoff** — the full ranked list is the deliverable (§11). Pure; tests cover order, the
+        tiebreaker chain, §12 #2 (no bonus changes a `REJECTED` outcome) and #5 (ranking stable
+        across reruns).
+  - 7.3 Output emission (Stage 9, PRD §10/§12): `outputs.py` — pure serializers returning in-memory
+        artifacts (no forced disk write, for the stateless API): `decisions_jsonl(records) -> str`,
+        `ranked_csv`, `rejected_csv`, `needs_review_csv`, and `build_summary(records) -> dict`
+        (counts per outcome, `RANKED` score histogram, `NEEDS_REVIEW` list + reasons), plus a
+        `write_outputs(records, out_dir)` convenience that writes the five files. Tests assert the
+        per-file columns/rows (ranked sorted by `rank`; rejected names the failing gate;
+        needs_review names the blocker) and that the summary counts reconcile.
+  - 7.4 §12 invariant consolidation (`tests/scoring/test_aggregate.py`): a focused suite over
+        synthetic `AuditRecord`s spanning all three outcomes asserting the five PRD §12 invariants
+        end-to-end — (1) optional-signal absence never reduces `final_score`, (2) no bonus changes
+        a `REJECTED` outcome, (3) every `REJECTED` record names the failing gate in `primary_reason`,
+        (4) GPA < 3.0 never yields points without an approved Task B and never above the gradient
+        bottom, (5) ranking is stable across reruns. Deterministic, no API spend.
 - **Phase 8 — Orchestration (`pipeline.grade_batch`)**
   - Ordered fail-fast runner; per-row error isolation; bounded async; integration test on synthetic CSV
 - **Phase 9 — API layer (FastAPI, stateless)**
@@ -269,7 +301,11 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - (none)
 
 ## Next Up
-- [ ] Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
+- [ ] Phase 7.1 — `compose_final_score` pure §10.1 sum + `finalize_score` (writes final_score)
+- [ ] Phase 7.2 — `rank_records` Stage 8 aggregator (outcome finalize + deterministic ranking)
+- [ ] Phase 7.3 — `outputs.py` Stage 9 emission (decisions.jsonl + 3 CSVs + summary.json)
+- [ ] Phase 7.4 — consolidated §12 invariant suite (`tests/scoring/test_aggregate.py`)
+- [ ] Phase 8 — Orchestration (`pipeline.grade_batch`)
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
@@ -290,7 +326,8 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - Phase 6:   `uv run pytest tests/scoring/test_school.py tests/scoring/test_resume.py` (exact/alias/
   fuzzy/both-lists match + normalization; list→bonus mapping; unmatched/"High School"/blank→0;
   never-negative; bonus can't change an outcome; resume stub always 0)
-- Phase 7:   `uv run pytest tests/scoring/test_aggregate.py` (covers all §12 invariants)
+- Phase 7:   `uv run pytest tests/scoring/test_aggregate.py tests/test_outputs.py` (score
+  composition, deterministic ranking + tiebreaker, the five output artifacts, and all §12 invariants)
 - Phase 8:   `uv run pytest tests/test_pipeline.py` (synthetic CSV end-to-end)
 
 ---
@@ -468,6 +505,24 @@ Structural facts only — never real applicant content.
   at 12), making `SchoolMatch.list` authoritative and `score_school` a pure list→bonus lookup.
   Normalization = lowercase + non-word→space + whitespace-collapse (matches PRD §7.1). Resume
   stub lives in its own `scoring/resume.py` per the project structure (not folded into school.py).
+
+- **Phase 7 breakdown (plan-time):** Phase 7 is entirely deterministic (no LLM), so it splits by
+  concern rather than isolate-the-LLM: 7.1 pure `compose_final_score`, 7.2 `rank_records`
+  (outcome finalize + ranking), 7.3 `outputs.py` emission, 7.4 the consolidated §12 invariant
+  suite. Decisions to settle in implementation: (a) **`final_score` is computed for `RANKED`
+  applicants only** — `REJECTED`/`NEEDS_REVIEW` keep `final_score=None`/`rank=None`; composition
+  is the plain §10.1 additive sum of the five existing subscores (no new config, no new weights —
+  the per-component caps already live in their own config sections). (b) **Tiebreaker fallback is
+  `submission_id`, not a timestamp** — the §2 data contract carries no submission-timestamp column,
+  so the deterministic tiebreaker chain is `final_score` desc → `gpa_points` desc → `essay.total`
+  desc → `submission_id` asc (a stable UUID), which keeps reruns identical (§12 #5) without
+  depending on a field we don't have. (c) **`outputs.py` serializers return in-memory
+  strings/dicts**, with a thin `write_outputs(records, out_dir)` convenience on top — the stateless
+  API (Phase 9) hands results back to the user as downloadables and never persists server-side, so
+  the core must be able to produce the artifacts without touching disk. (d) **No acceptance cutoff**
+  — the full ranked list is the deliverable; acceptance/cohort filling is the deferred downstream
+  step (§11). The §12 invariants are asserted at this aggregate/output level here in Phase 7; the
+  full end-to-end pass over a synthetic CSV is the Phase 8 integration test.
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
