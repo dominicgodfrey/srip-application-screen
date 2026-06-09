@@ -188,3 +188,85 @@ def test_ranking_stable_across_reruns() -> None:
     second = {r.submission_id: r.rank for r in recs}
     assert first == second
     assert first["x"] < first["y"]  # 'x' < 'y' on the submission_id tiebreak
+
+
+# ================================================================================================
+# 7.4 — Consolidated PRD §12 invariant suite
+# ================================================================================================
+# A single synthetic population spanning all three outcomes, asserting the five §12 invariants
+# end-to-end at the aggregate/output level. (The full pipeline pass over a CSV is Phase 8.)
+# Note GPA points are an input to this stage (computed in gpa.py); §12 #4 is pinned here at the
+# composition level — a sub-3.0/approved applicant arrives with gpa_points at the gradient bottom
+# and the aggregate must carry, never inflate, it.
+
+
+def _population() -> list[AuditRecord]:
+    """Mixed cohort: two clean RANKED, one approved sub-3.0 RANKED, one REJECTED, one
+    NEEDS_REVIEW — REJECTED/NEEDS_REVIEW carry maxed bonuses to prove they stay unscored."""
+    rejected = _rec("rej", outcome="REJECTED", gpa_points=40.0, essay_total=40.0, school_bonus=15.0)
+    rejected.decided_at_stage = "stage1"
+    rejected.primary_reason = "Essay 1 below hard_min length gate"
+    review = _rec("rev", outcome="NEEDS_REVIEW", gpa_points=0.0, essay_total=0.0, school_bonus=15.0)
+    review.primary_reason = "GPA scale could not be normalized"
+    return [
+        _rec("top", gpa_points=40.0, essay_total=38.0, coursework_bonus=9.0, school_bonus=15.0),
+        _rec("mid", gpa_points=28.0, essay_total=30.0),
+        # Approved sub-3.0: gpa_points floored to the gradient bottom (0); essays + bonuses only.
+        _rec("low", gpa_points=0.0, essay_total=25.0, coursework_bonus=5.0),
+        rejected,
+        review,
+    ]
+
+
+def test_invariant_1_optional_absence_never_reduces_score() -> None:
+    """§12 #1: removing every optional bonus yields a lower-or-equal score — never below core."""
+    full = _rec("a", gpa_points=30.0, essay_total=30.0, coursework_bonus=10.0, school_bonus=12.0)
+    bare = _rec("a", gpa_points=30.0, essay_total=30.0)  # same required core, no bonuses
+    rank_records([full], CFG)
+    rank_records([bare], CFG)
+    assert bare.final_score == 60.0  # exactly the required core
+    assert full.final_score >= bare.final_score
+
+
+def test_invariant_2_no_bonus_changes_a_rejected_outcome() -> None:
+    """§12 #2: a REJECTED applicant with maximal bonuses stays REJECTED, unscored, unranked."""
+    pop = _population()
+    rank_records(pop, CFG)
+    rej = next(r for r in pop if r.submission_id == "rej")
+    assert rej.outcome == "REJECTED"
+    assert rej.final_score is None and rej.rank is None
+
+
+def test_invariant_3_every_rejected_names_the_gate() -> None:
+    """§12 #3: each REJECTED record names the failing gate in ``primary_reason``."""
+    pop = _population()
+    rank_records(pop, CFG)
+    for r in pop:
+        if r.outcome == "REJECTED":
+            assert r.primary_reason.strip()
+
+
+def test_invariant_4_sub_threshold_gpa_lands_at_gradient_bottom() -> None:
+    """§12 #4: an approved sub-3.0 applicant scores no GPA points (gradient bottom) and ranks
+    strictly below an otherwise-identical applicant with positive GPA points."""
+    pop = _population()
+    rank_records(pop, CFG)
+    low = next(r for r in pop if r.submission_id == "low")
+    # gpa_points contributes nothing; final_score is essays + bonuses only.
+    assert low.scores.gpa_points == 0.0
+    assert low.final_score == 30.0  # 0 + 25 essays + 5 coursework
+    top = next(r for r in pop if r.submission_id == "top")
+    mid = next(r for r in pop if r.submission_id == "mid")
+    assert top.rank < mid.rank < low.rank  # the sub-3.0 applicant sorts to the bottom
+
+
+def test_invariant_5_ranking_stable_across_reruns_population() -> None:
+    """§12 #5: ranking the whole population twice yields identical ranks and outcomes."""
+    pop = _population()
+    rank_records(pop, CFG)
+    first = {r.submission_id: (r.outcome, r.rank, r.final_score) for r in pop}
+    rank_records(pop, CFG)
+    second = {r.submission_id: (r.outcome, r.rank, r.final_score) for r in pop}
+    assert first == second
+    # Sanity: the three survivors occupy ranks 1..3; the two non-survivors are unranked.
+    assert sorted(r.rank for r in pop if r.rank is not None) == [1, 2, 3]
