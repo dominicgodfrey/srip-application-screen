@@ -10,6 +10,17 @@ essay_length:
   hard_max: 500         # word count > this -> REJECTED
   len_penalty_max: 5    # max soft penalty applied near the hard bounds
 
+# Gibberish heuristics (Stage 1, §4.2) — cheap, no dictionary. ESL-safe: a hit needs
+# >= min_signals of the signals below to fire together (one alone never rejects).
+gibberish:
+  min_signals: 2
+  max_consonant_run: 7        # consonant run longer than this -> signal
+  min_char_entropy: 2.5       # letter entropy below this (asdfasdf / aaaaaa) -> signal
+  max_repeat_run: 5           # a run of one identical char this long -> signal
+  min_unique_word_ratio: 0.3  # unique/total words below this -> signal
+  min_words_for_ratio: 20     # only score the unique-word ratio with >= this many words
+  min_chars: 20               # below this many letters, skip detection (too little signal)
+
 # GPA gate + gradient (Stages 2-3, §8.1)
 gpa:
   threshold: 3.0        # B average; deny line AND bottom of the scoring gradient

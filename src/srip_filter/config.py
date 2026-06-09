@@ -36,6 +36,19 @@ class EssayLengthConfig(_Strict):
     len_penalty_max: int = 5
 
 
+class GibberishConfig(_Strict):
+    """Cheap deterministic gibberish heuristics (PRD §4.2). ESL-safe: a hit requires
+    ``min_signals`` independent signals to trip, so ordinary awkward/ESL prose passes."""
+
+    min_signals: int = 2  # number of signals that must fire to call it gibberish
+    max_consonant_run: int = 7  # longest run of consecutive consonants ABOVE this -> signal
+    min_char_entropy: float = 2.5  # Shannon entropy of letters BELOW this -> signal
+    max_repeat_run: int = 5  # run of one identical char AT/ABOVE this (aaaaa) -> signal
+    min_unique_word_ratio: float = 0.3  # unique/total words BELOW this -> signal
+    min_words_for_ratio: int = 20  # only evaluate the unique-word ratio with at least this many
+    min_chars: int = 20  # below this many letters, skip detection (too little signal)
+
+
 class GpaConfig(_Strict):
     threshold: float = 3.0
     score_max: float = 40.0
@@ -85,6 +98,7 @@ class AppConfig(_Strict):
     """All tunable knobs. Defaults mirror PRD §10.3 exactly."""
 
     essay_length: EssayLengthConfig = Field(default_factory=EssayLengthConfig)
+    gibberish: GibberishConfig = Field(default_factory=GibberishConfig)
     gpa: GpaConfig = Field(default_factory=GpaConfig)
     essay_scoring: EssayScoringConfig = Field(default_factory=EssayScoringConfig)
     coursework: CourseworkConfig = Field(default_factory=CourseworkConfig)

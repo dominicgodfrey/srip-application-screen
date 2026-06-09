@@ -6,8 +6,8 @@ length) are recorded here and carried forward to Stage 4 scoring (§8.3), never 
 
 This file is built up across Phase 2:
   * 2.1 length gate           — :func:`word_count`, :func:`length_gate`
-  * 2.2 profanity gate        — :func:`profanity_gate` (+ wordlist loader)   (this commit)
-  * 2.3 gibberish heuristics  — pending
+  * 2.2 profanity gate        — :func:`profanity_gate` (+ wordlist loader)
+  * 2.3 gibberish heuristics  — :func:`gibberish_gate`   (this commit)
   * 2.4 Stage 1 aggregator    — pending
 
 The length/gibberish math is pure; the profanity gate depends on a loaded wordlist (file I/O
@@ -17,14 +17,16 @@ Thresholds come from ``AppConfig``.
 
 from __future__ import annotations
 
+import math
 import re
+from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 from better_profanity import Profanity
 
-from ..config import EssayLengthConfig
+from ..config import EssayLengthConfig, GibberishConfig
 
 # resources/profanity.txt lives at the project root (this file is src/srip_filter/gates/...).
 DEFAULT_PROFANITY_PATH = Path(__file__).resolve().parents[3] / "resources" / "profanity.txt"
@@ -166,3 +168,95 @@ def profanity_gate(text: str, matcher: Profanity | None = None) -> bool:
     if not text.strip():
         return False
     return (matcher or _default_matcher()).contains_profanity(text)
+
+
+# ================================================================================================
+# 2.3 — Gibberish heuristics (PRD §4.2, no dictionary)
+# ================================================================================================
+# Cheap deterministic signals only — the dictionary-hit-ratio check from the PRD is intentionally
+# dropped (see PLAN decisions log) so there is no English-dictionary dependency and far lower ESL
+# false-positive risk; subtler gibberish is caught later by LLM Task D. A hit requires >= 2 of the
+# signals below to fire together, so ordinary awkward/ESL prose (which trips at most one) passes.
+
+_VOWELS = frozenset("aeiouy")  # 'y' counted as a vowel to avoid false consonant runs (rhythm)
+
+
+@dataclass(frozen=True)
+class GibberishResult:
+    """Which cheap signals fired, and whether their count crosses ``min_signals``.
+
+    The individual booleans are kept for the audit/debug trail; only ``hit`` gates the pipeline.
+    """
+
+    hit: bool
+    consonant_run: bool
+    low_entropy: bool
+    repeat_run: bool
+    low_unique_ratio: bool
+    signal_count: int
+
+
+def _longest_consonant_run(text: str) -> int:
+    """Length of the longest run of consecutive consonant letters (case-insensitive)."""
+    longest = current = 0
+    for ch in text.lower():
+        if ch.isalpha() and ch not in _VOWELS:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def _longest_repeat_run(text: str) -> int:
+    """Length of the longest run of one identical non-space character (e.g. ``aaaaaa`` -> 6)."""
+    longest = current = 0
+    prev: str | None = None
+    for ch in text.lower():
+        if ch.isspace():
+            prev, current = None, 0
+            continue
+        current = current + 1 if ch == prev else 1
+        prev = ch
+        longest = max(longest, current)
+    return longest
+
+
+def _char_entropy(letters: list[str]) -> float:
+    """Shannon entropy (bits) of a letter sequence; ``asdfasdf``/``aaaaaa`` score very low."""
+    if not letters:
+        return 0.0
+    total = len(letters)
+    return -sum((n / total) * math.log2(n / total) for n in Counter(letters).values())
+
+
+def gibberish_gate(text: str, cfg: GibberishConfig) -> GibberishResult:
+    """Flag keyboard-mashing / good-faith-failure essays via cheap deterministic signals.
+
+    Computes up to four independent signals (long consonant run, low letter entropy, a long
+    identical-char run, a low unique-word ratio) and reports a hit only when at least
+    ``cfg.min_signals`` of them fire — the ESL safeguard. Text with too few letters
+    (``< cfg.min_chars``) carries too little signal and is never flagged. Pure function.
+    """
+    letters = [c for c in text.lower() if c.isalpha()]
+    if len(letters) < cfg.min_chars:
+        return GibberishResult(False, False, False, False, False, 0)
+
+    words = [w.lower() for w in _WORD_RE.findall(text)]
+    consonant_run = _longest_consonant_run(text) > cfg.max_consonant_run
+    low_entropy = _char_entropy(letters) < cfg.min_char_entropy
+    repeat_run = _longest_repeat_run(text) >= cfg.max_repeat_run
+    low_unique_ratio = (
+        len(words) >= cfg.min_words_for_ratio
+        and len(set(words)) / len(words) < cfg.min_unique_word_ratio
+    )
+
+    count = sum((consonant_run, low_entropy, repeat_run, low_unique_ratio))
+    return GibberishResult(
+        hit=count >= cfg.min_signals,
+        consonant_run=consonant_run,
+        low_entropy=low_entropy,
+        repeat_run=repeat_run,
+        low_unique_ratio=low_unique_ratio,
+        signal_count=count,
+    )

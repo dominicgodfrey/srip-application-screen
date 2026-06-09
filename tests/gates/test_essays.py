@@ -9,10 +9,11 @@ from pathlib import Path
 
 from better_profanity import Profanity
 
-from srip_filter.config import EssayLengthConfig
+from srip_filter.config import EssayLengthConfig, GibberishConfig
 from srip_filter.gates.essays import (
     LengthResult,
     build_profanity_matcher,
+    gibberish_gate,
     length_gate,
     load_profanity_wordlist,
     profanity_gate,
@@ -190,3 +191,68 @@ def test_allow_term_exempts_default_clinical_word(tmp_path):
     path = _write_wordlist(tmp_path, ["ALLOW: anal"])
     matcher = build_profanity_matcher(path)
     assert profanity_gate("anal fissure recovery affected my term", matcher) is False
+
+
+# ------------------------------------------------------------------ gibberish heuristics
+
+GIB = GibberishConfig()
+
+# A genuine, varied paragraph (high entropy, high unique-word ratio, no long runs).
+CLEAN_ESSAY = (
+    "I want to join this program because building software lets me solve real problems "
+    "for people in my community. Last summer I wrote a small app that helped my school "
+    "track recycling, and seeing classmates actually use it made me eager to learn more "
+    "about engineering, testing, and working on a team toward a shared goal."
+)
+
+# Awkward / ESL phrasing but composed entirely of real words — must NOT be flagged.
+ESL_ESSAY = (
+    "I am very much wanting the joining of this good program because the computer and the "
+    "making of program is my big passion since long time. In my country I am study hard the "
+    "mathematics and also the coding, and I hope very strongly to be improving my skill more "
+    "and to be helping the peoples with the technology in the future days."
+)
+
+
+def test_clean_essay_not_gibberish():
+    assert gibberish_gate(CLEAN_ESSAY, GIB).hit is False
+
+
+def test_esl_essay_not_gibberish():
+    result = gibberish_gate(ESL_ESSAY, GIB)
+    assert result.hit is False
+    assert result.signal_count < GIB.min_signals
+
+
+def test_repeated_token_mash_is_gibberish():
+    text = " ".join(["asdf"] * 25)  # low entropy + low unique-word ratio
+    result = gibberish_gate(text, GIB)
+    assert result.hit is True
+    assert result.signal_count >= GIB.min_signals
+
+
+def test_repeated_single_char_is_gibberish():
+    result = gibberish_gate("a" * 40, GIB)  # zero entropy + long repeat run
+    assert result.hit is True
+    assert result.low_entropy is True
+    assert result.repeat_run is True
+
+
+def test_single_signal_does_not_fire():
+    # A clean essay plus one absurd all-consonant token trips ONLY the consonant-run signal.
+    text = CLEAN_ESSAY + " bcdfghjklmnpqrst"
+    result = gibberish_gate(text, GIB)
+    assert result.consonant_run is True
+    assert result.signal_count == 1
+    assert result.hit is False
+
+
+def test_short_text_below_min_chars_never_flagged():
+    result = gibberish_gate("asdf jkl", GIB)  # only 7 letters, below min_chars
+    assert result.hit is False
+    assert result.signal_count == 0
+
+
+def test_long_consonant_run_token_detected():
+    text = CLEAN_ESSAY + " qwrtznbvfg"
+    assert gibberish_gate(text, GIB).consonant_run is True
