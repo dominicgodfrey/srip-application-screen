@@ -5,13 +5,14 @@ Organized by sub-task:
   * 11.2 — :func:`assign_cohorts`: rank-greedy + displacement-chain assignment and its
     invariants (only RANKED assignable, capacity respected, maximum matching, monotonicity,
     determinism, NEEDS_REVIEW warning).
+  * 11.3 — :func:`cohort_assignments_csv`: the single rank-ordered CSV artifact.
 """
 
 from __future__ import annotations
 
 import itertools
 
-from srip_filter.cohort import assign_cohorts, normalize_choices
+from srip_filter.cohort import assign_cohorts, cohort_assignments_csv, normalize_choices
 from srip_filter.config import AppConfig
 from srip_filter.models import (
     AuditRecord,
@@ -379,3 +380,59 @@ def test_assignment_is_deterministic_across_reruns() -> None:
     first = assign_cohorts(_POPULATION, caps, CFG)
     second = assign_cohorts(_POPULATION, caps, CFG)
     assert first.model_dump() == second.model_dump()
+
+
+# ------------------------------------------------------------------------------------------------
+# 11.3 — cohort_assignments_csv
+# ------------------------------------------------------------------------------------------------
+
+
+def test_csv_has_pinned_columns_and_every_record_once() -> None:
+    records = [
+        _rec("s1", 1, "honors", "intensive"),
+        _rec("s2", 2, "honors"),
+        _rec("s3", 3, "honors"),  # waitlisted: honors=1 and no chain after s1 moves
+        AuditRecord(
+            submission_id="s4",
+            name="Student s4",
+            outcome="RANKED",
+            rank=4,
+            final_score=50.0,
+            program_choices=_choices("garbage"),
+        ),
+    ]
+    result = assign_cohorts(records, CohortCapacities(honors=1, intensive=1), CFG)
+    lines = cohort_assignments_csv(result).strip().split("\n")
+
+    assert lines[0] == (
+        "rank,submission_id,name,final_score,status,assigned_tier,"
+        "choice_number,displaced_from,choices,reason"
+    )
+    assert len(lines) == 1 + len(records)  # every RANKED record exactly once
+    # rank order across all statuses
+    assert [line.split(",")[1] for line in lines[1:]] == ["s1", "s2", "s3", "s4"]
+
+
+def test_csv_rows_carry_status_tier_and_choice_chain() -> None:
+    records = [_rec("s1", 1, "honors", "intensive"), _rec("s2", 2, "honors")]
+    result = assign_cohorts(records, CohortCapacities(honors=1), CFG)
+    lines = cohort_assignments_csv(result).strip().split("\n")
+
+    s1 = lines[1].split(",")
+    assert s1[4] == "assigned"
+    assert s1[5] == "intensive"
+    assert s1[6] == "2"
+    assert s1[7] == "honors"  # displaced_from
+    assert s1[8] == "honors > intensive"
+
+    s2 = lines[2].split(",")
+    assert s2[4] == "assigned"
+    assert s2[5] == "honors"
+    assert s2[7] == ""  # never displaced
+
+
+def test_csv_is_deterministic() -> None:
+    caps = _caps(1, 1, 2)
+    first = cohort_assignments_csv(assign_cohorts(_POPULATION, caps, CFG))
+    second = cohort_assignments_csv(assign_cohorts(_POPULATION, caps, CFG))
+    assert first == second

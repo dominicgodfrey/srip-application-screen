@@ -29,6 +29,10 @@ from .models import (
     ProgramChoices,
     TierSummary,
 )
+from .outputs import _write_csv
+
+# Downloaded filename for the cohort CSV artifact (the JSON result has no file form).
+COHORT_ASSIGNMENTS_FILE = "cohort_assignments.csv"
 
 
 def normalize_choices(choices: ProgramChoices, tiers: Sequence[str]) -> list[str]:
@@ -286,3 +290,52 @@ def assign_cohorts(
         unassignable=unassignable,
         summary=summary,
     )
+
+
+# ================================================================================================
+# 11.3 — output serialization (in-memory, stateless — same pattern as outputs.py)
+# ================================================================================================
+
+
+def _row_key(entry: CohortAssignment) -> tuple[bool, int, str]:
+    return (entry.rank is None, entry.rank if entry.rank is not None else 0, entry.submission_id)
+
+
+def cohort_assignments_csv(result: CohortResult) -> str:
+    """All buckets as one rank-ordered CSV — one row per ``RANKED`` applicant.
+
+    Per-tier rosters and the waitlist are filters of this file (``status`` / ``assigned_tier``
+    columns), so staff gets a single download instead of four. ``choices`` shows the normalized
+    preference order joined with `` > ``.
+    """
+    header = [
+        "rank",
+        "submission_id",
+        "name",
+        "final_score",
+        "status",
+        "assigned_tier",
+        "choice_number",
+        "displaced_from",
+        "choices",
+        "reason",
+    ]
+    entries = sorted(
+        [*result.assignments, *result.waitlist, *result.unassignable], key=_row_key
+    )
+    rows: list[list[object]] = [
+        [
+            entry.rank,
+            entry.submission_id,
+            entry.name,
+            entry.final_score,
+            entry.status,
+            entry.assigned_tier,
+            entry.choice_number,
+            entry.displaced_from,
+            " > ".join(entry.choices),
+            entry.reason,
+        ]
+        for entry in entries
+    ]
+    return _write_csv(header, rows)
