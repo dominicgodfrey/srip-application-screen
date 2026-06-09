@@ -9,22 +9,42 @@ from pathlib import Path
 
 from better_profanity import Profanity
 
-from srip_filter.config import EssayLengthConfig, GibberishConfig
+from srip_filter.config import AppConfig, EssayLengthConfig, GibberishConfig
 from srip_filter.gates.essays import (
     LengthResult,
+    Stage1Result,
     build_profanity_matcher,
     gibberish_gate,
     length_gate,
     load_profanity_wordlist,
     profanity_gate,
+    run_essay_gates,
     word_count,
 )
+from srip_filter.ingest import ApplicantRow
 
 
 def _write_wordlist(tmp_path: Path, lines: list[str]) -> Path:
     path = tmp_path / "profanity.txt"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+# A pool of distinct, letter-varied real words used to synthesize valid essays that are NOT
+# gibberish (high entropy, high unique-word ratio) at any target length.
+_WORD_POOL = (
+    "the quick brown fox jumps over a lazy dog while bright morning sunlight covers green "
+    "valleys near an old river where many curious children gladly play music during warm "
+    "summer breaks and slowly learn about modern science history human language through "
+    "thoughtful questions asked every single ordinary day before quiet evening stars appear "
+    "above silent mountains beyond distant golden fields toward hopeful future work"
+).split()
+
+
+def _varied_essay(n: int) -> str:
+    """A clean, varied essay of exactly ``n`` words (cycles the pool; high unique ratio)."""
+    repeats = (n // len(_WORD_POOL)) + 1
+    return " ".join((_WORD_POOL * repeats)[:n])
 
 
 def _essay(n: int) -> str:
@@ -256,3 +276,96 @@ def test_short_text_below_min_chars_never_flagged():
 def test_long_consonant_run_token_detected():
     text = CLEAN_ESSAY + " qwrtznbvfg"
     assert gibberish_gate(text, GIB).consonant_run is True
+
+
+# ------------------------------------------------------------------ Stage 1 aggregator (2.4)
+
+APP_CFG = AppConfig()
+
+
+def _app(essay1: str, essay2: str) -> ApplicantRow:
+    return ApplicantRow(
+        submission_id="id1",
+        first_name="Ann",
+        last_name="Lee",
+        email="a@b.com",
+        essay1=essay1,
+        essay2=essay2,
+    )
+
+
+def test_clean_application_passes_all_gates():
+    row = _app(_varied_essay(200), _varied_essay(180))
+    result = run_essay_gates(row, APP_CFG)
+    assert isinstance(result, Stage1Result)
+    assert result.rejected is False
+    assert result.primary_reason == ""
+    assert result.profanity.hit is False
+    assert result.gibberish.hit is False
+    assert result.length_gate.hard_fail is False
+    assert result.length_gate.e1_wc == 200
+    assert result.length_gate.e2_wc == 180
+    assert result.length_penalty_e1 == 0.0
+    assert result.length_penalty_e2 == 0.0
+
+
+def test_soft_length_penalty_carried_not_rejected():
+    # 80-word essay survives (above hard_min 60) but earns a soft penalty carried forward.
+    row = _app(_varied_essay(80), _varied_essay(200))
+    result = run_essay_gates(row, APP_CFG)
+    assert result.rejected is False
+    assert result.length_gate.e1_ok is False  # below target band
+    assert result.length_penalty_e1 > 0.0
+    assert result.length_penalty_e2 == 0.0
+
+
+def test_short_essay_hard_fails_with_length_reason():
+    row = _app(_varied_essay(40), _varied_essay(200))  # 40 < hard_min 60
+    result = run_essay_gates(row, APP_CFG)
+    assert result.rejected is True
+    assert result.length_gate.hard_fail is True
+    assert "length" in result.primary_reason.lower()
+    assert "essay 1" in result.primary_reason.lower()
+
+
+def test_overlong_essay_hard_fails():
+    row = _app(_varied_essay(200), _varied_essay(600))  # 600 > hard_max 500
+    result = run_essay_gates(row, APP_CFG)
+    assert result.rejected is True
+    assert result.length_gate.hard_fail is True
+    assert "essay 2" in result.primary_reason.lower()
+
+
+def test_profanity_in_either_essay_rejects():
+    matcher = build_profanity_matcher(Path("no_such_file.txt"))  # default list
+    matcher.add_censor_words(["frobslur"])
+    row = _app(_varied_essay(200), _varied_essay(180) + " frobslur")
+    result = run_essay_gates(row, APP_CFG, matcher=matcher)
+    assert result.rejected is True
+    assert result.profanity.hit is True
+    assert "profanity" in result.primary_reason.lower()
+
+
+def test_gibberish_essay_rejects_when_length_ok():
+    # 70 "asdf" tokens: passes length (60-500) but trips entropy + unique-ratio signals.
+    row = _app(" ".join(["asdf"] * 70), _varied_essay(180))
+    result = run_essay_gates(row, APP_CFG)
+    assert result.length_gate.hard_fail is False
+    assert result.rejected is True
+    assert result.gibberish.hit is True
+    assert "gibberish" in result.primary_reason.lower()
+
+
+def test_length_reason_takes_precedence_over_other_gates():
+    # An empty essay 1 hard-fails length; the reason names length, not gibberish/profanity.
+    row = _app("", _varied_essay(180))
+    result = run_essay_gates(row, APP_CFG)
+    assert result.rejected is True
+    assert "length" in result.primary_reason.lower()
+
+
+def test_empty_essays_reject_via_length_not_silent():
+    row = _app("", "")
+    result = run_essay_gates(row, APP_CFG)
+    assert result.rejected is True
+    assert result.primary_reason != ""  # never a silent rejection
