@@ -5,6 +5,8 @@ everything web lives here. Routes so far:
 
   * ``GET  /health``  — liveness probe (9.1)
   * ``POST /jobs``    — upload a CSV, validate at the edge, schedule a background run → 202 (9.2)
+  * ``POST /jobs/{id}/cohorts`` — what-if cohort assignment over a completed job (11.4)
+  * ``POST /cohorts`` — same, from a re-uploaded ``decisions.jsonl`` (11.4)
 
 ``create_app`` takes its dependencies as arguments so tests can inject a config and a
 ``FakeLLMClient`` for a zero-spend suite. In production the LLM client is built once at startup
@@ -19,11 +21,14 @@ import contextlib
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, Response, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile, status
 
+from srip_filter.cohort import assign_cohorts
 from srip_filter.config import AppConfig, get_config
 from srip_filter.llm.client import BaseLLMClient, OpenAILLMClient
+from srip_filter.models import CohortCapacities, CohortResult
 
+from .cohorts import CohortFormat, cohort_response, parse_decisions_jsonl
 from .jobs import (
     ArtifactName,
     artifact_response,
@@ -34,6 +39,10 @@ from .jobs import (
 )
 from .registry import JobRegistry, JobState
 from .schemas import ErrorResponse, HealthResponse, JobCreated, JobStatus
+
+# Per-tier seat cap as a query param (Phase 11.4): omitted/None = unlimited. Module-level so the
+# stringified annotation (PEP 563) resolves when FastAPI builds the route signature.
+_Capacity = Annotated[int | None, Query(ge=0, description="Seat cap; omit for unlimited.")]
 
 
 def create_app(
@@ -187,6 +196,81 @@ def create_app(
             )
         app.state.registry.evict(job_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    # -- Cohort assignment (Phase 11, PRD §11) ---------------------------------------------------
+    # Capacities are per-request staff knobs (None/omitted = unlimited), so they ride as query
+    # params on both routes; both are synchronous (pure milliseconds-fast core, nothing stored).
+
+    @app.post(
+        "/jobs/{job_id}/cohorts",
+        response_model=None,
+        responses={
+            200: {
+                "model": CohortResult,
+                "description": "Assignment result (JSON, or CSV via ?format=csv)",
+            },
+            404: {"model": ErrorResponse, "description": "Unknown or evicted job"},
+            409: {"model": ErrorResponse, "description": "Results not ready"},
+        },
+        tags=["cohorts"],
+    )
+    async def job_cohorts(
+        job_id: str,
+        honors: _Capacity = None,
+        intensive: _Capacity = None,
+        regular: _Capacity = None,
+        format: CohortFormat = "json",
+    ) -> Response:
+        """What-if cohort assignment over a completed grading job's records (PRD §11).
+
+        Recomputed from scratch on every call and **non-evicting**, so staff can iterate
+        capacities against the same job until they discard it (``DELETE /jobs/{id}``) or the TTL
+        sweeper does. 404 unknown/evicted job; 409 while queued/running/failed.
+        """
+        job = app.state.registry.get(job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No job with that id; it may have expired or been discarded.",
+            )
+        if job.state is not JobState.SUCCEEDED or job.result is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Results are not available; job state is '{job.state}'.",
+            )
+        capacities = CohortCapacities(honors=honors, intensive=intensive, regular=regular)
+        return cohort_response(assign_cohorts(job.result.records, capacities, cfg), format)
+
+    @app.post(
+        "/cohorts",
+        response_model=None,
+        responses={
+            200: {
+                "model": CohortResult,
+                "description": "Assignment result (JSON, or CSV via ?format=csv)",
+            },
+            413: {"model": ErrorResponse, "description": "Upload or record count exceeds the cap"},
+            422: {"model": ErrorResponse, "description": "Not a readable decisions.jsonl"},
+        },
+        tags=["cohorts"],
+    )
+    async def cohorts_from_upload(
+        file: Annotated[UploadFile, File()],
+        honors: _Capacity = None,
+        intensive: _Capacity = None,
+        regular: _Capacity = None,
+        format: CohortFormat = "json",
+    ) -> Response:
+        """Cohort assignment from a re-uploaded ``decisions.jsonl`` (PRD §11).
+
+        The durable entry point: works in a later session, after the grading job was downloaded/
+        evicted, or after a host restart — upload the ``decisions.jsonl`` you saved and the same
+        deterministic assignment is recomputed. Malformed input is a graceful 4xx, never a 500.
+        """
+        raw = await read_upload_capped(file, cfg.api.max_upload_bytes)
+        records = parse_decisions_jsonl(raw, cfg.api.max_rows)
+        capacities = CohortCapacities(honors=honors, intensive=intensive, regular=regular)
+        return cohort_response(assign_cohorts(records, capacities, cfg), format)
 
     return app
 
