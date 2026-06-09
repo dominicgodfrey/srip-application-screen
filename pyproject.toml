@@ -19,6 +19,7 @@ dependencies = [
 api = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",  # FastAPI multipart/form-data (CSV upload) parsing
 ]
 
 [dependency-groups]
