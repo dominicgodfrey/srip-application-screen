@@ -25,9 +25,18 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ..config import AppConfig, GpaConfig, GpaNormalizationConfig
+from ..ingest import ApplicantRow
 from ..llm.client import BaseLLMClient, LLMParseFailure
 from ..llm.prompts import task_a as task_a_prompt
-from ..models import Confidence, GpaAssessment, GpaGate, GpaSource, TaskAOutput
+from ..llm.prompts import task_b as task_b_prompt
+from ..models import (
+    Confidence,
+    GpaAssessment,
+    GpaGate,
+    GpaSource,
+    TaskAOutput,
+    TaskBOutput,
+)
 
 # Internal Stage-3 verdict. Distinct from the final Outcome: "pass" means the GPA gate is
 # cleared and scoring continues (essays still run) — it is not yet RANKED.
@@ -302,7 +311,7 @@ def gpa_points(normalized_gpa: float, cfg: GpaConfig) -> float:
 
 
 def build_assessment(
-    raw: str, norm: GpaNormalization, explanation_eval: object | None = None
+    raw: str, norm: GpaNormalization, explanation_eval: TaskBOutput | None = None
 ) -> GpaAssessment:
     """Project a :class:`GpaNormalization` onto the audit ``GpaAssessment`` block (PRD §9).
 
@@ -317,7 +326,7 @@ def build_assessment(
         below_threshold=norm.below_threshold,
         requires_manual_review=norm.requires_manual_review,
         source=norm.source,
-        explanation_eval=explanation_eval,  # type: ignore[arg-type]
+        explanation_eval=explanation_eval,
     )
 
 
@@ -364,3 +373,73 @@ def gpa_gate_deterministic(
         )
 
     return None  # < threshold with an explanation -> LLM Task B (Phase 3.4)
+
+
+# ================================================================================================
+# 3.4 — Task B low-GPA adequacy + Stage 2-3 aggregator (LLM)
+# ================================================================================================
+# assess_gpa ties Stage 2 (normalize) to Stage 3 (gate). The only branch left for the LLM is a
+# sub-threshold GPA WITH an explanation: Task B decides rank vs reject, with a bar that scales to
+# the size of the deficit. An approved low GPA still lands at the bottom of the gradient (points
+# clamp to 0 below the threshold) — the deficit is reflected, never erased (PRD §8.1). A Task B
+# parse failure is unscoreable -> NEEDS_REVIEW, never a silent rejection (PRD §8).
+
+
+def _task_b_result(
+    out: TaskBOutput, raw: str, norm: GpaNormalization, normalized_gpa: float, cfg: GpaConfig
+) -> GpaGateResult:
+    """Turn a Task B verdict into a gate result; store the eval in the assessment either way."""
+    assessment = build_assessment(raw, norm, out)
+    if out.recommended_outcome == "rank":
+        # Below threshold -> gpa_points clamps to 0: deficit reflected, never erased (§8.1).
+        return GpaGateResult(
+            verdict="pass",
+            gpa_points=gpa_points(normalized_gpa, cfg),
+            reason="",
+            assessment=assessment,
+            gate=GpaGate(passed=True, reason=out.rationale),
+        )
+    return GpaGateResult(
+        verdict="reject",
+        gpa_points=0.0,
+        reason=out.rationale,
+        assessment=assessment,
+        gate=GpaGate(passed=False, reason=out.rationale),
+    )
+
+
+async def assess_gpa(row: ApplicantRow, client: BaseLLMClient, cfg: AppConfig) -> GpaGateResult:
+    """Stages 2-3 end to end: normalize the GPA, then gate it (PRD §6).
+
+    Deterministic and Task-A paths resolve most applicants without reaching Task B. The single
+    LLM-judgment branch — a sub-threshold GPA with an explanation present — calls Task B with the
+    GPA and its gap below the threshold; ``rank`` passes (with bottom-of-gradient points),
+    ``reject`` fails. Any LLM parse failure routes to ``needs_review``. Never rejects an
+    unscoreable applicant.
+    """
+    norm = await normalize_gpa(row.gpa, client, cfg)
+    det = gpa_gate_deterministic(row.gpa, norm, row.gpa_explanation, cfg.gpa)
+    if det is not None:
+        return det
+
+    # Sub-threshold GPA with an explanation: only reachable when normalized_gpa is a real number.
+    normalized_gpa = norm.normalized_gpa
+    assert normalized_gpa is not None  # guaranteed by gpa_gate_deterministic returning None
+    gap = round(cfg.gpa.threshold - normalized_gpa, 4)
+    try:
+        out = await client.complete(
+            "task_b",
+            system=task_b_prompt.SYSTEM,
+            user=task_b_prompt.user_prompt(normalized_gpa, gap, row.gpa_explanation),
+            schema=TaskBOutput,
+        )
+    except LLMParseFailure:
+        reason = "LLM_PARSE_FAILURE"
+        return GpaGateResult(
+            verdict="needs_review",
+            gpa_points=0.0,
+            reason=reason,
+            assessment=build_assessment(row.gpa, norm),
+            gate=GpaGate(passed=False, reason=reason),
+        )
+    return _task_b_result(out, row.gpa, norm, normalized_gpa, cfg.gpa)

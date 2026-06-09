@@ -12,13 +12,15 @@ import pytest
 from srip_filter.config import AppConfig
 from srip_filter.gates.gpa import (
     GpaNormalization,
+    assess_gpa,
     gpa_gate_deterministic,
     gpa_points,
     normalize_gpa,
     normalize_gpa_deterministic,
 )
+from srip_filter.ingest import ApplicantRow
 from srip_filter.llm.client import FakeLLMClient, LLMParseFailure
-from srip_filter.models import TaskAOutput
+from srip_filter.models import TaskAOutput, TaskBOutput
 
 APP = AppConfig()
 CFG = APP.gpa
@@ -344,3 +346,115 @@ def test_gate_unresolved_scale_needs_review_never_rejected() -> None:
 def test_gate_below_threshold_with_explanation_defers_to_task_b() -> None:
     res = gpa_gate_deterministic("2.5", _resolved_norm(2.5), "I was seriously ill", CFG)
     assert res is None  # Phase 3.4 (Task B) decides this branch
+
+
+# ================================================================================================
+# 3.4 — Task B low-GPA adequacy + assess_gpa aggregator (LLM, mocked) + §12 invariants
+# ================================================================================================
+
+
+def _task_b(outcome: str = "rank") -> TaskBOutput:
+    rank = outcome == "rank"
+    return TaskBOutput(
+        explanation_adequate=rank,
+        strength_of_reason=0.8 if rank else 0.2,
+        realistic=True,
+        severity_vs_reason_balanced=rank,
+        recommended_outcome=outcome,  # type: ignore[arg-type]
+        rationale="task b rationale",
+    )
+
+
+def _dispatch(task_b=None, task_a=None):  # type: ignore[no-untyped-def]
+    def handler(task, user, schema):  # type: ignore[no-untyped-def]
+        if task == "task_b":
+            if task_b is None:
+                raise AssertionError("unexpected task_b call")
+            return task_b
+        if task == "task_a":
+            if task_a is None:
+                raise AssertionError("unexpected task_a call")
+            return task_a
+        raise AssertionError(f"unexpected task {task}")
+
+    return handler
+
+
+def _row(gpa: str, explanation: str = "") -> ApplicantRow:
+    return ApplicantRow(submission_id="sub-1", gpa=gpa, gpa_explanation=explanation)
+
+
+async def test_assess_deterministic_pass_makes_no_llm_call() -> None:
+    client = _client(_dispatch())
+    res = await assess_gpa(_row("3.7"), client, APP)
+    assert res.verdict == "pass"
+    assert res.gpa_points == pytest.approx(28.0)
+    assert client.calls == []
+
+
+async def test_assess_blank_needs_review_no_llm() -> None:
+    client = _client(_dispatch())
+    res = await assess_gpa(_row(""), client, APP)
+    assert res.verdict == "needs_review"
+    assert client.calls == []
+
+
+async def test_assess_below_threshold_task_b_rank_passes_at_gradient_bottom() -> None:
+    client = _client(_dispatch(task_b=_task_b("rank")))
+    res = await assess_gpa(_row("2.5", "I was hospitalized for a semester"), client, APP)
+    assert res.verdict == "pass"
+    assert res.gpa_points == 0.0  # bottom of the gradient — deficit reflected, not erased
+    assert res.assessment.explanation_eval is not None
+    assert res.assessment.explanation_eval.recommended_outcome == "rank"
+    assert client.calls[0][0] == "task_b"
+
+
+async def test_assess_below_threshold_task_b_reject() -> None:
+    client = _client(_dispatch(task_b=_task_b("reject")))
+    res = await assess_gpa(_row("2.4", "I did not feel like studying"), client, APP)
+    assert res.verdict == "reject"
+    assert res.reason == "task b rationale"  # PRD §12: rejection names its reason
+    assert res.assessment.explanation_eval is not None
+
+
+async def test_assess_task_b_parse_failure_needs_review_never_rejects() -> None:
+    def boom(task, user, schema):  # type: ignore[no-untyped-def]
+        raise LLMParseFailure(task, "bad json")
+
+    client = _client(boom)
+    res = await assess_gpa(_row("2.6", "some explanation"), client, APP)
+    assert res.verdict == "needs_review"  # unscoreable, never REJECTED (PRD §12)
+    assert res.gate.reason == "LLM_PARSE_FAILURE"
+
+
+# --- PRD §12 invariants (GPA) -------------------------------------------------------------------
+
+
+async def test_invariant_below_threshold_never_scores_above_gradient_bottom() -> None:
+    # Even an approved sub-3.0 applicant never earns points above the bottom (0) of the band.
+    client = _client(_dispatch(task_b=_task_b("rank")))
+    for gpa in ("2.9", "2.5", "2.0", "1.0"):
+        res = await assess_gpa(_row(gpa, "documented hardship"), client, APP)
+        assert res.verdict == "pass"
+        assert res.gpa_points == 0.0
+
+
+async def test_invariant_below_threshold_no_points_without_approved_task_b() -> None:
+    # Rejected (no approval) -> not scored at all.
+    client = _client(_dispatch(task_b=_task_b("reject")))
+    res = await assess_gpa(_row("2.5", "weak reason"), client, APP)
+    assert res.verdict == "reject"
+    assert res.gpa_points == 0.0
+
+
+async def test_invariant_nothing_unscoreable_is_rejected() -> None:
+    # Blank, Task A manual-review, and parse failures must all be NEEDS_REVIEW, never REJECTED.
+    blank = await assess_gpa(_row(""), _client(_dispatch()), APP)
+    assert blank.verdict == "needs_review"
+
+    manual = await assess_gpa(
+        _row("IGCSE A*A*A"),
+        _client(_dispatch(task_a=_task_a(normalized_gpa=None, requires_manual_review=True))),
+        APP,
+    )
+    assert manual.verdict == "needs_review"
