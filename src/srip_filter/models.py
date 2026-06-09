@@ -23,6 +23,7 @@ Confidence = Literal["high", "med", "low"]
 GpaSource = Literal["deterministic", "llm"]
 CourseCategory = Literal["cs", "math", "data", "other"]
 SchoolListName = Literal["us_top20", "intl_top50"]
+AssignmentStatus = Literal["assigned", "waitlisted", "unassignable"]
 
 
 class _Model(BaseModel):
@@ -218,3 +219,83 @@ class AuditRecord(_Model):
     reasons: list[str] = Field(default_factory=list)
     llm_calls: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+
+
+# ============================================================================================
+# Cohort assignment (PRD §11, Phase 11) — downstream of ranking, consumes AuditRecords
+# ============================================================================================
+
+
+class CohortCapacities(_Model):
+    """Per-tier seat caps for cohort assignment (PRD §11).
+
+    ``None`` = unlimited — the default, since demand realistically won't hit any cap, in which
+    case every applicant lands in their first choice. These are a per-request staff knob, not
+    config: the whole point is live what-if recomputation as the numbers change.
+    """
+
+    honors: int | None = Field(default=None, ge=0)
+    intensive: int | None = Field(default=None, ge=0)
+    regular: int | None = Field(default=None, ge=0)
+
+    def for_tier(self, tier: str) -> int | None:
+        """Capacity for a canonical tier name; tiers without a declared cap are unlimited."""
+        value = getattr(self, tier, None)
+        return value if isinstance(value, int) else None
+
+
+class CohortAssignment(_Model):
+    """One applicant's cohort outcome — a row in ``cohort_assignments.csv`` / the staff UI table.
+
+    ``choice_number`` is the 1-based position of the assigned tier among the applicant's
+    *distinct* listed choices (repeats collapse). ``displaced_from`` records the tier this
+    applicant was bumped out of by a displacement chain (they stayed seated, on a later choice),
+    kept for the audit trail.
+    """
+
+    submission_id: str
+    name: str = ""
+    rank: int | None = None
+    final_score: float | None = None
+    status: AssignmentStatus
+    assigned_tier: str | None = None
+    choice_number: int | None = None
+    displaced_from: str | None = None
+    choices: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class TierSummary(_Model):
+    """Fill state of one tier after assignment. ``open_seats`` is ``None`` when unlimited."""
+
+    capacity: int | None = None
+    filled: int = 0
+    open_seats: int | None = None
+    first_choice_demand: int = 0
+
+
+class CohortSummary(_Model):
+    """Run-level facts for the staff view: fill state, demand, satisfaction, and warnings."""
+
+    total_ranked: int = 0
+    assigned: int = 0
+    waitlisted: int = 0
+    unassignable: int = 0
+    displaced: int = 0
+    tiers: dict[str, TierSummary] = Field(default_factory=dict)
+    choice_satisfaction: dict[str, int] = Field(default_factory=dict)
+    needs_review_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
+class CohortResult(_Model):
+    """Full output of :func:`srip_filter.cohort.assign_cohorts`.
+
+    Returned to the staff user (JSON or CSV), never persisted — stateless like everything else.
+    Each list is rank-ordered; every ``RANKED`` input record appears in exactly one of them.
+    """
+
+    assignments: list[CohortAssignment] = Field(default_factory=list)
+    waitlist: list[CohortAssignment] = Field(default_factory=list)
+    unassignable: list[CohortAssignment] = Field(default_factory=list)
+    summary: CohortSummary = Field(default_factory=CohortSummary)

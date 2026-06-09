@@ -65,6 +65,13 @@ school:
 resume:
   bonus_max: 0
 
+# Cohort assignment (Phase 11, PRD §11) — downstream of ranking. Tier tokens are matched
+# case-insensitively inside the free-text choice strings ("Summer 2026- HONORS" etc.); list order
+# is the deterministic search order for displacement chains. Per-tier capacities are a per-request
+# staff input on the cohort endpoints, NOT config.
+cohort:
+  tiers: [honors, intensive, regular]
+
 # LLM tasks (OpenAI). Model IDs are pinned here and swappable — verify against OpenAI's catalog.
 llm:
   models:

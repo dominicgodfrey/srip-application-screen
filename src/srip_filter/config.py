@@ -120,6 +120,19 @@ class ResumeConfig(_Strict):
     bonus_max: float = 0.0  # DEFERRED — inert until PDF parsing exists
 
 
+class CohortConfig(_Strict):
+    """Cohort assignment (PRD §11, Phase 11).
+
+    ``tiers`` are the canonical program tokens, matched case-insensitively by containment inside
+    the free-text choice strings (the form emits inconsistent values like ``Summer 2026- HONORS``
+    vs ``Summer 2026 - HONORS``). List order is also the deterministic exploration order for
+    displacement-chain search. Per-tier capacities are NOT config — they are a per-request staff
+    input (:class:`~srip_filter.models.CohortCapacities`).
+    """
+
+    tiers: list[str] = Field(default_factory=lambda: ["honors", "intensive", "regular"])
+
+
 class TaskModels(_Strict):
     task_a: str = "gpt-4.1-mini"
     task_b: str = "gpt-4.1"
@@ -160,6 +173,7 @@ class AppConfig(_Strict):
     coursework: CourseworkConfig = Field(default_factory=CourseworkConfig)
     school: SchoolConfig = Field(default_factory=SchoolConfig)
     resume: ResumeConfig = Field(default_factory=ResumeConfig)
+    cohort: CohortConfig = Field(default_factory=CohortConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
 
