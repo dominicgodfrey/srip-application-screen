@@ -49,9 +49,50 @@ class GibberishConfig(_Strict):
     min_chars: int = 20  # below this many letters, skip detection (too little signal)
 
 
+class GpaPercentageBand(_Strict):
+    """One row of the PRD §6.1 percentage→4.0 table.
+
+    A percentage at or above ``min_pct`` (and below the next-higher band's ``min_pct``) maps to
+    ``gpa``. Below the lowest band the normalizer scales linearly toward 0 (§6.1: "< 73 → scale
+    linearly toward 0"), anchored on the lowest band's ``(min_pct, gpa)`` point.
+    """
+
+    min_pct: float
+    gpa: float
+
+
+# PRD §6.1 default table (the 83-86 → 3.0 row is the B-average threshold).
+_DEFAULT_PERCENTAGE_TABLE: list[GpaPercentageBand] = [
+    GpaPercentageBand(min_pct=93, gpa=4.0),
+    GpaPercentageBand(min_pct=90, gpa=3.7),
+    GpaPercentageBand(min_pct=87, gpa=3.3),
+    GpaPercentageBand(min_pct=83, gpa=3.0),
+    GpaPercentageBand(min_pct=80, gpa=2.7),
+    GpaPercentageBand(min_pct=77, gpa=2.3),
+    GpaPercentageBand(min_pct=73, gpa=2.0),
+]
+
+
+class GpaNormalizationConfig(_Strict):
+    """Deterministic GPA-normalization knobs (PRD §6.1).
+
+    The percentage table and the clean-scale ceiling are the only magic numbers in the Stage-2
+    deterministic path; everything else (which scale a ``a/b`` fraction is) follows from the
+    denominator. A bare value above ``gpa_max`` is treated as weighted/out-of-scale and routed
+    to LLM Task A rather than resolved deterministically.
+    """
+
+    gpa_max: float = 4.0  # clean-scale ceiling + final cap; bare values above this -> Task A
+    percentage_max: float = 100.0  # a percentage above this is invalid -> Task A
+    percentage_table: list[GpaPercentageBand] = Field(
+        default_factory=lambda: list(_DEFAULT_PERCENTAGE_TABLE)
+    )
+
+
 class GpaConfig(_Strict):
     threshold: float = 3.0
     score_max: float = 40.0
+    normalization: GpaNormalizationConfig = Field(default_factory=GpaNormalizationConfig)
 
 
 class EssayScoringConfig(_Strict):

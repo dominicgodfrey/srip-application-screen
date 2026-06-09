@@ -25,6 +25,20 @@ gibberish:
 gpa:
   threshold: 3.0        # B average; deny line AND bottom of the scoring gradient
   score_max: 40         # points awarded at a normalized GPA of 4.0
+  # Deterministic normalization (Stage 2, §6.1). A bare value above gpa_max is treated as
+  # weighted/out-of-scale and routed to LLM Task A; the percentage table maps detectable
+  # percentages (and /10 scales x10) onto the 4.0 scale, linear toward 0 below the lowest band.
+  normalization:
+    gpa_max: 4.0
+    percentage_max: 100
+    percentage_table:   # percentage >= min_pct maps to gpa; the 83 row is the 3.0 (B) threshold
+      - {min_pct: 93, gpa: 4.0}
+      - {min_pct: 90, gpa: 3.7}
+      - {min_pct: 87, gpa: 3.3}
+      - {min_pct: 83, gpa: 3.0}
+      - {min_pct: 80, gpa: 2.7}
+      - {min_pct: 77, gpa: 2.3}
+      - {min_pct: 73, gpa: 2.0}
 
 # Essay quality scoring (Stage 4, Task D)
 essay_scoring:

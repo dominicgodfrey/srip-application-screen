@@ -1,0 +1,187 @@
+"""Stages 2-3 — GPA normalization and gate (Phase 3).
+
+Stage 2 converts a raw GPA cell to a 4.0-scale equivalent; Stage 3 turns that into a gate
+verdict (PRD §6). The work is split so the LLM-touching parts stay isolated and the
+deterministic majority is fully testable with zero API spend:
+
+  * 3.1 deterministic normalizer  — :func:`normalize_gpa_deterministic`   (this commit)
+  * 3.2 Task A fallback + orchestration                                   (next)
+  * 3.3 points gradient + deterministic gate paths
+  * 3.4 Task B low-GPA adequacy + Stage 2-3 aggregator
+
+Hard line (PRD §1/§6.2): an unresolvable or blank scale is ``NEEDS_REVIEW``, *never*
+``REJECTED`` — false-rejecting the large international contingent is the failure mode to avoid.
+This deterministic pass therefore never decides a rejection; it either resolves a value, flags
+it for LLM Task A (``needs_llm``), or — for a truly empty cell — flags it for manual review.
+
+The §6.1 percentage→4.0 table and the clean-scale ceiling live in ``config.yaml``
+(``gpa.normalization``); this module hard-codes no thresholds. Pure functions, no I/O, no LLM.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from ..config import GpaConfig, GpaNormalizationConfig
+from ..models import Confidence, GpaSource
+
+# A fraction "a/b" (e.g. 85/100, 4.5/5, 3.8/4.0). Checked before a bare number so the
+# denominator can pick the scale.
+_FRACTION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)")
+# An explicit percentage "92%", "95.2 %".
+_PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+# First signed/unsigned decimal anywhere in the string (handles trailing labels: "3.97 GPA").
+_FLOAT_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+# Denominators we recognize deterministically; anything else routes to Task A.
+_DENOM_FOUR = 4.0
+_DENOM_FIVE = 5.0
+_DENOM_TEN = 10.0
+_DENOM_HUNDRED = 100.0
+_DENOM_TOL = 1e-9
+
+
+@dataclass(frozen=True)
+class GpaNormalization:
+    """Stage-2 normalization outcome for one applicant (PRD §6.1 output shape + a routing flag).
+
+    Exactly one of three dispositions holds:
+
+    * **resolved** — ``normalized_gpa`` is set, ``needs_llm`` and ``requires_manual_review`` both
+      False. ``below_threshold`` reflects ``normalized_gpa < threshold``.
+    * **route to LLM** — ``needs_llm`` True, ``normalized_gpa`` None. Stage 3.2 will call Task A.
+      No decision is made here.
+    * **manual review** — ``requires_manual_review`` True (empty cell). Stage 3 sends it to
+      ``NEEDS_REVIEW`` without spending a token.
+
+    Stage 3.3 maps this onto the audit ``GpaAssessment`` block.
+    """
+
+    normalized_gpa: float | None
+    original_scale: str
+    conversion_method: str
+    confidence: Confidence
+    below_threshold: bool | None
+    requires_manual_review: bool
+    source: GpaSource
+    needs_llm: bool
+
+
+def _percentage_to_gpa(pct: float, ncfg: GpaNormalizationConfig) -> float:
+    """Map a 0-100 percentage onto the 4.0 scale via the §6.1 table.
+
+    A percentage at or above a band's ``min_pct`` takes that band's GPA; below the lowest band
+    the value scales linearly toward 0, anchored on the lowest band's ``(min_pct, gpa)`` point.
+    """
+    bands = sorted(ncfg.percentage_table, key=lambda b: b.min_pct, reverse=True)
+    for band in bands:
+        if pct >= band.min_pct:
+            return band.gpa
+    lowest = bands[-1]
+    return pct / lowest.min_pct * lowest.gpa if lowest.min_pct > 0 else 0.0
+
+
+def _resolved(
+    gpa_value: float, scale: str, method: str, cfg: GpaConfig
+) -> GpaNormalization:
+    """Build a resolved deterministic result, capped at ``gpa_max`` and rounded."""
+    capped = round(min(gpa_value, cfg.normalization.gpa_max), 4)
+    return GpaNormalization(
+        normalized_gpa=capped,
+        original_scale=scale,
+        conversion_method=method,
+        confidence="high",
+        below_threshold=capped < cfg.threshold,
+        requires_manual_review=False,
+        source="deterministic",
+        needs_llm=False,  # resolved: never routed
+    )
+
+
+def _route_to_llm(scale: str) -> GpaNormalization:
+    """Flag a non-blank value the deterministic parser cannot confidently place for Task A."""
+    return GpaNormalization(
+        normalized_gpa=None,
+        original_scale=scale,
+        conversion_method="route_to_task_a",
+        confidence="low",
+        below_threshold=None,
+        requires_manual_review=False,
+        source="deterministic",
+        needs_llm=True,
+    )
+
+
+def _manual_review(scale: str, method: str) -> GpaNormalization:
+    """Flag an empty cell for manual review without spending an LLM token (PRD §6.1)."""
+    return GpaNormalization(
+        normalized_gpa=None,
+        original_scale=scale,
+        conversion_method=method,
+        confidence="low",
+        below_threshold=None,
+        requires_manual_review=True,
+        source="deterministic",
+        needs_llm=False,
+    )
+
+
+def _from_fraction(num: float, denom: float, cfg: GpaConfig) -> GpaNormalization:
+    """Resolve an ``a/b`` value using the denominator to pick the scale."""
+    ncfg = cfg.normalization
+    if abs(denom - _DENOM_HUNDRED) < _DENOM_TOL:
+        if num > ncfg.percentage_max:
+            return _route_to_llm("percentage")
+        return _resolved(_percentage_to_gpa(num, ncfg), "percentage", "fraction_over_100", cfg)
+    if abs(denom - _DENOM_TEN) < _DENOM_TOL:
+        if num > _DENOM_TEN:
+            return _route_to_llm("out_of_10")
+        return _resolved(_percentage_to_gpa(num * 10, ncfg), "out_of_10", "out_of_10_table", cfg)
+    if abs(denom - _DENOM_FIVE) < _DENOM_TOL:
+        if num > _DENOM_FIVE:
+            return _route_to_llm("out_of_5")
+        return _resolved(num / _DENOM_FIVE * ncfg.gpa_max, "out_of_5", "out_of_5_linear", cfg)
+    if abs(denom - _DENOM_FOUR) < _DENOM_TOL:
+        if num > ncfg.gpa_max:  # weighted on a 4-scale -> Task A
+            return _route_to_llm("weighted_gt_4")
+        return _resolved(num, "four_point", "fraction_over_4", cfg)
+    return _route_to_llm("unknown")
+
+
+def normalize_gpa_deterministic(raw: str, cfg: GpaConfig) -> GpaNormalization:
+    """Convert a raw GPA cell to the 4.0 scale deterministically where possible (PRD §6.1).
+
+    Resolution order: explicit percentage (``%``) → explicit fraction (``a/b``, scale from the
+    denominator) → bare number on a clean ``0..gpa_max`` scale. A bare value above ``gpa_max``
+    (weighted, or a bare percentage/out-of-N with no denominator) and any string without a
+    parseable number route to LLM Task A (``needs_llm=True``). A genuinely empty cell goes to
+    manual review without a token. Pure function — no decision/rejection is made here.
+    """
+    text = raw.strip()
+    if not text:
+        return _manual_review("blank", "blank")
+
+    percent = _PERCENT_RE.search(text)
+    if percent:
+        pct = float(percent.group(1))
+        if pct > cfg.normalization.percentage_max:
+            return _route_to_llm("percentage")
+        gpa = _percentage_to_gpa(pct, cfg.normalization)
+        return _resolved(gpa, "percentage", "percent_sign", cfg)
+
+    fraction = _FRACTION_RE.search(text)
+    if fraction:
+        num, denom = float(fraction.group(1)), float(fraction.group(2))
+        if denom <= 0:
+            return _route_to_llm("unknown")
+        return _from_fraction(num, denom, cfg)
+
+    number = _FLOAT_RE.search(text)
+    if not number:
+        return _route_to_llm("unknown")  # text present but no number (IGCSE letters, "N/A", ...)
+    value = float(number.group(0))
+    if 0.0 <= value <= cfg.normalization.gpa_max:
+        return _resolved(value, "four_point", "clean_4_scale", cfg)
+    # Out of the clean 0..4.0 band: weighted (>4), a bare percentage/out-of-N, or negative.
+    return _route_to_llm("weighted_gt_4" if value > cfg.normalization.gpa_max else "unknown")
