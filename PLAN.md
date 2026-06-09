@@ -4,14 +4,14 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 8 — Orchestration (`pipeline.grade_batch`) — COMPLETE
+Phase 9 — API layer (FastAPI, stateless) — IN PROGRESS
 
 ## Active Sub-Task
-Phase 8 complete (Stages 0→9 wired in `pipeline.py`: `build_base_record`/`affirmation_ok`,
-`grade_one`, `grade_batch`/`BatchResult`, full §12 + fail-fast suite). Next action: **Phase 9** —
-the thin stateless FastAPI shell (`api/main.py`) over `pipeline.grade_batch`: upload CSV → in-memory
-background job → progress poll → downloadable results; input validation + size/row caps; nothing
-persisted. Confirm the active Phase 9 sub-task split with the user before starting.
+Phase 9.1 complete (app scaffold + `ApiConfig` + `JobRegistry` + `/health`). Next action:
+**Phase 9.2** — `POST /jobs` (multipart CSV): enforce the size cap (→413), the row cap (→413/422),
+and §2 header validation (`HeaderValidationError` → 422; unreadable CSV → 422; never 500); on
+success create a job, schedule `grade_batch` as an `asyncio` background task, return 202 + `job_id`.
+Build one `OpenAILLMClient` at app startup from config/secrets; tests inject a `FakeLLMClient`.
 
 ---
 
@@ -395,12 +395,16 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - [x] Phase 8.4 — end-to-end §12 invariant + fail-fast spend suite (`tests/test_pipeline.py`): all
       five PRD §12 invariants over `grade_batch`, plus zero-token assertions for Stage-1/affirmation
       stops (commit: 0557ed3).
+- [x] Phase 9.1 — API scaffold: `ApiConfig` (max_upload_bytes/max_rows/job_ttl_seconds) in
+      config.py + config.yaml; `api/` package — `JobRegistry` (UUID-keyed lifecycle + progress +
+      in-memory `BatchResult`, TTL eviction + discard-after-download, lockless single-loop),
+      `schemas.py` (JobCreated/JobStatus/ErrorResponse/HealthResponse), `main.py` `create_app`
+      factory + `/health`; tests over registry lifecycle/sweep + JobStatus + health (commit: 6c75924).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 9.1 — App scaffold + `ApiConfig` + schemas + in-memory job registry
 - [ ] Phase 9.2 — `POST /jobs` upload + validation (caps, header) + background kickoff
 - [ ] Phase 9.3 — `GET /jobs/{id}` progress polling + status (+ `grade_batch` progress callback)
 - [ ] Phase 9.4 — result download + lifecycle/TTL eviction
@@ -428,6 +432,8 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - Phase 7:   `uv run pytest tests/scoring/test_aggregate.py tests/test_outputs.py` (score
   composition, deterministic ranking + tiebreaker, the five output artifacts, and all §12 invariants)
 - Phase 8:   `uv run pytest tests/test_pipeline.py` (synthetic CSV end-to-end)
+- Phase 9:   `uv sync --extra api && uv run pytest tests/api/test_api.py` (registry lifecycle/TTL,
+  JobStatus projection, `/health`; FastAPI `TestClient`, no LLM spend)
 
 ---
 
@@ -713,6 +719,24 @@ Structural facts only — never real applicant content.
   concurrency, so the background task just awaits `grade_batch`); tests inject a `FakeLLMClient` via
   dependency override so the whole suite is zero-spend. **No auth initially** (nothing is stored);
   serve over HTTPS at deploy. No new framework beyond FastAPI/uvicorn (already settled in CLAUDE.md).
+
+- **Phase 9.1 (implementation):** the `api/` package is split into `registry.py` (`JobRegistry` +
+  `Job` + `JobState`), `schemas.py` (response models), and `main.py` (`create_app` factory +
+  `/health`) — three small concerns rather than one `main.py`, each independently testable.
+  `create_app(*, config=None, client=None)` stashes `config`/`llm_client`/`registry` on
+  `app.state`; the module-level `app = create_app()` is the uvicorn entry (`uvicorn api.main:app`).
+  **`client` is left `None` in 9.1** (no grading route yet) — the real `OpenAILLMClient` is built at
+  startup in 9.2; tests inject a `FakeLLMClient`. **Registry clock = `time.monotonic()`**, not
+  wall-clock: TTL math must be immune to wall-clock jumps, and the lifecycle clock is internal (not
+  shown to the user). A `Job` is a mutable dataclass the handlers mutate in place; the registry owns
+  only storage + eviction (`create`/`get`/`evict`/`sweep`). **TTL reference time** = `finished_at`
+  for a terminal job, else `created_at` — so a *wedged* unfinished run is also reaped (can't pin PII
+  forever), and `is_expired` is **inclusive** at the boundary (`now - ref >= ttl`). **Lockless:** all
+  access is on the single API event loop (the background grading task is an `asyncio` task in the
+  same loop, not a thread), so the plain dict needs no lock — revisit only if a thread pool is ever
+  introduced. `JobState` is a `StrEnum` (py311+) so it serializes to its string value for free.
+  `fastapi`/`uvicorn` is the `api` optional-dependency extra — run `uv sync --extra api` before the
+  API suite (CI/deploy installs it; the core suite doesn't need it).
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
