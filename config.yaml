@@ -82,3 +82,4 @@ api:
   max_upload_bytes: 26214400  # 25 MiB cap on the uploaded CSV body -> 413 above this
   max_rows: 2000              # parsed-row cap (PRD scale target) -> 413/422 above this
   job_ttl_seconds: 3600       # finished job + in-memory results evicted after this (or on download)
+  job_sweep_seconds: 300      # interval the background sweeper runs to drop expired jobs

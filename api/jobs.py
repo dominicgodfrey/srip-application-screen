@@ -14,17 +14,21 @@ progress callback) and a re-parse of a ≤25 MiB blob is cheap next to the LLM g
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
+from enum import StrEnum
 
 from fastapi import HTTPException, UploadFile
+from fastapi.responses import Response
 
 from srip_filter.config import AppConfig
 from srip_filter.ingest import HeaderValidationError, read_csv_records, validate_headers
 from srip_filter.llm.client import BaseLLMClient
-from srip_filter.pipeline import grade_batch
+from srip_filter.pipeline import BatchResult, grade_batch
 
-from .registry import Job, JobState
+from .registry import Job, JobRegistry, JobState
 
 logger = logging.getLogger(__name__)
 
@@ -114,3 +118,59 @@ async def run_job(job: Job, raw: bytes, client: BaseLLMClient, cfg: AppConfig) -
         job.state = JobState.FAILED
     finally:
         job.finished_at = time.monotonic()
+
+
+# ================================================================================================
+# 9.4 — Result download + lifecycle/TTL eviction
+# ================================================================================================
+
+
+class ArtifactName(StrEnum):
+    """The five downloadable Stage-9 outputs (PRD §12). A path param of this type makes FastAPI
+    reject an unknown artifact with 422 and self-document the valid names in the OpenAPI schema."""
+
+    DECISIONS = "decisions"
+    RANKED = "ranked"
+    REJECTED = "rejected"
+    NEEDS_REVIEW = "needs_review"
+    SUMMARY = "summary"
+
+
+# artifact -> (BatchResult attribute, downloaded filename, media type). The four string artifacts
+# are served verbatim; ``summary`` (a dict) is JSON-encoded on the way out.
+_ARTIFACTS: dict[ArtifactName, tuple[str, str, str]] = {
+    ArtifactName.DECISIONS: ("decisions_jsonl", "decisions.jsonl", "application/x-ndjson"),
+    ArtifactName.RANKED: ("ranked_csv", "ranked.csv", "text/csv"),
+    ArtifactName.REJECTED: ("rejected_csv", "rejected.csv", "text/csv"),
+    ArtifactName.NEEDS_REVIEW: ("needs_review_csv", "needs_review.csv", "text/csv"),
+    ArtifactName.SUMMARY: ("summary", "summary.json", "application/json"),
+}
+
+
+def artifact_response(result: BatchResult, artifact: ArtifactName) -> Response:
+    """Build a download :class:`Response` for one in-memory artifact (no disk write).
+
+    Returns the artifact with its correct content type and an ``attachment`` filename so a browser
+    saves it. ``summary`` (a dict) is JSON-encoded; the rest are served as-is.
+    """
+    attr, filename, media_type = _ARTIFACTS[artifact]
+    payload = getattr(result, attr)
+    content = json.dumps(payload, indent=2) if artifact is ArtifactName.SUMMARY else payload
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+async def sweeper_loop(registry: JobRegistry, interval_seconds: float) -> None:
+    """Periodically evict expired jobs so PII-bearing results aren't held past their TTL.
+
+    Runs for the app's lifetime (started/cancelled by the lifespan). Sleeps first so startup is
+    not blocked, then sweeps on every tick; cancellation propagates out of the sleep cleanly.
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        evicted = registry.sweep()
+        if evicted:
+            logger.info("sweeper evicted %d expired job(s)", evicted)

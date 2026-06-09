@@ -15,16 +15,24 @@ everything web lives here. Routes so far:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile, status
 
 from srip_filter.config import AppConfig, get_config
 from srip_filter.llm.client import BaseLLMClient, OpenAILLMClient
 
-from .jobs import read_upload_capped, run_job, validate_csv
-from .registry import JobRegistry
+from .jobs import (
+    ArtifactName,
+    artifact_response,
+    read_upload_capped,
+    run_job,
+    sweeper_loop,
+    validate_csv,
+)
+from .registry import JobRegistry, JobState
 from .schemas import ErrorResponse, HealthResponse, JobCreated, JobStatus
 
 
@@ -49,7 +57,16 @@ def create_app(
         # (not at import) so importing this module never needs an API key.
         if app.state.llm_client is None:
             app.state.llm_client = OpenAILLMClient(app.state.config)
-        yield
+        # Background TTL sweeper drops expired jobs so PII-bearing results aren't held.
+        sweeper = asyncio.create_task(
+            sweeper_loop(app.state.registry, app.state.config.api.job_sweep_seconds)
+        )
+        try:
+            yield
+        finally:
+            sweeper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweeper
 
     app = FastAPI(
         title="SRIP Track 2 Application Filter",
@@ -122,6 +139,54 @@ def create_app(
                 detail="No job with that id; it may have expired or its results were downloaded.",
             )
         return JobStatus.from_job(job)
+
+    @app.get(
+        "/jobs/{job_id}/results/{artifact}",
+        responses={
+            404: {"model": ErrorResponse, "description": "Unknown or evicted job"},
+            409: {"model": ErrorResponse, "description": "Results not ready"},
+        },
+        tags=["jobs"],
+    )
+    async def download_artifact(job_id: str, artifact: ArtifactName) -> Response:
+        """Stream one of the five in-memory result artifacts (PRD §12) with its content type.
+
+        404 if the job is unknown/evicted; 409 if it hasn't succeeded yet (queued/running) or
+        failed (no results). Downloads are non-evicting so all five files can be fetched; the
+        client calls ``DELETE /jobs/{id}`` to discard, and the TTL sweeper is the backstop.
+        """
+        job = app.state.registry.get(job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No job with that id; it may have expired or been discarded.",
+            )
+        if job.state is not JobState.SUCCEEDED or job.result is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Results are not available; job state is '{job.state}'.",
+            )
+        return artifact_response(job.result, artifact)
+
+    @app.delete(
+        "/jobs/{job_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        responses={404: {"model": ErrorResponse, "description": "Unknown or evicted job"}},
+        tags=["jobs"],
+    )
+    async def delete_job(job_id: str) -> Response:
+        """Discard a job and its in-memory results immediately (discard-after-download).
+
+        404 if the job is already unknown/evicted, so a double-discard is reported honestly rather
+        than silently succeeding.
+        """
+        if app.state.registry.get(job_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No job with that id; it may have expired or already been discarded.",
+            )
+        app.state.registry.evict(job_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return app
 

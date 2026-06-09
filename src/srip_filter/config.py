@@ -147,6 +147,7 @@ class ApiConfig(_Strict):
     max_upload_bytes: int = 26_214_400  # 25 MiB — comfortably fits ~2000 rows with long essays
     max_rows: int = 2000
     job_ttl_seconds: float = 3600.0  # 1 hour; results are discarded on download or at TTL
+    job_sweep_seconds: float = 300.0  # how often the background sweeper evicts expired jobs
 
 
 class AppConfig(_Strict):
