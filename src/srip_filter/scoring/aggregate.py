@@ -59,3 +59,60 @@ def finalize_score(record: AuditRecord, cfg: AppConfig) -> AuditRecord:
     """
     record.final_score = compose_final_score(record.scores, cfg)
     return record
+
+
+# ================================================================================================
+# 7.2 — Outcome finalization + deterministic ranking (Stage 8 aggregator, PRD §10.2)
+# ================================================================================================
+# Every gate-survivor (outcome not already REJECTED/NEEDS_REVIEW) is scored and marked RANKED;
+# RANKED applicants are sorted with a deterministic tiebreaker and assigned rank 1..N. There is
+# NO acceptance cutoff — the full ranked list is the deliverable (§11). REJECTED/NEEDS_REVIEW
+# records are left unscored/unranked, so a bonus can never change a rejection (§12 #2).
+
+# Outcomes that were decided by an earlier hard gate / blocker and must not be scored or ranked.
+_TERMINAL_OUTCOMES = frozenset({"REJECTED", "NEEDS_REVIEW"})
+
+
+def _rank_sort_key(record: AuditRecord) -> tuple[float, float, float, str]:
+    """Deterministic tiebreaker chain (PRD §10.2): ``final_score`` desc → ``gpa_points`` desc →
+    ``essay.total`` desc → ``submission_id`` asc.
+
+    The §2 data contract carries no submission timestamp, so the stable UUID ``submission_id`` is
+    the final tiebreak — keeping reruns identical (§12 #5) without depending on a field we lack.
+    Numeric keys are negated so a single ascending sort yields descending score order.
+    """
+    return (
+        -(record.final_score or 0.0),
+        -record.scores.gpa_points,
+        -record.scores.essay.total,
+        record.submission_id,
+    )
+
+
+def rank_records(records: list[AuditRecord], cfg: AppConfig) -> list[AuditRecord]:
+    """Finalize outcomes and assign ranks (Stage 8). Mutates the records, returns the same list.
+
+    Each record whose ``outcome`` is **not** already ``REJECTED``/``NEEDS_REVIEW`` is a
+    gate-survivor: it receives its composed ``final_score`` (7.1) and ``outcome="RANKED"``.
+    ``RANKED`` applicants are then sorted by the deterministic tiebreaker (:func:`_rank_sort_key`)
+    and assigned ``rank`` 1..N. ``REJECTED``/``NEEDS_REVIEW`` records are forced to
+    ``final_score=None``/``rank=None`` (a bonus can never score or rank a rejection — §12 #2).
+
+    The input order is preserved in the returned list; ``rank`` carries the ordering. Re-running on
+    already-ranked records is idempotent — the same scores re-compose and re-sort identically
+    (§12 #5), so ranking is stable across reruns.
+    """
+    ranked: list[AuditRecord] = []
+    for record in records:
+        if record.outcome in _TERMINAL_OUTCOMES:
+            record.final_score = None
+            record.rank = None
+            continue
+        record.outcome = "RANKED"
+        finalize_score(record, cfg)
+        ranked.append(record)
+
+    for position, record in enumerate(sorted(ranked, key=_rank_sort_key), start=1):
+        record.rank = position
+
+    return records
