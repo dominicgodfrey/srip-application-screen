@@ -22,11 +22,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Literal
 
 from ..config import AppConfig, GpaConfig, GpaNormalizationConfig
 from ..llm.client import BaseLLMClient, LLMParseFailure
 from ..llm.prompts import task_a as task_a_prompt
-from ..models import Confidence, GpaSource, TaskAOutput
+from ..models import Confidence, GpaAssessment, GpaGate, GpaSource, TaskAOutput
+
+# Internal Stage-3 verdict. Distinct from the final Outcome: "pass" means the GPA gate is
+# cleared and scoring continues (essays still run) — it is not yet RANKED.
+GpaGateVerdict = Literal["pass", "reject", "needs_review"]
 
 # A fraction "a/b" (e.g. 85/100, 4.5/5, 3.8/4.0). Checked before a bare number so the
 # denominator can pick the scale.
@@ -255,3 +260,107 @@ async def normalize_gpa(
         # Keep the deterministic scale guess; mark unscoreable for a human (reason set at gate).
         return _manual_review_from_llm(det.original_scale, "llm_parse_failure", "low")
     return _from_task_a(out, cfg.gpa)
+
+
+# ================================================================================================
+# 3.3 — GPA points gradient + deterministic gate paths (Stage 3, PRD §8.1 / §6.2)
+# ================================================================================================
+# gpa_points is the pure §8.1 gradient (3.0 -> 0, 3.7 -> 28, 4.0 -> 40). gpa_gate_deterministic
+# decides the branches that need no LLM: an unresolved/manual-review scale -> NEEDS_REVIEW (never
+# REJECTED); >= threshold -> PASS + points; < threshold with a blank explanation -> REJECTED. The
+# remaining branch (< threshold WITH an explanation) needs LLM Task B and is wired in Phase 3.4;
+# this function returns None for it.
+
+
+@dataclass(frozen=True)
+class GpaGateResult:
+    """Stage-3 GPA gate outcome for one applicant.
+
+    ``verdict`` drives the pipeline ("pass" continues to essay scoring; "reject"/"needs_review"
+    are terminal for this stage). ``assessment`` and ``gate`` drop straight into the audit record
+    (``AuditRecord.gpa`` and ``AuditRecord.gates.gpa_gate``). ``gpa_points`` is 0 unless passed.
+    """
+
+    verdict: GpaGateVerdict
+    gpa_points: float
+    reason: str  # "" on pass; names the blocker on reject/needs_review
+    assessment: GpaAssessment
+    gate: GpaGate
+
+
+def gpa_points(normalized_gpa: float, cfg: GpaConfig) -> float:
+    """PRD §8.1 linear gradient over ``[threshold, gpa_max]`` → ``[0, score_max]``, clamped.
+
+    3.0 → 0, 3.7 → 28, 4.0 → 40 with the defaults. Below the threshold clamps to 0; above
+    ``gpa_max`` clamps to ``score_max`` (the normalizer already caps GPA at ``gpa_max``). Pure.
+    """
+    span = cfg.normalization.gpa_max - cfg.threshold
+    if span <= 0:
+        return 0.0
+    frac = max(0.0, min(1.0, (normalized_gpa - cfg.threshold) / span))
+    return round(frac * cfg.score_max, 4)
+
+
+def build_assessment(
+    raw: str, norm: GpaNormalization, explanation_eval: object | None = None
+) -> GpaAssessment:
+    """Project a :class:`GpaNormalization` onto the audit ``GpaAssessment`` block (PRD §9).
+
+    ``explanation_eval`` is the Task B output, populated only when Task B ran (Phase 3.4).
+    """
+    return GpaAssessment(
+        raw=raw or None,
+        normalized_gpa=norm.normalized_gpa,
+        original_scale=norm.original_scale,
+        conversion_method=norm.conversion_method,
+        confidence=norm.confidence,
+        below_threshold=norm.below_threshold,
+        requires_manual_review=norm.requires_manual_review,
+        source=norm.source,
+        explanation_eval=explanation_eval,  # type: ignore[arg-type]
+    )
+
+
+def gpa_gate_deterministic(
+    raw: str, norm: GpaNormalization, explanation: str, cfg: GpaConfig
+) -> GpaGateResult | None:
+    """Decide the GPA gate branches that need no LLM; return ``None`` if Task B is required.
+
+    * unresolved scale (null GPA or ``requires_manual_review``) → ``needs_review`` (PRD §6.2:
+      never a rejection — protects the international contingent);
+    * GPA ≥ ``threshold`` → ``pass`` with gradient points;
+    * GPA < ``threshold`` with a blank explanation → ``reject``;
+    * GPA < ``threshold`` with an explanation present → ``None`` (Phase 3.4 calls Task B).
+    """
+    if norm.normalized_gpa is None or norm.requires_manual_review:
+        reason = "GPA scale could not be normalized"
+        return GpaGateResult(
+            verdict="needs_review",
+            gpa_points=0.0,
+            reason=reason,
+            assessment=build_assessment(raw, norm),
+            gate=GpaGate(passed=False, reason=reason),
+        )
+
+    g = norm.normalized_gpa
+    if g >= cfg.threshold:
+        points = gpa_points(g, cfg)
+        return GpaGateResult(
+            verdict="pass",
+            gpa_points=points,
+            reason="",
+            assessment=build_assessment(raw, norm),
+            gate=GpaGate(passed=True, reason=f"normalized {g} >= {cfg.threshold}"),
+        )
+
+    if not explanation.strip():
+        reason = f"GPA below {cfg.threshold}, no explanation"
+        return GpaGateResult(
+            verdict="reject",
+            gpa_points=0.0,
+            reason=reason,
+            assessment=build_assessment(raw, norm),
+            gate=GpaGate(passed=False, reason=reason),
+        )
+
+    return None  # < threshold with an explanation -> LLM Task B (Phase 3.4)

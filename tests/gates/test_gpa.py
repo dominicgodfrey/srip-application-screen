@@ -12,6 +12,8 @@ import pytest
 from srip_filter.config import AppConfig
 from srip_filter.gates.gpa import (
     GpaNormalization,
+    gpa_gate_deterministic,
+    gpa_points,
     normalize_gpa,
     normalize_gpa_deterministic,
 )
@@ -283,3 +285,62 @@ async def test_identical_raw_dedups_within_run() -> None:
     await normalize_gpa("4.27", client, APP)
     await normalize_gpa("4.27", client, APP)
     assert len(client.calls) == 1  # cache_text=raw dedups the second call
+
+
+# ================================================================================================
+# 3.3 — GPA points gradient + deterministic gate paths (no LLM)
+# ================================================================================================
+
+
+@pytest.mark.parametrize(
+    "g,expected",
+    [(3.0, 0.0), (3.2, 8.0), (3.5, 20.0), (3.7, 28.0), (4.0, 40.0)],
+)
+def test_gpa_points_gradient(g: float, expected: float) -> None:
+    assert gpa_points(g, CFG) == pytest.approx(expected)
+
+
+def test_gpa_points_clamped_below_and_above() -> None:
+    assert gpa_points(2.5, CFG) == 0.0  # below threshold clamps to 0
+    assert gpa_points(4.5, CFG) == pytest.approx(40.0)  # above gpa_max clamps to score_max
+
+
+def _resolved_norm(g: float) -> GpaNormalization:
+    return normalize_gpa_deterministic(str(g), CFG)
+
+
+def test_gate_pass_at_or_above_threshold() -> None:
+    res = gpa_gate_deterministic("3.7", _resolved_norm(3.7), "", CFG)
+    assert res is not None
+    assert res.verdict == "pass"
+    assert res.gpa_points == pytest.approx(28.0)
+    assert res.gate.passed is True
+    assert res.assessment.normalized_gpa == pytest.approx(3.7)
+
+
+def test_gate_exactly_threshold_passes_with_zero_points() -> None:
+    res = gpa_gate_deterministic("3.0", _resolved_norm(3.0), "", CFG)
+    assert res is not None
+    assert res.verdict == "pass"
+    assert res.gpa_points == 0.0
+
+
+def test_gate_below_threshold_blank_explanation_rejected() -> None:
+    res = gpa_gate_deterministic("2.5", _resolved_norm(2.5), "   ", CFG)
+    assert res is not None
+    assert res.verdict == "reject"
+    assert res.gpa_points == 0.0
+    assert "no explanation" in res.gate.reason  # names the blocker (PRD §12)
+
+
+def test_gate_unresolved_scale_needs_review_never_rejected() -> None:
+    # A blank GPA normalizes to manual review; the gate must send it to NEEDS_REVIEW.
+    res = gpa_gate_deterministic("", normalize_gpa_deterministic("", CFG), "", CFG)
+    assert res is not None
+    assert res.verdict == "needs_review"
+    assert res.gate.passed is False
+
+
+def test_gate_below_threshold_with_explanation_defers_to_task_b() -> None:
+    res = gpa_gate_deterministic("2.5", _resolved_norm(2.5), "I was seriously ill", CFG)
+    assert res is None  # Phase 3.4 (Task B) decides this branch
