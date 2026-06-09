@@ -28,6 +28,7 @@ the deterministic affirmation check, isolated so they are fully testable without
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
@@ -280,6 +281,7 @@ async def grade_batch(
     source: str | Path | bytes | IO[bytes],
     client: BaseLLMClient,
     cfg: AppConfig,
+    progress: Callable[[int, int], None] | None = None,
 ) -> BatchResult:
     """Run the whole pipeline over an uploaded CSV: ingest → grade → rank → emit (Stages 0-9).
 
@@ -290,13 +292,30 @@ async def grade_batch(
     becomes a ``NEEDS_REVIEW`` record, never an aborted batch. Stage 8
     :func:`~srip_filter.scoring.aggregate.rank_records` composes scores and assigns ranks, then the
     Stage 9 serializers build the five in-memory artifacts. Stateless — nothing is persisted.
+
+    ``progress`` is an optional ``(rows_done, rows_total)`` callback for a caller that wants live
+    progress (the API poll, Phase 9.3). It is invoked once with ``(0, total)`` after ingest and
+    again after each row finishes; the final call is ``(total, total)``. The core never imports the
+    caller — this is the only HTTP-aware seam, kept signature-compatible (default ``None``). Safe
+    under the concurrent gather: increments happen at ``await`` boundaries on the single event loop,
+    so the counter is never raced.
     """
     ingest = ingest_csv(source)
-    records = list(
-        await asyncio.gather(
-            *(grade_one(deduped, ingest.resolution, client, cfg) for deduped in ingest.rows)
-        )
-    )
+    total = len(ingest.rows)
+    if progress is not None:
+        progress(0, total)
+
+    done = 0
+
+    async def _graded(deduped: DedupedRow) -> AuditRecord:
+        nonlocal done
+        record = await grade_one(deduped, ingest.resolution, client, cfg)
+        done += 1
+        if progress is not None:
+            progress(done, total)
+        return record
+
+    records = list(await asyncio.gather(*(_graded(deduped) for deduped in ingest.rows)))
     rank_records(records, cfg)
     return BatchResult(
         records=records,

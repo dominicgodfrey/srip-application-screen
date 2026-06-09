@@ -25,7 +25,7 @@ from srip_filter.llm.client import BaseLLMClient, OpenAILLMClient
 
 from .jobs import read_upload_capped, run_job, validate_csv
 from .registry import JobRegistry
-from .schemas import ErrorResponse, HealthResponse, JobCreated
+from .schemas import ErrorResponse, HealthResponse, JobCreated, JobStatus
 
 
 def create_app(
@@ -101,6 +101,27 @@ def create_app(
         app.state.background_tasks.add(task)
         task.add_done_callback(app.state.background_tasks.discard)
         return JobCreated(job_id=job.job_id, state=job.state)
+
+    @app.get(
+        "/jobs/{job_id}",
+        response_model=JobStatus,
+        responses={404: {"model": ErrorResponse, "description": "Unknown or evicted job"}},
+        tags=["jobs"],
+    )
+    async def get_job(job_id: str) -> JobStatus:
+        """Poll a job's lifecycle + progress; once succeeded, the run ``summary`` is included.
+
+        An unknown id — never created, or already evicted on download / past TTL — is a 404. A
+        failed job reports ``state="failed"`` with a safe one-line message (never PII or a stack
+        trace). Progress (``rows_done``/``rows_total``) is updated live by the grading callback.
+        """
+        job = app.state.registry.get(job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No job with that id; it may have expired or its results were downloaded.",
+            )
+        return JobStatus.from_job(job)
 
     return app
 

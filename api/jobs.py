@@ -98,12 +98,15 @@ async def run_job(job: Job, raw: bytes, client: BaseLLMClient, cfg: AppConfig) -
     failure. ``finished_at`` is always stamped so the TTL clock starts.
     """
     job.state = JobState.RUNNING
+
+    def _progress(rows_done: int, rows_total: int) -> None:
+        # Called by grade_batch after ingest (0, total) and after each row; drives the poll.
+        job.rows_done = rows_done
+        job.rows_total = rows_total
+
     try:
-        result = await grade_batch(raw, client, cfg)
+        result = await grade_batch(raw, client, cfg, progress=_progress)
         job.result = result
-        # Until the 9.3 progress callback lands, report completion as all-kept-rows-done.
-        job.rows_total = result.ingest_report.kept_count
-        job.rows_done = result.ingest_report.kept_count
         job.state = JobState.SUCCEEDED
     except Exception:  # safety net — grade_batch isolates per-row errors, so this is unexpected
         logger.exception("grading job %s failed", job.job_id)

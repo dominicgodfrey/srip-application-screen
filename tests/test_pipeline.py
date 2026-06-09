@@ -383,6 +383,22 @@ async def test_grade_batch_dedups_surplus_email_before_grading() -> None:
     assert len(result.ingest_report.duplicate_email_dropped) == 1
 
 
+async def test_grade_batch_reports_progress() -> None:
+    # The optional progress callback (the API poll's seam): (0, total) after ingest, then a tick
+    # per finished row, ending at (total, total). Default None must remain signature-compatible.
+    rows = [_csv_row("s-good"), _csv_row("s-short", essay1="too short"), _csv_row("s-good2")]
+    client = FakeLLMClient(APP, handler=_good_handler)
+
+    seen: list[tuple[int, int]] = []
+    await grade_batch(_csv_bytes(rows), client, APP, progress=lambda d, t: seen.append((d, t)))
+
+    assert seen[0] == (0, 3)  # primed after ingest, before grading
+    assert seen[-1] == (3, 3)  # all rows accounted for
+    done_values = [done for done, _ in seen]
+    assert done_values == sorted(done_values)  # monotonic, never goes backwards
+    assert all(total == 3 for _, total in seen)
+
+
 # ------------------------------------------------------------------------------------------------
 # 8.4 — end-to-end §12 invariant + fail-fast spend suite
 # ------------------------------------------------------------------------------------------------
