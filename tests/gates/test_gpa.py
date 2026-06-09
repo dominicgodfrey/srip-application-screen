@@ -10,9 +10,16 @@ from __future__ import annotations
 import pytest
 
 from srip_filter.config import AppConfig
-from srip_filter.gates.gpa import GpaNormalization, normalize_gpa_deterministic
+from srip_filter.gates.gpa import (
+    GpaNormalization,
+    normalize_gpa,
+    normalize_gpa_deterministic,
+)
+from srip_filter.llm.client import FakeLLMClient, LLMParseFailure
+from srip_filter.models import TaskAOutput
 
-CFG = AppConfig().gpa
+APP = AppConfig()
+CFG = APP.gpa
 
 
 def _norm(raw: str) -> GpaNormalization:
@@ -184,3 +191,95 @@ def test_deterministic_pass_never_rejects(raw: str) -> None:
 def test_result_is_capped_at_gpa_max() -> None:
     # A clean value is never above the cap; a fraction that computes above 4.0 is capped.
     assert _norm("4.0").normalized_gpa == pytest.approx(4.0)
+
+
+# ================================================================================================
+# 3.2 — Task A fallback + normalize_gpa orchestration (LLM, mocked; no API spend)
+# ================================================================================================
+
+
+def _task_a(
+    normalized_gpa: float | None = 3.8,
+    *,
+    requires_manual_review: bool = False,
+    confidence: str = "med",
+    scale: str = "weighted_gt_4",
+) -> TaskAOutput:
+    return TaskAOutput(
+        normalized_gpa=normalized_gpa,
+        original_scale=scale,
+        conversion_method="estimated",
+        confidence=confidence,  # type: ignore[arg-type]
+        requires_manual_review=requires_manual_review,
+        rationale="",
+    )
+
+
+def _client(handler) -> FakeLLMClient:  # type: ignore[no-untyped-def]
+    return FakeLLMClient(APP, handler=handler)
+
+
+async def test_deterministic_value_never_calls_task_a() -> None:
+    client = _client(lambda t, u, s: _task_a())
+    r = await normalize_gpa("3.5", client, APP)
+    assert r.source == "deterministic"
+    assert r.normalized_gpa == pytest.approx(3.5)
+    assert client.calls == []  # fail-fast: no token spent on a resolvable value
+
+
+async def test_blank_never_calls_task_a() -> None:
+    client = _client(lambda t, u, s: _task_a())
+    r = await normalize_gpa("", client, APP)
+    assert r.requires_manual_review is True
+    assert r.source == "deterministic"
+    assert client.calls == []
+
+
+async def test_needs_llm_value_calls_task_a_and_maps_result() -> None:
+    client = _client(lambda t, u, s: _task_a(normalized_gpa=3.8, confidence="med"))
+    r = await normalize_gpa("4.27", client, APP)
+    assert client.calls and client.calls[0][0] == "task_a"
+    assert r.source == "llm"
+    assert r.normalized_gpa == pytest.approx(3.8)
+    assert r.confidence == "med"
+    assert r.below_threshold is False
+    assert r.needs_llm is False
+
+
+async def test_task_a_estimate_capped_at_gpa_max() -> None:
+    client = _client(lambda t, u, s: _task_a(normalized_gpa=4.6))
+    r = await normalize_gpa("4.635", client, APP)
+    assert r.normalized_gpa == pytest.approx(4.0)
+
+
+async def test_task_a_requires_manual_review_maps_to_needs_review() -> None:
+    client = _client(lambda t, u, s: _task_a(normalized_gpa=None, requires_manual_review=True))
+    r = await normalize_gpa("my school doesn't offer GPAs", client, APP)
+    assert r.requires_manual_review is True
+    assert r.normalized_gpa is None
+    assert r.source == "llm"
+
+
+async def test_task_a_null_estimate_maps_to_manual_review() -> None:
+    client = _client(lambda t, u, s: _task_a(normalized_gpa=None, requires_manual_review=False))
+    r = await normalize_gpa("N/A", client, APP)
+    assert r.requires_manual_review is True
+    assert r.normalized_gpa is None
+
+
+async def test_llm_parse_failure_routes_to_manual_review_never_rejects() -> None:
+    def boom(t, u, s):  # type: ignore[no-untyped-def]
+        raise LLMParseFailure(t, "bad json")
+
+    client = _client(boom)
+    r = await normalize_gpa("IGCSE grades: A*,A*,A,B", client, APP)
+    assert r.requires_manual_review is True
+    assert r.source == "llm"
+    assert r.conversion_method == "llm_parse_failure"
+
+
+async def test_identical_raw_dedups_within_run() -> None:
+    client = _client(lambda t, u, s: _task_a())
+    await normalize_gpa("4.27", client, APP)
+    await normalize_gpa("4.27", client, APP)
+    assert len(client.calls) == 1  # cache_text=raw dedups the second call

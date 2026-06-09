@@ -23,8 +23,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ..config import GpaConfig, GpaNormalizationConfig
-from ..models import Confidence, GpaSource
+from ..config import AppConfig, GpaConfig, GpaNormalizationConfig
+from ..llm.client import BaseLLMClient, LLMParseFailure
+from ..llm.prompts import task_a as task_a_prompt
+from ..models import Confidence, GpaSource, TaskAOutput
 
 # A fraction "a/b" (e.g. 85/100, 4.5/5, 3.8/4.0). Checked before a bare number so the
 # denominator can pick the scale.
@@ -185,3 +187,71 @@ def normalize_gpa_deterministic(raw: str, cfg: GpaConfig) -> GpaNormalization:
         return _resolved(value, "four_point", "clean_4_scale", cfg)
     # Out of the clean 0..4.0 band: weighted (>4), a bare percentage/out-of-N, or negative.
     return _route_to_llm("weighted_gt_4" if value > cfg.normalization.gpa_max else "unknown")
+
+
+# ================================================================================================
+# 3.2 — Task A fallback + Stage 2 orchestration (LLM)
+# ================================================================================================
+# normalize_gpa runs the deterministic path first and calls Task A *only* for the values it
+# flagged (needs_llm). Task A's estimate is capped at gpa_max; a value Task A cannot safely place
+# (requires_manual_review, or a null estimate) becomes requires_manual_review=True -> NEEDS_REVIEW
+# at the gate. An LLM parse failure routes to manual review too — never a rejection (PRD §8).
+
+
+def _manual_review_from_llm(scale: str, method: str, confidence: Confidence) -> GpaNormalization:
+    """A value Task A (or a parse failure) could not place -> manual review, source=llm."""
+    return GpaNormalization(
+        normalized_gpa=None,
+        original_scale=scale,
+        conversion_method=method,
+        confidence=confidence,
+        below_threshold=None,
+        requires_manual_review=True,
+        source="llm",
+        needs_llm=False,
+    )
+
+
+def _from_task_a(out: TaskAOutput, cfg: GpaConfig) -> GpaNormalization:
+    """Map a Task A output onto :class:`GpaNormalization`, capping the estimate at ``gpa_max``."""
+    if out.requires_manual_review or out.normalized_gpa is None:
+        return _manual_review_from_llm(out.original_scale, out.conversion_method, out.confidence)
+    capped = round(min(out.normalized_gpa, cfg.normalization.gpa_max), 4)
+    return GpaNormalization(
+        normalized_gpa=capped,
+        original_scale=out.original_scale,
+        conversion_method=out.conversion_method,
+        confidence=out.confidence,
+        below_threshold=capped < cfg.threshold,
+        requires_manual_review=False,
+        source="llm",
+        needs_llm=False,
+    )
+
+
+async def normalize_gpa(
+    raw: str, client: BaseLLMClient, cfg: AppConfig
+) -> GpaNormalization:
+    """Stage 2: normalize a raw GPA, deterministic-first, with LLM Task A as the fallback.
+
+    Resolves and returns immediately for any value the deterministic parser handled or sent to
+    manual review. Only a ``needs_llm`` value reaches Task A; its estimate is capped at
+    ``gpa_max`` and an unplaceable result (or an :class:`LLMParseFailure` after the client's
+    retry) becomes ``requires_manual_review`` — i.e. ``NEEDS_REVIEW``, never a rejection. The raw
+    string is used as ``cache_text`` so identical GPAs dedup within a run.
+    """
+    det = normalize_gpa_deterministic(raw, cfg.gpa)
+    if not det.needs_llm:
+        return det
+    try:
+        out = await client.complete(
+            "task_a",
+            system=task_a_prompt.SYSTEM,
+            user=task_a_prompt.user_prompt(raw),
+            schema=TaskAOutput,
+            cache_text=raw,
+        )
+    except LLMParseFailure:
+        # Keep the deterministic scale guess; mark unscoreable for a human (reason set at gate).
+        return _manual_review_from_llm(det.original_scale, "llm_parse_failure", "low")
+    return _from_task_a(out, cfg.gpa)
