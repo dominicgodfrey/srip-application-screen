@@ -7,11 +7,12 @@ for what to build.
 Phase 3 — GPA normalization + gate (Stages 2–3)
 
 ## Active Sub-Task
-Phase 2 complete (all of Stage 1 essay gates — length / profanity / gibberish / aggregator).
-Next action: Phase 3 — GPA normalization + gate in `src/srip_filter/gates/gpa.py`. Start with
-the deterministic normalizer (clean 4.0 values, percentage table §6.1, /5 and /10 scales,
-trailing-label strip) producing the §6.1 output dict; route ambiguous/non-standard values to
-LLM Task A, sub-3.0-with-explanation to Task B, and unscalable → `NEEDS_REVIEW` (never reject).
+Phase 2 complete (all of Stage 1 essay gates). Phase 3 now broken into 3.1–3.4 (see Phase Map).
+Next action: Phase 3.1 — deterministic GPA normalizer in `src/srip_filter/gates/gpa.py`:
+`normalize_gpa_deterministic(raw, cfg)` → `GpaNormalization` (clean 4.0, §6.1 percentage table,
+/5 and /10 scales, trailing-label strip; `needs_llm` flag when it can't confidently resolve).
+Add a `gpa.normalization` CONFIG block (percentage→4.0 table + scale/route thresholds) to
+config.py + config.yaml. Pure functions, no LLM; tests over the messy §2 GPA cases.
 
 ---
 
@@ -55,9 +56,44 @@ with the API. Build in order — fail-fast ordering means later stages depend on
         essays, sets the verdict (REJECTED if either essay hard-fails length OR any profanity/
         gibberish hit), carries the two soft length penalties forward, and fills the audit
         `Gates` blocks (`essay_length`, `profanity`, `gibberish`). Integration tests.
-- **Phase 3 — GPA normalization + gate (Stages 2–3)**
-  - Deterministic parsing (4.0 / %, /5, /10, label-strip); Task A for ambiguous; Task B for
-    sub-3.0 + explanation; unscalable → `NEEDS_REVIEW`
+- **Phase 3 — GPA normalization + gate (Stages 2–3)** — `src/srip_filter/gates/gpa.py`,
+  tests `tests/gates/test_gpa.py`. Stage 2 normalizes (deterministic-first, LLM Task A only when
+  needed); Stage 3 gates. Hard invariants (PRD §1/§6.2): an unresolvable/blank scale →
+  `NEEDS_REVIEW` (never `REJECTED`); GPA ≥ 3.0 → PASS + gradient points; GPA < 3.0 needs a
+  severity-scaled explanation (Task B) or it is `REJECTED`. Produces the §9 `gpa` audit block
+  (`GpaAssessment`) + the `gpa_gate` block + a verdict. The LLM-touching sub-tasks (3.2 Task A,
+  3.4 Task B) are isolated so 3.1/3.3 stay fully testable with zero API spend; LLM tests use
+  `FakeLLMClient`.
+  - 3.1 Deterministic normalizer (no LLM, PRD §6.1): `normalize_gpa_deterministic(raw, cfg)` →
+        a `GpaNormalization` result. Resolves clean `0.0–4.0`, percentages via the §6.1 table,
+        clear `/5` and `/10` scales, and trailing-label strip (`3.97 GPA`, `3.8/4.0 unweighted`).
+        Fills `{normalized_gpa, original_scale, conversion_method, confidence, below_threshold,
+        requires_manual_review, source="deterministic"}`. When it cannot confidently resolve
+        (value > route threshold ≈4.5, non-numeric scale, foreign curriculum, unparseable) it
+        returns a `needs_llm` routing flag — no decision yet. Centralizes the percentage→4.0
+        table + scale/route thresholds in a new `gpa.normalization` CONFIG block (config.py +
+        config.yaml). Pure functions; tests over the messy §2 GPA cases.
+  - 3.2 Task A fallback + `normalize_gpa` orchestration (LLM, PRD §6.1 / §8): `prompts/` Task-A
+        template; async `normalize_gpa(raw, client, cfg)` runs the deterministic path first and
+        calls Task A **only** for `needs_llm` values. Caps the LLM result at 4.0, sets
+        `source="llm"` + `confidence`, and maps Task A `requires_manual_review` (or low-confidence
+        unplaceable, e.g. `N/A` / "no GPA" / blank) → `requires_manual_review=True` (→ `NEEDS_REVIEW`
+        at the gate). `LLMParseFailure` → manual-review routing, never a reject. Passes the GPA
+        string as `cache_text` so identical values dedup in-run. `FakeLLMClient` tests, no spend.
+  - 3.3 GPA points gradient + deterministic gate paths (PRD §8.1, §6.2): pure
+        `gpa_points(normalized_gpa, cfg)` = `clamp((g−3.0)/(4.0−3.0),0,1) * gpa_score_max`
+        (3.0→0, 3.7→28, 4.0→40); plus the non-LLM branches of the gate — null/`requires_manual_review`
+        → `NEEDS_REVIEW`; ≥3.0 → PASS + points; <3.0 with a blank explanation → `REJECTED`.
+        Returns a `GpaGateResult` (verdict + points + populated `GpaAssessment`/`GpaGate` audit
+        blocks). Deterministic; tests cover the gradient endpoints and each branch.
+  - 3.4 Task B low-GPA adequacy + Stage 2–3 aggregator (LLM, PRD §8.2, §6.2): `prompts/` Task-B
+        template; wire the `<3.0 + explanation present` branch — call Task B with
+        `(normalized_gpa, gap=3.0−g, explanation)`; `recommended_outcome=="rank"` → PASS + (low)
+        points with the deficit reflected, else → `REJECTED` (reason = Task B rationale); store the
+        `TaskBOutput` in `GpaAssessment.explanation_eval`. Assemble async `assess_gpa(row, client,
+        cfg)` tying Stage 2 → Stage 3. PRD §12 invariant tests: GPA < 3.0 never yields points
+        without an approved Task B and never scores above the bottom of the gradient; nothing
+        unscoreable is `REJECTED`. `FakeLLMClient`, no spend.
 - **Phase 4 — Essay LLM grading (Stage 4, Task D)**
   - Gibberish check first, then relevance gate (off-topic → REJECTED), then quality score;
     soft length/grammar penalties applied
@@ -114,7 +150,10 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - (none)
 
 ## Next Up
-- [ ] Phase 3 — GPA normalization + gate (deterministic + Task A/B)
+- [ ] Phase 3.1 — deterministic GPA normalizer (4.0 / %, /5, /10, label-strip) + gpa CONFIG
+- [ ] Phase 3.2 — Task A fallback + `normalize_gpa` orchestration (LLM, mocked)
+- [ ] Phase 3.3 — GPA points gradient (§8.1) + deterministic gate paths
+- [ ] Phase 3.4 — Task B low-GPA adequacy + Stage 2–3 aggregator `assess_gpa` (LLM, mocked)
 - [ ] Phase 4 — Essay LLM grading (Stage 4, Task D)
 
 ## How to Verify Completed Work
@@ -126,6 +165,8 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - Phase 1 (all): `uv run pytest tests/test_ingest.py` (header resolution, load/normalize,
   identity, dedup, and the `ingest_csv` synthetic-CSV integration tests)
 - Phase 2:   `uv run pytest tests/gates/test_essays.py`
+- Phase 3:   `uv run pytest tests/gates/test_gpa.py` (deterministic normalize, Task A/B mocked
+  fallback, gradient endpoints, gate branches, and the §12 GPA invariants)
 - Phase 7:   `uv run pytest tests/scoring/test_aggregate.py` (covers all §12 invariants)
 - Phase 8:   `uv run pytest tests/test_pipeline.py` (synthetic CSV end-to-end)
 
@@ -204,6 +245,13 @@ Structural facts only — never real applicant content.
   LLM stages, not these. Reject if either essay hard-fails length OR profanity/gibberish hits
   either essay; soft length penalties are carried to Stage 4, never a rejection. `primary_reason`
   names the failing gate in fail-fast order (length → profanity → gibberish) so no reject is silent.
+- **Phase 3 breakdown (plan-time):** split Stage 2–3 into 3.1 deterministic normalize, 3.2 Task A
+  fallback, 3.3 points-gradient + deterministic gate paths, 3.4 Task B + aggregator. Rationale:
+  isolate the two LLM-touching sub-tasks (A, B) so the deterministic majority (most GPAs resolve
+  without a call) is covered by zero-spend tests, mirroring Phase 2. The §6.1 percentage→4.0 table
+  and the scale/route thresholds (the ≈4.5 "route to Task A" line, /5 and /10 handling) will live
+  in a new `gpa.normalization` CONFIG block — they are magic numbers and belong in config.yaml,
+  not logic. Hard line preserved: an unresolvable/blank scale is `NEEDS_REVIEW`, never `REJECTED`.
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
