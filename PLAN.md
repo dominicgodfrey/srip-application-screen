@@ -7,15 +7,13 @@ for what to build.
 Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
 
 ## Active Sub-Task
-Phase 7 complete (Stages 8–9: `scoring/aggregate.py` `compose_final_score`/`finalize_score`/
-`rank_records`, `outputs.py` five-artifact emission, consolidated §12 invariant suite). Next
-action: **Phase 8 — Orchestration** (`pipeline.grade_batch`). Wire Stages 0→9 into the ordered
-fail-fast batch runner: ingest → essay gates → GPA gate → essay grading → coursework/school/resume
-bonuses → aggregate/rank → emit. Per-row `try/except` so one failure becomes a `NEEDS_REVIEW` row
-(not an aborted batch); bounded async over the LLM client. The orchestrator owns building each
-`AuditRecord` from the per-stage results and supplies the two resolved essay-question headers
-(from `HeaderResolution.role_to_header`) to `grade_essays`. Integration test on a synthetic CSV
-with a `FakeLLMClient`.
+Phase 7 complete (Stages 8–9). Phase 8 (orchestration, `pipeline.py`) now broken into 8.1–8.4
+(see Phase Map). Next action: **Phase 8.1** — deterministic, pure orchestration glue in
+`src/srip_filter/pipeline.py`: `build_base_record(deduped, resolution) -> AuditRecord` (identity /
+email / `program_choices` / `dedup` block, no scoring) and the affirmation validity check
+`affirmation_ok(row, resolution) -> bool` (unchecked truthfulness affirmation → `NEEDS_REVIEW`, but
+**only when the affirmation column actually resolved** — an absent column must not flag everyone).
+Pure, zero-spend tests (`tests/test_pipeline.py`). No new config, no owner dependency.
 
 ---
 
@@ -225,8 +223,54 @@ with the API. Build in order — fail-fast ordering means later stages depend on
         a `REJECTED` outcome, (3) every `REJECTED` record names the failing gate in `primary_reason`,
         (4) GPA < 3.0 never yields points without an approved Task B and never above the gradient
         bottom, (5) ranking is stable across reruns. Deterministic, no API spend.
-- **Phase 8 — Orchestration (`pipeline.grade_batch`)**
-  - Ordered fail-fast runner; per-row error isolation; bounded async; integration test on synthetic CSV
+- **Phase 8 — Orchestration (`pipeline.grade_batch`)** — `src/srip_filter/pipeline.py`,
+  tests `tests/test_pipeline.py`. Wires Stages 0→9 into the ordered fail-fast batch runner. The
+  core stays transport-agnostic (no FastAPI/HTTP here — that is Phase 9). Fail-fast order per row:
+  Stage 1 essay gates (→ `REJECTED`) → affirmation validity (→ `NEEDS_REVIEW`) → Stage 2–3 GPA
+  (→ `REJECTED`/`NEEDS_REVIEW`) → Stage 4 essay grading (→ `REJECTED`/`NEEDS_REVIEW`) → Stages
+  5/6/7 bonuses (additive only) → survivor marked `RANKED` (`final_score` filled by Stage 8).
+  `REJECTED` precedence over `NEEDS_REVIEW` is preserved by running the hard gates first. Split:
+  deterministic glue (8.1) → per-applicant runner (8.2) → batch runner (8.3) → end-to-end §12 +
+  fail-fast spend suite (8.4). No new config (`llm.max_concurrency` already bounds concurrency);
+  no owner dependency.
+  - 8.1 Base record + affirmation validity (deterministic, pure, no LLM):
+        `build_base_record(deduped: DedupedRow, resolution) -> AuditRecord` fills identity
+        (`submission_id`/`name`/`email`), `program_choices` (first/second/third from the row), and
+        the `dedup` block from `DedupInfo`; outcome starts at a non-terminal placeholder. Plus
+        `affirmation_ok(row, resolution) -> bool`: an unchecked truthfulness affirmation →
+        `NEEDS_REVIEW`, but the check **only fires when the affirmation role resolved** (in
+        `resolution.role_to_header`) — an absent column can't be read as "everyone unchecked"
+        (§0.7: never silently reject/route). Pure; zero-spend tests over present-and-checked,
+        present-and-blank, and column-absent.
+  - 8.2 Per-applicant fail-fast runner (`grade_one`, LLM): async
+        `grade_one(deduped, resolution, client, cfg) -> AuditRecord`. Sequences the stages in
+        fail-fast order on one `ApplicantRow`, filling every audit block as it goes
+        (`gates.*`, `gpa`, `scores`, `coursework_breakdown`, `school_match`, `reasons`,
+        `llm_calls`, `errors`) and setting the terminal outcome + `decided_at_stage` +
+        `primary_reason` the moment a gate fires (zero LLM spend past a Stage-1/affirmation stop).
+        Survivors get `outcome="RANKED"` with `final_score=None` (Stage 8 fills score/rank). Reads
+        the two resolved essay-question headers from `resolution.role_to_header` and passes them
+        to `grade_essays` (the Phase 4 decision). Reconciles the two gibberish findings (Stage 1
+        cheap heuristic + Task D backstop) into `gates.gibberish`. A Task B/D `LLMParseFailure`
+        (already surfaced by those stages) → `NEEDS_REVIEW`; coursework parse failure → 0 bonus
+        (Phase 5 decision), never a block. Whole body wrapped in `try/except` → on any unexpected
+        error, `NEEDS_REVIEW` with an `errors[]` note (per-row isolation: "when grading begins it
+        finishes"). `FakeLLMClient` tests over each branch — REJECTED at Stage 1, NEEDS_REVIEW on
+        unchecked affirmation, RANKED survivor with full Scores, parse-failure routing, and the
+        unexpected-exception → NEEDS_REVIEW path.
+  - 8.3 Batch runner (`grade_batch`, LLM): async `grade_batch(source, client, cfg) -> BatchResult`.
+        Runs Stage 0 `ingest_csv(source)`, fires `grade_one` for every kept row concurrently
+        (`asyncio.gather`; the client's `Semaphore` bounds real concurrency), then Stage 8
+        `rank_records(records, cfg)` and Stage 9 `outputs.py` (in-memory artifacts). Returns a
+        `BatchResult` bundling the `AuditRecord` list, the five artifacts (`decisions.jsonl` +
+        3 CSVs + `summary.json`), and the Stage-0 `IngestReport` (so a shrinking row count is
+        explained). Stateless: artifacts are in-memory; `write_outputs` is the opt-in disk path.
+        `FakeLLMClient` integration test on a small synthetic CSV.
+  - 8.4 End-to-end §12 + fail-fast spend suite (`tests/test_pipeline.py`): a synthetic CSV
+        exercising all three outcomes through `grade_batch` with a scripted `FakeLLMClient`.
+        Asserts the five PRD §12 invariants hold **end-to-end** (the full pass deferred from Phase
+        7) and that fail-fast holds: a row rejected at Stage 1 (or routed by the affirmation check)
+        makes **zero** LLM calls (assert against the fake's call log). Deterministic, no real spend.
 - **Phase 9 — API layer (FastAPI, stateless)**
   - Upload CSV → background job (in-memory registry) → progress poll → downloadable results;
     nothing persisted; input validation + size caps
@@ -315,7 +359,10 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - (none)
 
 ## Next Up
-- [ ] Phase 8 — Orchestration (`pipeline.grade_batch`)
+- [ ] Phase 8.1 — `build_base_record` + `affirmation_ok` (deterministic glue, pure)
+- [ ] Phase 8.2 — `grade_one` per-applicant fail-fast runner (LLM)
+- [ ] Phase 8.3 — `grade_batch` batch runner (ingest → concurrent grade_one → rank → emit)
+- [ ] Phase 8.4 — end-to-end §12 invariant + fail-fast spend suite (`tests/test_pipeline.py`)
 - [ ] Phase 9 — API layer (FastAPI, stateless)
 
 ## How to Verify Completed Work
@@ -553,6 +600,37 @@ Structural facts only — never real applicant content.
   empty `RANKED` set → `{}`. CSVs use `lineterminator="\n"` (not the csv default `\r\n`) for
   portability. The rejected CSV's "failing_stage" column = `decided_at_stage`; the §12 #3 gate name
   lives in `primary_reason` (the invariant field).
+
+- **Phase 8 breakdown (plan-time):** orchestration lives in `src/srip_filter/pipeline.py` (the
+  transport-agnostic core; FastAPI is Phase 9). Split 8.1 deterministic glue → 8.2 per-applicant
+  runner → 8.3 batch runner → 8.4 end-to-end suite, isolating the pure record-assembly + affirmation
+  logic (zero-spend testable) from the LLM-driven sequencing, mirroring the isolate-the-LLM pattern
+  of Phases 3–5. Decisions to settle in implementation:
+  (a) **The affirmation-unchecked → `NEEDS_REVIEW` check (PRD §2/§10.2) is implemented here, in
+  Phase 8** — it exists in no stage module today. It is deterministic and cheap, so it runs early
+  (before any LLM spend), but it **only fires when the affirmation column actually resolved** (is
+  in `resolution.role_to_header`); an absent column must not be read as "everyone unchecked" and
+  blanket-route the whole batch. The affirmation role is optional in the §2 contract, so this guard
+  is load-bearing.
+  (b) **Fail-fast order: `REJECTED` precedes `NEEDS_REVIEW`.** Per row: Stage 1 essay gates
+  (REJECTED) → affirmation (NEEDS_REVIEW) → Stage 2–3 GPA → Stage 4 essays → bonuses. Running the
+  hard reject gates first honors §0.7 ("the only path to REJECTED is an affirmative hard-gate
+  failure") — an applicant who both wrote profanity and left the affirmation blank is `REJECTED`,
+  not `NEEDS_REVIEW`.
+  (c) **Survivors leave `grade_one` as `outcome="RANKED"` with `final_score=None`.** The
+  `AuditRecord.outcome` Literal has no "pending" value, so a gate-survivor is marked `RANKED`
+  immediately; Stage 8 `rank_records` (which treats any non-terminal outcome as a survivor) then
+  fills `final_score` + `rank`. No schema change needed.
+  (d) **Per-row isolation:** the whole `grade_one` body is wrapped in `try/except`; an unexpected
+  error becomes a `NEEDS_REVIEW` record with an `errors[]` note, never an aborted batch ("when
+  grading begins, it finishes"). This is distinct from the *designed* `NEEDS_REVIEW` routes
+  (unscalable GPA, unchecked affirmation, Task B/D parse failure). Coursework/resume failures stay
+  bonus-neutral (0), per the Phase 5 decision.
+  (e) **`grade_batch` returns a `BatchResult`** bundling the records + the five in-memory artifacts
+  + the Stage-0 `IngestReport`; nothing is written to disk by default (stateless; the API streams
+  it). Concurrency is bounded by the existing `llm.max_concurrency` semaphore inside the client, so
+  `grade_batch` can `asyncio.gather` all rows without its own pool. No new config, no owner
+  dependency — Phase 8 is pure wiring over stages that already exist.
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
