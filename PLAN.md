@@ -7,13 +7,15 @@ for what to build.
 Phase 7 — Aggregation, ranking, outputs (Stages 8–9)
 
 ## Active Sub-Task
-Phase 6 complete (Stage 7 school bonus + Stage 6 resume stub — `scoring/school.py` `match_school`
-+ `score_school`, `scoring/resume.py` `resume_bonus`). Phase 7 now broken into 7.1–7.4 (see Phase
-Map). Next action: Phase 7.1 — `scoring/aggregate.py` `compose_final_score(scores, cfg) -> float`
-(pure sum of the five §10.1 components, each ≥ 0, none subtracted) + `finalize_score(record, cfg)`
-writing it into `AuditRecord.final_score`. Tests assert the §10.1 composition and §12 #1 (no
-optional-signal absence lowers the total). No new config — `final_score` is a pure sum of existing
-subscores.
+Phase 7 complete (Stages 8–9: `scoring/aggregate.py` `compose_final_score`/`finalize_score`/
+`rank_records`, `outputs.py` five-artifact emission, consolidated §12 invariant suite). Next
+action: **Phase 8 — Orchestration** (`pipeline.grade_batch`). Wire Stages 0→9 into the ordered
+fail-fast batch runner: ingest → essay gates → GPA gate → essay grading → coursework/school/resume
+bonuses → aggregate/rank → emit. Per-row `try/except` so one failure becomes a `NEEDS_REVIEW` row
+(not an aborted batch); bounded async over the LLM client. The orchestrator owns building each
+`AuditRecord` from the per-stage results and supplies the two resolved essay-question headers
+(from `HeaderResolution.role_to_header`) to `grade_essays`. Integration test on a synthetic CSV
+with a `FakeLLMClient`.
 
 ---
 
@@ -296,16 +298,25 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       School"/blank → 0, never negative). Landed together (shared module + test file).
 - [x] Phase 6.3 — `scoring/resume.py`: `resume_bonus` inert stub → `resume.bonus_max` (0) for
       everyone, clearly-labeled DEFERRED TODO; test always-0.
+- [x] Phase 7.1 — `scoring/aggregate.py`: `compose_final_score` (pure §10.1 additive sum of the
+      five subscores) + `finalize_score` (writes it onto the record); §10.1 composition + §12 #1
+      tests (commit: 8d92993).
+- [x] Phase 7.2 — `rank_records` Stage 8 aggregator: gate-survivors → `final_score` + RANKED;
+      deterministic tiebreaker (`final_score`→`gpa_points`→`essay.total`→`submission_id`) → rank
+      1..N; REJECTED/NEEDS_REVIEW forced to None; tests cover order, tiebreaker, §12 #2/#5
+      (commit: 933adc5).
+- [x] Phase 7.3 — `outputs.py` Stage 9 emission: pure in-memory serializers (`decisions_jsonl`,
+      `ranked_csv`, `rejected_csv`, `needs_review_csv`, `build_summary`) + on-disk `write_outputs`;
+      deterministic; tests pin columns/sort/reconciliation (commit: 75e7ee1).
+- [x] Phase 7.4 — consolidated §12 invariant suite over a synthetic three-outcome population
+      (`tests/scoring/test_aggregate.py`); all five invariants asserted end-to-end (commit: f1ac0b6).
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 7.1 — `compose_final_score` pure §10.1 sum + `finalize_score` (writes final_score)
-- [ ] Phase 7.2 — `rank_records` Stage 8 aggregator (outcome finalize + deterministic ranking)
-- [ ] Phase 7.3 — `outputs.py` Stage 9 emission (decisions.jsonl + 3 CSVs + summary.json)
-- [ ] Phase 7.4 — consolidated §12 invariant suite (`tests/scoring/test_aggregate.py`)
 - [ ] Phase 8 — Orchestration (`pipeline.grade_batch`)
+- [ ] Phase 9 — API layer (FastAPI, stateless)
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
@@ -523,6 +534,25 @@ Structural facts only — never real applicant content.
   — the full ranked list is the deliverable; acceptance/cohort filling is the deferred downstream
   step (§11). The §12 invariants are asserted at this aggregate/output level here in Phase 7; the
   full end-to-end pass over a synthetic CSV is the Phase 8 integration test.
+
+- **Phase 7 (implementation):** `compose_final_score(scores, cfg)` rounds the five-term §10.1 sum
+  to 4 dp (matches the subscore rounding elsewhere); `cfg` is unused today but kept in the
+  signature for parity with the other scoring entry points and future composition tuning.
+  `finalize_score`/`rank_records` **mutate the `AuditRecord`s in place** and return them (pydantic
+  models are mutable; the ranking pass is idempotent so reruns are stable — §12 #5). `rank_records`
+  treats any record whose `outcome` is **not** already `REJECTED`/`NEEDS_REVIEW` as a gate-survivor
+  → sets `outcome="RANKED"` + `final_score`; it force-clears `final_score`/`rank` to `None` on the
+  two terminal outcomes (so a bonus can never score/rank a rejection — §12 #2). Tiebreaker negates
+  the numeric keys for a single ascending sort: `(-final_score, -gpa_points, -essay.total,
+  submission_id)`. `rank_records` returns the list in **input order** with `rank` carrying the
+  ordering; `ranked_csv` re-sorts by `rank`. `outputs.py` serializers are pure and return
+  in-memory `str`/`dict` (stateless API streams them, never persists); `rejected_csv`/
+  `needs_review_csv`/the summary `needs_review` list sort by `submission_id` for byte-identical
+  reruns. The summary histogram buckets `RANKED` final_scores in fixed width-10 bins
+  (`_HISTOGRAM_BUCKET`), filling empty interior bins so the distribution reads continuously; an
+  empty `RANKED` set → `{}`. CSVs use `lineterminator="\n"` (not the csv default `\r\n`) for
+  portability. The rejected CSV's "failing_stage" column = `decided_at_stage`; the §12 #3 gate name
+  lives in `primary_reason` (the invariant field).
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
