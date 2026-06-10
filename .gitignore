@@ -7,6 +7,8 @@
 data/
 *.csv
 !tests/**/*.csv
+# The demo fixture is synthetic (no real applicant content) — the one committed CSV exception.
+!resources/demo/sample_applications.csv
 decisions.jsonl
 summary.json
 
