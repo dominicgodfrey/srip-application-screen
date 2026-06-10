@@ -7,8 +7,10 @@ for what to build.
 Phase 11 — Cohort assignment (PRD §11) — COMPLETE
 
 ## Active Sub-Task
-Phase 11 complete (the PRD §11 downstream layer, built ahead of the Phase 10 frontend): pure
-`assign_cohorts` (rank-greedy + displacement chains = maximum matching with rank priority),
+Phase 11 complete, including the 11.5 policy revision to the **tiered cost model** (tiers ordered
+by competitiveness/cost honors > intensive > regular; strict first-choice cost ceiling; capped
+tiers fill strictly by rank; waitlist = manual-review bucket with regular-eligibility spelled
+out; displacement chains removed). Deliverables: pure `assign_cohorts`,
 `cohort_assignments_csv`, and two synchronous what-if endpoints — `POST /jobs/{id}/cohorts`
 (chained, non-evicting) and `POST /cohorts` (re-uploaded `decisions.jsonl`), capacities as query
 params. Next action: **Phase 10** — the React + Vite SPA frontend (FUTURE; not an immediate
@@ -310,8 +312,9 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   + two API routes, tests `tests/test_cohort.py` + `tests/api/test_cohorts.py`. The downstream
   layer that turns the ranked output into honors/intensive/regular placements under configurable
   per-tier capacities. Entirely deterministic, pure, LLM-free, and instant (live what-if recompute
-  for the future frontend). Owner decisions: maximize matches (displacement chains), both entry
-  points, NEEDS_REVIEW warn-and-proceed, manual pinning deferred.
+  for the future frontend). Owner decisions: both entry points, NEEDS_REVIEW warn-and-proceed,
+  manual pinning deferred. (The original "maximize matches via displacement chains" decision was
+  SUPERSEDED by the 11.5 tiered cost model below.)
   - 11.1 `normalize_choices` (tier-token containment parse of the messy free-text choice strings,
         order-preserving dedupe) + cohort pydantic models (`CohortCapacities`/`CohortAssignment`/
         `TierSummary`/`CohortSummary`/`CohortResult`) + `cohort.tiers` CONFIG section.
@@ -324,6 +327,15 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   - 11.4 API: `POST /jobs/{id}/cohorts` (chained off a completed job, non-evicting so staff can
         iterate capacities) + `POST /cohorts` (re-uploaded `decisions.jsonl`, the durable entry
         point); capacities + `format=json|csv` as query params; graceful 413/422, never 500.
+  - 11.5 Policy revision — **tiered cost model** (supersedes the 11.2 displacement design):
+        tiers are ordered by competitiveness AND cost (honors > intensive > regular; the
+        `cohort.tiers` config order is now load-bearing). Strict first-choice **cost ceiling** —
+        a student is never placed above their first-choice tier, even one they listed #2/#3
+        (pruned tiers reported in `excluded_by_cost`). Capped tiers fill **strictly by rank**
+        among choosers (displacement machinery deleted). **No silent overflow** into regular:
+        a student whose eligible choices are all full → waitlist/manual-review bucket with a
+        reason naming the chosen program(s) + explicit regular eligibility. Regular cap stays an
+        optional knob (uncapped default). API shape unchanged.
 
 ---
 
@@ -438,6 +450,9 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - [x] Phase 11.4 — `POST /jobs/{id}/cohorts` (non-evicting what-if) + `POST /cohorts`
       (decisions.jsonl re-upload); capacities/format query params; 404/409/413/422 edges
       (commit: 3943b6c).
+- [x] Phase 11.5 — tiered cost model: strict first-choice cost ceiling (`excluded_by_cost`),
+      rank-filled caps, displacement removed, waitlist = manual-review bucket naming chosen
+      programs + regular eligibility; optional regular cap kept (commit: 0ccbe4f).
 
 ## In Progress
 - (none)
@@ -852,6 +867,28 @@ Structural facts only — never real applicant content.
   (`cohort_assignments.csv`, rank-ordered across assigned/waitlisted/unassignable; rosters are
   filters of it) via `?format=csv`; JSON (`CohortResult`) is the default. decisions.jsonl
   re-upload errors echo line numbers only, never applicant content.
+
+- **Phase 11.5 (owner decisions — SUPERSEDES the Phase 11 "maximize matches" model):** new owner
+  information: the three programs are ordered by competitiveness AND cost — honors (most
+  competitive/expensive) > intensive > regular; staff caps honors/intensive and regular is the
+  landing tier for applicants who aren't rejected. Decisions: (a) **Strict first-choice cost
+  ceiling** — a student is never placed in a tier above their *first choice*, even one they
+  explicitly ranked #2/#3 (the first choice signals what they're prepared to pay; in the real
+  data 67 applicants ranked R-I-H → eligible for regular only, 54 ranked I-H-R → honors
+  excluded). Pruned tiers are surfaced in a new `excluded_by_cost` field (JSON + CSV column,
+  replacing `displaced_from`). (b) **No silent overflow into regular** — a student whose
+  eligible choices are all full goes to the **waitlist/manual-review bucket**, with a reason
+  naming the chosen program(s) at capacity, any ceiling-excluded tiers, and (when they didn't
+  list it) explicit "still eligible for regular — staff decision required"; staff handles these
+  by hand. Students who *listed* regular fall there via the normal walk. (c) **Displacement
+  chains removed** — with the cost ceiling and regular-as-landing-tier, capped tiers fill
+  *strictly by rank* among the students who chose them (simplest, most defensible); the
+  augmenting-path machinery and the `displaced`/`displaced_from` fields were deleted.
+  (d) **Regular capacity stays an optional knob** (uncapped default; if set and it binds, the
+  lowest-ranked regular-choosers waitlist). API shape unchanged — same params, same routes.
+  `cohort.tiers` config order is now **load-bearing** (cost order, most expensive first).
+  New invariant test: across all capacity combos, no student is ever assigned a tier more
+  expensive than their first choice.
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
