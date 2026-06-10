@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "srip-api-demo",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set SRIP_DEV_FAKE_LLM=1&& uv run uvicorn api.main:app --port 8321"],
+      "port": 8321,
+      "autoPort": false
+    }
+  ]
+}

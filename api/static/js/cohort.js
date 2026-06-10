@@ -141,13 +141,9 @@
   function render(result) {
     const sum = result.summary || {};
 
+    // The core's warnings[] already covers NEEDS_REVIEW exclusions — render them verbatim.
     els.warnings.innerHTML = (sum.warnings || []).map((w) =>
       '<div class="alert alert-warning">' + S.esc(w) + "</div>").join("");
-    if (sum.needs_review_count) {
-      els.warnings.innerHTML +=
-        '<div class="alert alert-info">' + S.esc(sum.needs_review_count) +
-        " applicant(s) are NEEDS_REVIEW and not part of this assignment — resolve and re-run.</div>";
-    }
 
     els.counts.innerHTML =
       stat(sum.total_ranked, "Ranked input", "") +
@@ -163,11 +159,13 @@
       '<td class="num">' + (t.open_seats === null || t.open_seats === undefined ? "∞" : S.esc(t.open_seats)) + "</td>" +
       '<td class="num">' + S.esc(t.first_choice_demand) + "</td></tr>").join("");
 
+    // Keys are choice_1 / choice_2 / choice_3 (cohort.py emits choice_<n>).
     const cs = sum.choice_satisfaction || {};
-    els.satisfaction.textContent =
-      "Choice satisfaction — 1st: " + (cs.first_choice || 0) +
-      ", 2nd: " + (cs.second_choice || 0) +
-      ", 3rd: " + (cs.third_choice || 0);
+    const parts = Object.entries(cs).map(([k, n]) =>
+      "#" + k.replace("choice_", "") + ": " + n);
+    els.satisfaction.textContent = parts.length
+      ? "Assigned choice satisfaction — " + parts.join(", ")
+      : "";
 
     els.assignBody.innerHTML = rowsFor(result.assignments || [], true);
 
