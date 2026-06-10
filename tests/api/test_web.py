@@ -39,6 +39,9 @@ def test_audit_page_renders(client: TestClient) -> None:
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert 'id="audit-app"' in resp.text
+    assert 'id="audit-table"' in resp.text
+    assert 'id="audit-search"' in resp.text
+    assert 'id="audit-detail"' in resp.text
 
 
 def test_audit_page_bootstraps_job_param(client: TestClient) -> None:

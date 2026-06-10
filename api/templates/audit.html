@@ -11,6 +11,38 @@ completed grading job.</p>
     <p class="muted" style="margin: 0;">No job loaded. <a href="/">Upload a CSV</a> first, or open
     this page via the “Browse audit records” link after a run completes.</p>
   </div>
+
+  <div class="section hidden" id="audit-list">
+    <h2 class="section-title">Applicants</h2>
+    <div class="btn-row" style="margin-bottom: 1rem;">
+      <input class="form-input" type="search" id="audit-search" placeholder="Filter by name or submission id…" style="max-width: 20rem;">
+      <select class="form-input" id="audit-outcome" style="max-width: 12rem;">
+        <option value="">All outcomes</option>
+        <option value="RANKED">RANKED</option>
+        <option value="REJECTED">REJECTED</option>
+        <option value="NEEDS_REVIEW">NEEDS_REVIEW</option>
+      </select>
+      <span class="muted small" id="audit-count"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="data" id="audit-table">
+        <thead><tr>
+          <th data-sort="rank" class="num">Rank</th>
+          <th data-sort="name">Name</th>
+          <th data-sort="outcome">Outcome</th>
+          <th data-sort="final_score" class="num">Score</th>
+          <th data-sort="submission_id">Submission</th>
+          <th class="no-sort">Primary reason</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section hidden" id="audit-detail">
+    <h2 class="section-title" id="detail-title">Record</h2>
+    <div id="detail-body"></div>
+  </div>
 </div>
 {% endblock %}
 
