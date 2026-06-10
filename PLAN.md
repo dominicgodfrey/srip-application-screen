@@ -4,18 +4,17 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 11 — Cohort assignment (PRD §11) — COMPLETE
+Phase 10 — Web UI (server-rendered Jinja2 + vanilla JS)
 
 ## Active Sub-Task
-Phase 11 complete, including the 11.5 policy revision to the **tiered cost model** (tiers ordered
-by competitiveness/cost honors > intensive > regular; strict first-choice cost ceiling; capped
-tiers fill strictly by rank; waitlist = manual-review bucket with regular-eligibility spelled
-out; displacement chains removed). Deliverables: pure `assign_cohorts`,
-`cohort_assignments_csv`, and two synchronous what-if endpoints — `POST /jobs/{id}/cohorts`
-(chained, non-evicting) and `POST /cohorts` (re-uploaded `decisions.jsonl`), capacities as query
-params. Next action: **Phase 10** — the React + Vite SPA frontend (FUTURE; not an immediate
-concern). No backend work remains unless the owner supplies the open dependencies
-(OPENAI_API_KEY, curated profanity list) or schedules the deferred resume parser.
+Phase 10 in progress. The backend (Phases 0–9, 11) is complete and green. Building a
+server-rendered frontend over the existing frozen JSON API: FastAPI serves Jinja2 templates + one
+static CSS theme + vanilla-JS `fetch`/polling — no React/Vite/Node build, same-origin (no CORS),
+all UI under `api/`. Three screens (upload+results, audit browser, cohort what-if), no auth, full
+ThinkNeuro branding for visual continuity with the `certificate-automation` project. A dev
+`SRIP_DEV_FAKE_LLM=1` switch allows a zero-spend, no-key demo. Sub-task order: 10.1 wiring/shell/
+theme → 10.2 upload → 10.3 audit → 10.4 cohort → 10.5 demo CSV + verification. See the Phase Map
+Phase 10 breakdown and the Notes-log deviation entry (React+Vite → Jinja2).
 
 ---
 
@@ -306,8 +305,25 @@ with the API. Build in order — fail-fast ordering means later stages depend on
         content types/filenames; download before completion → 409; after download (or past TTL) the
         job is evicted → subsequent fetch 404. A background sweeper drops expired jobs so PII is not
         held. Tests: download each artifact; download-before-done → 409; eviction → 404.
-- **Phase 10 — Frontend SPA (FUTURE, not an immediate concern)**
-  - React + Vite: upload, render each application's audit record on open, download results CSV
+- **Phase 10 — Web UI (server-rendered Jinja2 + vanilla JS)** — `api/web.py`, `api/templates/`,
+  `api/static/`, tests `tests/api/test_web.py`. FastAPI serves Jinja2 HTML + one static CSS theme +
+  vanilla-JS `fetch`/polling against the **existing frozen JSON API** — no React/Vite/Node build,
+  same-origin (no CORS). All UI stays in `api/`; the core (`src/srip_filter/`) is untouched. Full
+  ThinkNeuro branding (vendored `logo.png` + name) labeled "SRIP Track 2 — Application Filter"; no
+  auth. New dep: `jinja2` (api extra). See the Notes-log deviation entry (React+Vite → Jinja2).
+  - 10.1 Wiring + shell + theme: add `jinja2`; mount `StaticFiles` + `Jinja2Templates` +
+        `register_pages` in `create_app`; env-gated dev `FakeLLMClient` switch (`SRIP_DEV_FAKE_LLM=1`)
+        + demo handler for a zero-spend, no-key demo; `api/web.py`, `base.html`, `app.css` (full
+        theme), vendored `logo.png`; `GET /` minimal upload page; `tests/api/test_web.py`.
+  - 10.2 Screen 1 — upload flow: `upload.html` + `common.js` + `upload.js` (upload → poll progress →
+        summary counts/histogram/needs_review → 5 download links → discard → cross-screen links).
+  - 10.3 Screen 2 — audit browser: `audit.html` + `audit.js` (fetch `decisions.jsonl`, NDJSON parse,
+        sortable/filterable table, row → full `AuditRecord` detail panel); `GET /audit` + test marker.
+  - 10.4 Screen 3 — cohort what-if: `cohort.html` + `cohort.js` (capacity inputs → live
+        `POST /jobs/{id}/cohorts`; assignment/waitlist/unassignable + tier summary; standalone
+        `POST /cohorts` re-upload; CSV export); `GET /cohorts` + test marker.
+  - 10.5 Synthetic demo CSV (`resources/demo/sample_applications.csv`) + manual-verification
+        checklist + responsive/visual polish.
 - **Phase 11 — Cohort assignment (PRD §11; executes before Phase 10)** — `src/srip_filter/cohort.py`
   + two API routes, tests `tests/test_cohort.py` + `tests/api/test_cohorts.py`. The downstream
   layer that turns the ranked output into honors/intensive/regular placements under configurable
@@ -455,10 +471,13 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       programs + regular eligibility; optional regular cap kept (commit: 0ccbe4f).
 
 ## In Progress
-- (none)
+- [ ] Phase 10 — Web UI (server-rendered Jinja2 + vanilla JS)
+      Status: starting 10.1 (wiring + shell + theme). Backend frozen; UI consumes the existing API.
+      Blockers: none. `OPENAI_API_KEY` still unprovided (openissue #1) — the `SRIP_DEV_FAKE_LLM=1`
+      dev switch covers a zero-spend browser demo until a real key lands.
 
 ## Next Up
-- [ ] Phase 10 — Frontend SPA (future): React + Vite — upload, render each audit record, download results
+- [ ] Phase 10.2–10.5 — upload screen, audit browser, cohort what-if, demo CSV + verification
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
@@ -889,6 +908,28 @@ Structural facts only — never real applicant content.
   `cohort.tiers` config order is now **load-bearing** (cost order, most expensive first).
   New invariant test: across all capacity combos, no student is ever assigned a tier more
   expensive than their first choice.
+
+- **Phase 10 frontend = server-rendered FastAPI (Jinja2 + one CSS + vanilla JS), NOT React + Vite.**
+  The PRD/PLAN named a React+Vite SPA; **superseded by owner decision** for a server-rendered UI —
+  no Node/npm build step, no SPA framework — matching the `certificate-automation` project's actual
+  stack (Flask + Jinja2 + vanilla JS) for visual continuity. FastAPI serves `Jinja2Templates` + a
+  `/static` mount; the browser drives upload→poll→summary/downloads, the audit browser, and the
+  cohort what-if via `fetch` against the existing frozen JSON API. **Same-origin → no CORS
+  middleware.** All UI lives in `api/` (`templates/`, `static/`, `web.py`); the core
+  (`src/srip_filter/`) stays HTTP-free. New dep: **`jinja2`** in the `api` extra; `aiofiles`
+  deliberately omitted (Starlette `StaticFiles` has a sync fallback — fine for a handful of small
+  assets). `GET /` was unclaimed; new wiring only **adds** routes + `app.state.templates` + the
+  `/static` mount, so the two fragile API tests (`test_health_endpoint_ok`,
+  `test_create_app_wires_registry_from_config_ttl`) stay green. **Full ThinkNeuro branding** (name +
+  vendored `api/static/logo.png`) labeled "SRIP Track 2 — Application Filter". **No auth** (nothing
+  persisted). The `job_id` flows screen-to-screen via the URL (`?job=<id>`) + `sessionStorage`
+  (tab-scoped, matching the transient design); downloads are **non-evicting** (all five artifacts +
+  cohort what-ifs repeat against one job) and `DELETE /jobs/{id}` is the only discard. Optional
+  **`SRIP_DEV_FAKE_LLM=1`** launches with a `FakeLLMClient` + a small optimistic demo handler
+  (in `api/demo.py`) so the whole UI can be demoed end-to-end with **no API key and zero token
+  spend** (openissue #1 still open); default (real `OpenAILLMClient`) is unchanged. Interactive JS
+  is verified **manually** (uvicorn + browser + the synthetic demo CSV) since TestClient can't run
+  browser JS; `tests/api/test_web.py` covers the GET HTML routes (200 + markers) and static serving.
 
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
