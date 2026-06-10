@@ -4,18 +4,19 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 10 — Web UI (server-rendered Jinja2 + vanilla JS) — COMPLETE
+Phase 12 — Resume bonus (Stage 6, PRD §7.2 — now IN SCOPE) — PLANNED, implementation not started
 
 ## Active Sub-Task
-Phase 10 complete: three server-rendered screens (upload→progress→summary/downloads, audit-record
-browser, cohort what-if) over the frozen JSON API — Jinja2 + one CSS theme + vanilla JS, no
-build step, no CORS, full ThinkNeuro branding, no auth. Verified end-to-end in a live browser
-against the synthetic demo CSV under `SRIP_DEV_FAKE_LLM=1` (zero spend, no key): all ten demo
-outcomes correct, every artifact downloads, audit detail panel renders every block, cohort
-capacities recompute live (honors=0 correctly bumped rank 1 to her second choice). **The whole
-system is now demo-ready.** Remaining work is owner-input only: `OPENAI_API_KEY` + retention
-setting for a real-spend run (openissue #1/#2), curated profanity list (#3); the resume parser
-stays deferred.
+Phase 12 planned (owner decision: resume parsing moves from "deferred" into scope). The plan
+fills the existing slot — `Scores.resume_bonus` is already in the §10.1 composition,
+`scoring/resume.py` is the deliberate stub, and `resume.bonus_max` (0 today) is the kill switch.
+Sub-task order: 12.1 config+contracts → 12.2 download layer → 12.3 PDF extraction → 12.4 Task E
+prompt + bonus math → 12.5 Stage 6 aggregator + wiring → 12.6 scale verification + docs. See the
+Phase Map Phase 12 breakdown and the Notes-log entry (hosting analysis: per-applicant
+fetch→extract→discard memory rule, SSRF allowlist, pypdf-over-pdfplumber deviation). Next
+action: begin 12.1. Phase 10 (web UI) is complete and demo-ready; other open owner inputs:
+`OPENAI_API_KEY` + retention (openissue #1/#2), curated profanity list (#3), resume URL host
+allowlist (#5, new).
 
 ---
 
@@ -353,6 +354,42 @@ with the API. Build in order — fail-fast ordering means later stages depend on
         a student whose eligible choices are all full → waitlist/manual-review bucket with a
         reason naming the chosen program(s) + explicit regular eligibility. Regular cap stays an
         optional knob (uncapped default). API shape unchanged.
+- **Phase 12 — Resume bonus (Stage 6, PRD §7.2 — now IN SCOPE; supersedes "deferred")** —
+  `src/srip_filter/scoring/resume.py` (stub → real) + a new download module + `llm/prompts/
+  task_e.py`, tests mirroring each. Fills the existing slot rather than restructuring:
+  `Scores.resume_bonus` is already in the §10.1 composition and the PRD's "≈110, 120 once resume
+  is built" line settles `bonus_max = 10`. §0.3 invariants unchanged: **bonus-only** (never
+  rejects, never subtracts, can never change a `REJECTED`/`NEEDS_REVIEW` outcome), absence
+  neutral (148 blanks), any failure → 0 bonus + audit `errors[]` note (the Task C precedent).
+  Stage 6 runs on gate-survivors only → rejected rows cost zero downloads and zero tokens.
+  Hosting design rule: **fetch → extract → discard per applicant inside `grade_one`** — resume
+  bytes never accumulate, so peak transient memory = `download_concurrency × max_download_bytes`
+  (≈40 MB) regardless of batch size, free-tier safe at the 2000-row ceiling. `resume.bonus_max:
+  0` restores exact stub behavior with zero fetches (safe rollout, instant rollback).
+  - 12.1 Config + contracts: expand `ResumeConfig` (`bonus_max: 10`, `max_download_bytes`,
+        `download_timeout_s`, `download_concurrency`, `allowed_url_hosts`, `max_text_chars`,
+        signal weights) + `llm.models.task_e` (mini tier); `TaskEOutput` contract +
+        `ResumeAssessment` audit block on `AuditRecord`. Pure, tests.
+  - 12.2 Download layer (network, no LLM): async `fetch_resume(url, cfg)` via `httpx` (promote
+        the existing transitive dep to direct) — **https-only + `allowed_url_hosts` allowlist
+        (SSRF guard: URLs come from an uploaded CSV)**, streaming size-cap abort, timeout,
+        retry-once, its **own semaphore** (separate from the LLM one); typed failure reasons,
+        never an exception out. `httpx.MockTransport` tests, zero real network.
+  - 12.3 PDF extraction (pure): `extract_resume_text` via `pypdf` — magic-bytes check, per-page
+        text, `max_text_chars` cap (~15k, bounds token spend), empty text (scanned PDF) → typed
+        failure, no OCR dependency. (Deviation: PRD §7.2 mentioned `pdfplumber`; `pypdf` is the
+        lighter dep tree for text-only extraction on small hosts.)
+  - 12.4 Task E prompt + pure bonus math: the model extracts structured signals (projects,
+        experience, awards, CS/DS relevance) but **never prices them** — deterministic math
+        recomputes weights from config (the Task C "model classifies, config prices" pattern),
+        capped at `bonus_max`, never negative. Pure, zero-spend tests.
+  - 12.5 Stage 6 aggregator + wiring: `score_resume` replaces the stub — `bonus_max == 0` OR
+        blank URL → 0 with no fetch and no token; else fetch → extract → Task E → math; any
+        failure at any step → 0 bonus + `errors[]` note, never `NEEDS_REVIEW`/`REJECTED`. Wire
+        into `grade_one`, extend the §12 invariant suite, add the demo-handler `task_e` and the
+        audit-browser Resume detail block.
+  - 12.6 Scale verification + docs: batch test over `MockTransport` at volume asserting the
+        memory discipline (no resume bytes retained on records); README/openissue updates.
 
 ---
 
@@ -491,9 +528,13 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - (none)
 
 ## Next Up
-- [ ] Owner inputs (openissue.md): `OPENAI_API_KEY` + zero-retention confirmation for a
-      real-spend run; curated profanity list. No code work pending.
-- [ ] (Unscheduled) deployment to a host; resume parser stays deferred (PRD §7.2).
+- [ ] Phase 12.1 — `ResumeConfig` expansion + `llm.models.task_e` + `TaskEOutput` contract +
+      `ResumeAssessment` audit block
+- [ ] Phase 12.2–12.6 — download layer, PDF extraction, Task E + bonus math, Stage 6 wiring,
+      scale verification
+- [ ] Owner inputs (openissue.md): `OPENAI_API_KEY` + zero-retention confirmation; curated
+      profanity list; resume URL host allowlist (#5 — needed by 12.1/12.2).
+- [ ] (Unscheduled) deployment to a host.
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
@@ -960,6 +1001,32 @@ Structural facts only — never real applicant content.
   is verified **manually** (uvicorn + browser + the synthetic demo CSV) since TestClient can't run
   browser JS; `tests/api/test_web.py` covers the GET HTML routes (200 + markers) and static serving.
 
+- **Phase 12 (plan-time) — resume parsing moves IN SCOPE (supersedes PRD §7.2 "deferred";
+  owner decision).** The slot already exists (`Scores.resume_bonus` in §10.1, the deliberate
+  `scoring/resume.py` stub), so this is a fill-in, not a restructure; the PRD's "≈110, 120 once
+  resume is built" line settles `bonus_max = 10`. The §0.3 bonus-only invariants and the Task C
+  failure precedent (any failure → 0 bonus + audit note, never a block) carry over unchanged.
+  **Hosting analysis (the design driver — the server now fetches external files):**
+  (a) **Memory:** naive download-all-then-process would hold ~318 × up to 10 MB on a 512 MB
+  free-tier instance; the binding rule is **fetch → extract → discard per applicant inside
+  `grade_one`**, making peak transient memory `download_concurrency × max_download_bytes`
+  (≈40 MB) independent of batch size — holds at the 2000-row ceiling.
+  (b) **Runtime:** downloads add ~2–5 min typical (~318 resumes, bounded by a **download
+  semaphore separate from the LLM one**); the background-job + polling architecture absorbs it
+  (no HTTP timeout risk), though the longer run window slightly raises the free-tier
+  restart/abandonment exposure — the documented stateless trade-off.
+  (c) **Token spend:** extracted text capped at `max_text_chars` (~15k) so a 30-page resume
+  can't blow up a prompt; Task E uses the mini tier (mechanical extraction, the A/C pattern).
+  (d) **SSRF:** resume URLs come from an *uploaded CSV*, so without an **https-only + host
+  allowlist** (`allowed_url_hosts`, Fillout/S3 domains) a crafted CSV could make the host probe
+  its internal network — this is config, not code complexity.
+  (e) **Kill switch:** `resume.bonus_max: 0` restores exact stub behavior with zero fetches —
+  safe rollout, instant rollback.
+  **Stack deviations:** `pypdf` instead of the PRD's `pdfplumber` (much lighter dependency tree
+  for text-only extraction on small hosts); `httpx` promoted from transitive (via `openai`) to a
+  direct dependency for the download layer. Owner confirmed Fillout resume URLs are publicly
+  fetchable (no auth); the exact host allowlist is an owner input (openissue #5).
+
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
 - [~] Profanity list — using `better-profanity` DEFAULT list for now (owner approved).
@@ -968,4 +1035,6 @@ Structural facts only — never real applicant content.
 - [ ] `OPENAI_API_KEY` in `.env` (openissue.md #1).
 - [ ] OpenAI account set to zero/minimal data retention (openissue.md #2).
 - [x] GPA threshold — settled at 3.0 (PRD §1). No decision needed.
-- [~] Resume parsing — explicitly deferred; Stage 6 stays an inert stub.
+- [~] Resume parsing — **now in scope (Phase 12)**; owner confirmed Fillout resume URLs are
+      publicly fetchable. Still needed: the resume URL host allowlist (openissue #5). Stage 6
+      stays the inert stub until 12.5 lands.

@@ -54,8 +54,27 @@ committed to the repo. See `CLAUDE.md` → Privacy & Security.
 
 ---
 
+## Blocking for Phase 12 (resume parsing)
+
+### 5. Resume URL host allowlist  ·  STATUS: NEEDED
+- **What:** the exact domain(s) the Fillout export's `Resume (optional)` URLs point at
+  (e.g. a specific `*.s3.amazonaws.com` bucket host and/or a `fillout.com` subdomain), to pin
+  in `resume.allowed_url_hosts` in `config.yaml`.
+- **Why:** the server downloads URLs taken from an uploaded CSV. An https-only **host
+  allowlist** is the SSRF guard — without it a crafted CSV could make the host probe its own
+  internal network. The allowlist must be exact, so it has to come from the real export.
+- **Already confirmed by owner:** the resume URLs are **publicly fetchable** (no auth needed),
+  so a plain GET works once the hosts are pinned.
+- **How:** copy 2–3 resume URLs from the real CSV (the URL itself is fine to share; don't
+  share the PDF contents) and list the hostnames here or directly in `config.yaml`.
+
+---
+
 ## Settled — no action needed (listed so they aren't re-litigated)
 - GPA threshold = **3.0** (PRD §1).
 - LLM provider = **OpenAI**, cloud for all tasks.
-- Resume parsing = **deferred**; Stage 6 stays an inert `resume_bonus = 0` stub.
+- Resume parsing = **in scope as Phase 12** (owner decision, supersedes the earlier deferral;
+  see PLAN.md Phase Map + Notes log). `bonus_max = 10` per PRD §10.1; extraction via `pypdf`;
+  Stage 6 stays the inert stub until Phase 12.5 lands, and `resume.bonus_max: 0` remains the
+  kill switch thereafter.
 - School ranking source = **U.S. News & World Report** (Best National / Best Global), frozen for Summer 2026.

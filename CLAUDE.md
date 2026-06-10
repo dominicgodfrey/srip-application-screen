@@ -35,7 +35,10 @@ Settled (do not re-litigate without a decision in PLAN.md's Notes log):
 - **`PyYAML`** — load `config.yaml` (validated by pydantic).
 - **`pytest`** + **`pytest-asyncio`**, **`ruff`** — tests and lint/format.
 - **FastAPI** + **`uvicorn`** — thin stateless API layer (backend deployment).
-- Future, not now: **React + Vite** SPA frontend; **`pdfplumber`** for the deferred resume parser.
+- **Jinja2** (server-rendered templates) + one static CSS + vanilla JS — the web UI (Phase 10;
+  supersedes the earlier React + Vite idea — see PLAN.md Notes log).
+- **`httpx`** (direct dep) + **`pypdf`** — resume download + text extraction (Phase 12;
+  supersedes the PRD's `pdfplumber` mention — lighter dependency tree, see PLAN.md Notes log).
 
 Do not introduce additional frameworks (LangChain, orchestration tools, a database, a task
 queue, an ORM) without recording the reason in PLAN.md first. This is a small batch system,
@@ -47,10 +50,11 @@ not a platform.
 |---|---|---|
 | A — GPA normalization | mechanical extraction | `gpt-4.1-mini` |
 | C — Coursework decomposition | mechanical extraction | `gpt-4.1-mini` |
+| E — Resume signal extraction (Phase 12) | mechanical extraction | `gpt-4.1-mini` |
 | B — Low-GPA explanation adequacy | judgment (can reject) | `gpt-4.1` |
 | D — Essay grading / gibberish / relevance | judgment (can reject) | `gpt-4.1` |
 
-- Mechanical tasks (A, C) use the mini tier; judgment tasks that can reject an applicant
+- Mechanical tasks (A, C, E) use the mini tier; judgment tasks that can reject an applicant
   (B, D) use the full tier. **Do not use o-series reasoning models** — overkill and costly here.
 - Verify exact model IDs against OpenAI's current catalog when building; swap in CONFIG only.
 
@@ -130,7 +134,7 @@ SRIP Application Filter/
 │   │   ├── essays.py               # Stage 4 — Task D (relevance gate + quality + gibberish)
 │   │   ├── coursework.py           # Stage 5 — Task C
 │   │   ├── school.py               # Stage 7 — rapidfuzz match
-│   │   ├── resume.py               # Stage 6 — inert stub (returns 0), clearly TODO
+│   │   ├── resume.py               # Stage 6 — stub (returns 0) until Phase 12 lands
 │   │   └── aggregate.py            # Stage 8 — compose score + rank
 │   ├── llm/
 │   │   ├── client.py               # AsyncOpenAI wrapper: structured outputs, in-run cache, retry
@@ -219,7 +223,11 @@ The LLM client is mocked with a fake in unit tests. A small live suite is gated 
 - Don't raise/lower the 3.0 GPA threshold for high-schoolers.
 - Don't flag merely-awkward or ESL grammar as gibberish — that's a soft penalty in Task D, not a gate.
 - Don't persist applicant data to disk or a database. Stateless only.
-- Don't build the resume parser — Stage 6 stays an inert, clearly-labeled `resume_bonus = 0` stub.
+- Don't build resume parsing outside the Phase 12 plan (PLAN.md Phase Map). Until 12.5 lands,
+  Stage 6 stays the inert `resume_bonus = 0` stub; `resume.bonus_max: 0` is the permanent kill
+  switch. Resume fetching must honor the https-only + `allowed_url_hosts` SSRF guard, the
+  per-applicant fetch→extract→discard memory rule, and the bonus-only invariants (failure → 0
+  bonus + audit note, never a block).
 - Don't run LLM calls before the deterministic gates that precede them. Fail-fast ordering is load-bearing.
 - Don't commit `data/`, `.env`, results files, or any real applicant content.
 - Don't add a database, queue, or orchestration framework without recording the reason in PLAN.md.
