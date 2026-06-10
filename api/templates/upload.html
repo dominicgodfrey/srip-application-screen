@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1 class="page-title">Filter &amp; rank applications</h1>
+<p class="muted">Upload a Fillout CSV export. Applications failing the hard gates are rejected;
+every survivor is scored and ranked. Nothing is stored — download your results before leaving.</p>
+
+<div class="section" id="upload-section">
+  <h2 class="section-title">1 · Upload CSV</h2>
+  <form id="upload-form">
+    <label class="field-label" for="csv-file">Application export (.csv, max 25&nbsp;MB / 2000 rows)</label>
+    <input class="form-input" type="file" id="csv-file" name="file" accept=".csv,text/csv" required>
+    <div class="btn-row" style="margin-top: 1rem;">
+      <button type="submit" class="btn btn-primary" id="upload-btn">Start grading</button>
+      <span class="muted small" id="upload-note"></span>
+    </div>
+  </form>
+</div>
+
+<div class="section hidden" id="progress-section">
+  <h2 class="section-title">2 · Grading in progress</h2>
+  <div class="progress"><div class="progress-fill indeterminate" id="progress-fill"></div></div>
+  <p class="muted small" id="progress-label" style="margin-bottom: 0;">Starting…</p>
+</div>
+
+<div class="section hidden" id="summary-section">
+  <h2 class="section-title">3 · Results</h2>
+  <div class="stat-grid" id="summary-counts"></div>
+
+  <h3 class="subhead">Score distribution (ranked applicants)</h3>
+  <div class="hist" id="summary-hist"></div>
+
+  <div id="needs-review-block" class="hidden">
+    <h3 class="subhead">Needs review</h3>
+    <div class="table-wrap">
+      <table class="data" id="needs-review-table">
+        <thead><tr><th class="no-sort">Submission</th><th class="no-sort">Name</th><th class="no-sort">Reason</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <h3 class="subhead">Downloads</h3>
+  <div class="dl-list" id="download-links"></div>
+
+  <h3 class="subhead">Next steps</h3>
+  <div class="btn-row">
+    <a class="btn btn-primary" id="link-audit" href="/audit">Browse audit records</a>
+    <a class="btn btn-secondary" id="link-cohorts" href="/cohorts">Cohort what-if</a>
+    <button class="btn btn-danger" id="discard-btn" type="button">Discard job &amp; results</button>
+  </div>
+  <p class="muted small" style="margin-bottom: 0;">Results live in memory only and expire
+  automatically. Discarding removes them immediately.</p>
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="/static/js/upload.js"></script>{% endblock %}

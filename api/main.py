@@ -18,14 +18,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from srip_filter.cohort import assign_cohorts
 from srip_filter.config import AppConfig, get_config
-from srip_filter.llm.client import BaseLLMClient, OpenAILLMClient
+from srip_filter.llm.client import BaseLLMClient, FakeLLMClient, OpenAILLMClient
 from srip_filter.models import CohortCapacities, CohortResult
 
 from .cohorts import CohortFormat, cohort_response, parse_decisions_jsonl
@@ -39,6 +44,16 @@ from .jobs import (
 )
 from .registry import JobRegistry, JobState
 from .schemas import ErrorResponse, HealthResponse, JobCreated, JobStatus
+from .web import register_pages
+
+logger = logging.getLogger(__name__)
+
+_HERE = Path(__file__).parent
+
+# Dev/demo only: launch with SRIP_DEV_FAKE_LLM=1 to wire a zero-spend, no-key FakeLLMClient backed
+# by api.demo.demo_handler, so the whole UI can be demoed end-to-end without an OpenAI key. Never
+# set this in production — it does not call any model.
+_DEV_FAKE_LLM_ENV = "SRIP_DEV_FAKE_LLM"
 
 # Per-tier seat cap as a query param (Phase 11.4): omitted/None = unlimited. Module-level so the
 # stringified annotation (PEP 563) resolves when FastAPI builds the route signature.
@@ -62,10 +77,20 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Build the real client once, only if a test hasn't injected one. Done in the lifespan
-        # (not at import) so importing this module never needs an API key.
+        # Build the client once, only if a test hasn't injected one. Done in the lifespan (not at
+        # import) so importing this module never needs an API key. The dev/demo flag swaps in a
+        # zero-spend FakeLLMClient; the default path is the real OpenAI client.
         if app.state.llm_client is None:
-            app.state.llm_client = OpenAILLMClient(app.state.config)
+            if os.getenv(_DEV_FAKE_LLM_ENV) == "1":
+                from .demo import demo_handler
+
+                logger.warning(
+                    "%s=1 — using a zero-spend demo LLM client (no model is called).",
+                    _DEV_FAKE_LLM_ENV,
+                )
+                app.state.llm_client = FakeLLMClient(app.state.config, demo_handler)
+            else:
+                app.state.llm_client = OpenAILLMClient(app.state.config)
         # Background TTL sweeper drops expired jobs so PII-bearing results aren't held.
         sweeper = asyncio.create_task(
             sweeper_loop(app.state.registry, app.state.config.api.job_sweep_seconds)
@@ -88,6 +113,14 @@ def create_app(
     app.state.registry = JobRegistry(ttl_seconds=cfg.api.job_ttl_seconds)
     # Hold strong refs to in-flight background tasks so they're not garbage-collected mid-run.
     app.state.background_tasks = set()
+
+    # -- Server-rendered UI (Phase 10) -----------------------------------------------------------
+    # Same-origin Jinja2 templates + static assets; the browser drives everything via fetch against
+    # the JSON API above, so no CORS. Paths are resolved off this file so CWD doesn't matter.
+    templates = Jinja2Templates(directory=str(_HERE / "templates"))
+    app.state.templates = templates
+    app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
+    register_pages(app, templates)
 
     @app.get("/health", response_model=HealthResponse, tags=["meta"])
     async def health() -> HealthResponse:

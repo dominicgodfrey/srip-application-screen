@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_title }}{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="icon" href="/static/logo.png">
+</head>
+<body>
+  <nav class="navbar">
+    <a class="brand" href="/">
+      <img class="brand-logo" src="/static/logo.png" alt="{{ brand }} logo">
+      <span class="brand-text">
+        <span class="brand-name">{{ brand }}</span>
+        <span class="brand-sub">{{ app_title }}</span>
+      </span>
+    </a>
+    <div class="nav-links">
+      <a href="/" data-nav="upload">Upload</a>
+      <a href="/audit" data-nav="audit">Audit browser</a>
+      <a href="/cohorts" data-nav="cohorts">Cohort what-if</a>
+    </div>
+  </nav>
+
+  <main class="page-container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="/static/js/common.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
