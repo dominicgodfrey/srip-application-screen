@@ -4,17 +4,18 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 10 — Web UI (server-rendered Jinja2 + vanilla JS)
+Phase 10 — Web UI (server-rendered Jinja2 + vanilla JS) — COMPLETE
 
 ## Active Sub-Task
-Phase 10 in progress. The backend (Phases 0–9, 11) is complete and green. Building a
-server-rendered frontend over the existing frozen JSON API: FastAPI serves Jinja2 templates + one
-static CSS theme + vanilla-JS `fetch`/polling — no React/Vite/Node build, same-origin (no CORS),
-all UI under `api/`. Three screens (upload+results, audit browser, cohort what-if), no auth, full
-ThinkNeuro branding for visual continuity with the `certificate-automation` project. A dev
-`SRIP_DEV_FAKE_LLM=1` switch allows a zero-spend, no-key demo. Sub-task order: 10.1 wiring/shell/
-theme → 10.2 upload → 10.3 audit → 10.4 cohort → 10.5 demo CSV + verification. See the Phase Map
-Phase 10 breakdown and the Notes-log deviation entry (React+Vite → Jinja2).
+Phase 10 complete: three server-rendered screens (upload→progress→summary/downloads, audit-record
+browser, cohort what-if) over the frozen JSON API — Jinja2 + one CSS theme + vanilla JS, no
+build step, no CORS, full ThinkNeuro branding, no auth. Verified end-to-end in a live browser
+against the synthetic demo CSV under `SRIP_DEV_FAKE_LLM=1` (zero spend, no key): all ten demo
+outcomes correct, every artifact downloads, audit detail panel renders every block, cohort
+capacities recompute live (honors=0 correctly bumped rank 1 to her second choice). **The whole
+system is now demo-ready.** Remaining work is owner-input only: `OPENAI_API_KEY` + retention
+setting for a real-spend run (openissue #1/#2), curated profanity list (#3); the resume parser
+stays deferred.
 
 ---
 
@@ -469,15 +470,30 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - [x] Phase 11.5 — tiered cost model: strict first-choice cost ceiling (`excluded_by_cost`),
       rank-filled caps, displacement removed, waitlist = manual-review bucket naming chosen
       programs + regular eligibility; optional regular cap kept (commit: 0ccbe4f).
+- [x] Phase 10.0 — PLAN.md deviation entry (React+Vite → server-rendered Jinja2) + Phase-Map
+      rewrite (commit: deeba7a).
+- [x] Phase 10.1 — UI wiring + shell + theme: `jinja2` dep; `StaticFiles` + `Jinja2Templates` +
+      `register_pages` in `create_app`; `SRIP_DEV_FAKE_LLM=1` dev switch + `api/demo.py` handler;
+      `api/web.py`, `base.html`, `app.css` (ThinkNeuro theme), vendored `logo.png`;
+      `tests/api/test_web.py` (commit: c32f957).
+- [x] Phase 10.2 — upload screen: `upload.js`/`common.js` — multipart upload, progress poll,
+      summary (counts/histogram/needs_review), 5 download links, discard, cross-screen links
+      (commit: a0a0858).
+- [x] Phase 10.3 — audit browser: NDJSON fetch/parse, sortable+filterable table, row → full
+      `AuditRecord` detail panel (gates/gpa/scores/coursework/school/trail) (commit: 94f9e54).
+- [x] Phase 10.4 — cohort what-if: debounced live recompute over `POST /jobs/{id}/cohorts`,
+      tier summary + warnings, standalone `decisions.jsonl` re-upload, CSV export (commit: ba4fe65).
+- [x] Phase 10.5 — synthetic demo CSV (all ten outcome paths, narrow gitignore exception) +
+      live-browser verification fixes (choice_N satisfaction keys, duplicate alert)
+      (commits: d2cb42c, b9a4809).
 
 ## In Progress
-- [ ] Phase 10 — Web UI (server-rendered Jinja2 + vanilla JS)
-      Status: starting 10.1 (wiring + shell + theme). Backend frozen; UI consumes the existing API.
-      Blockers: none. `OPENAI_API_KEY` still unprovided (openissue #1) — the `SRIP_DEV_FAKE_LLM=1`
-      dev switch covers a zero-spend browser demo until a real key lands.
+- (none)
 
 ## Next Up
-- [ ] Phase 10.2–10.5 — upload screen, audit browser, cohort what-if, demo CSV + verification
+- [ ] Owner inputs (openissue.md): `OPENAI_API_KEY` + zero-retention confirmation for a
+      real-spend run; curated profanity list. No code work pending.
+- [ ] (Unscheduled) deployment to a host; resume parser stays deferred (PRD §7.2).
 
 ## How to Verify Completed Work
 (Fill in one command per sub-task as it lands.)
@@ -508,6 +524,19 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - Phase 11:  `uv run pytest tests/test_cohort.py` (normalization, assignment invariants, CSV) and
   `uv sync --extra api && uv run pytest tests/api/test_cohorts.py` (both endpoints, lifecycle +
   malformed-upload edges; no LLM spend)
+- Phase 10 (automated): `uv sync --extra api && uv run pytest tests/api/test_web.py` (page routes
+  200 + markers, static assets, JSON-API regression guard)
+- Phase 10 (manual, zero-spend — TestClient can't run browser JS):
+  1. `uv sync --extra api`
+  2. PowerShell: `$env:SRIP_DEV_FAKE_LLM = "1"; uv run uvicorn api.main:app --port 8000`
+     (or set a real `OPENAI_API_KEY` in `.env` and omit the flag for a true, token-spending run)
+  3. Open `http://localhost:8000/` → upload `resources/demo/sample_applications.csv` → progress →
+     summary shows 4 RANKED / 4 REJECTED / 2 NEEDS_REVIEW → all five downloads work
+  4. "Browse audit records" → sort/filter → open a row → gates/GPA/scores/coursework/school/trail
+     all render
+  5. "Cohort what-if" → set Honors=0 → rank 1 moves to her second choice; re-upload a saved
+     `decisions.jsonl`; "Download assignments CSV"
+  6. "Discard job & results" → subsequent fetches 404 gracefully
 
 ---
 
