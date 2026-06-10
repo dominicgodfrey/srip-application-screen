@@ -120,9 +120,13 @@ def test_job_cohorts_capacity_params_bind() -> None:
     assert resp.status_code == 200
     body = resp.json()
     tiers = {a["submission_id"]: a["assigned_tier"] for a in body["assignments"]}
-    # s2 is honors-only: the displacement chain moves flexible s1 to intensive.
-    assert tiers == {"s1": "intensive", "s2": "honors", "s3": "regular"}
-    assert body["summary"]["displaced"] == 1
+    # Honors fills strictly by rank: s1 (rank 1) takes the seat; honors-only s2 goes to the
+    # manual-review waitlist with their regular eligibility spelled out for staff.
+    assert tiers == {"s1": "honors", "s3": "regular"}
+    waitlisted = {w["submission_id"]: w for w in body["waitlist"]}
+    assert set(waitlisted) == {"s2"}
+    assert "still eligible for regular" in waitlisted["s2"]["reason"]
+    assert body["summary"]["waitlisted"] == 1
     assert body["summary"]["tiers"]["honors"]["open_seats"] == 0
 
 
@@ -134,7 +138,7 @@ def test_job_cohorts_is_non_evicting_for_what_if_iteration() -> None:
         second = client.post(f"/jobs/{job_id}/cohorts", params={"honors": 2})
     assert first.status_code == 200
     assert second.status_code == 200
-    assert second.json()["summary"]["displaced"] == 0  # honors=2 seats both honors-listers
+    assert second.json()["summary"]["waitlisted"] == 0  # honors=2 seats both honors-listers
 
 
 def test_job_cohorts_unknown_job_404() -> None:
@@ -177,7 +181,8 @@ def test_upload_cohorts_round_trips_decisions_jsonl() -> None:
     assert resp.status_code == 200
     body = resp.json()
     tiers = {a["submission_id"]: a["assigned_tier"] for a in body["assignments"]}
-    assert tiers == {"s1": "intensive", "s2": "honors", "s3": "regular"}
+    assert tiers == {"s1": "honors", "s3": "regular"}
+    assert [w["submission_id"] for w in body["waitlist"]] == ["s2"]
     assert body["summary"]["total_ranked"] == 3
 
 

@@ -248,9 +248,10 @@ class CohortAssignment(_Model):
     """One applicant's cohort outcome — a row in ``cohort_assignments.csv`` / the staff UI table.
 
     ``choice_number`` is the 1-based position of the assigned tier among the applicant's
-    *distinct* listed choices (repeats collapse). ``displaced_from`` records the tier this
-    applicant was bumped out of by a displacement chain (they stayed seated, on a later choice),
-    kept for the audit trail.
+    *distinct* listed choices (repeats collapse). ``excluded_by_cost`` lists the tiers the
+    applicant ranked *above* their first choice — never assignable under the cost ceiling
+    (higher tiers cost more; the first choice caps what they signed up to pay) — kept visible
+    for the staff audit trail.
     """
 
     submission_id: str
@@ -260,7 +261,7 @@ class CohortAssignment(_Model):
     status: AssignmentStatus
     assigned_tier: str | None = None
     choice_number: int | None = None
-    displaced_from: str | None = None
+    excluded_by_cost: list[str] = Field(default_factory=list)
     choices: list[str] = Field(default_factory=list)
     reason: str = ""
 
@@ -281,7 +282,6 @@ class CohortSummary(_Model):
     assigned: int = 0
     waitlisted: int = 0
     unassignable: int = 0
-    displaced: int = 0
     tiers: dict[str, TierSummary] = Field(default_factory=dict)
     choice_satisfaction: dict[str, int] = Field(default_factory=dict)
     needs_review_count: int = 0

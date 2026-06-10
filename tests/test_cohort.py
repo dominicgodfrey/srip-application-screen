@@ -1,10 +1,12 @@
-"""Tests for the cohort assignment layer (Phase 11, PRD §11). Deterministic, no API spend.
+"""Tests for the cohort assignment layer (Phase 11, tiered cost model since 11.5).
+Deterministic, no API spend.
 
 Organized by sub-task:
   * 11.1 — :func:`normalize_choices`: tier-token parsing of the messy free-text choice strings.
-  * 11.2 — :func:`assign_cohorts`: rank-greedy + displacement-chain assignment and its
-    invariants (only RANKED assignable, capacity respected, maximum matching, monotonicity,
-    determinism, NEEDS_REVIEW warning).
+  * 11.2/11.5 — :func:`assign_cohorts`: rank-greedy assignment under the tiered cost model and
+    its invariants (only RANKED assignable, strict first-choice cost ceiling, capped tiers fill
+    strictly by rank, no silent overflow — waitlist is a manual-review bucket, capacity sweeps,
+    monotonicity, determinism, NEEDS_REVIEW warning).
   * 11.3 — :func:`cohort_assignments_csv`: the single rank-ordered CSV artifact.
 """
 
@@ -148,7 +150,6 @@ def test_no_caps_everyone_gets_first_choice() -> None:
     assert _tier_of(result, "s4") == "regular"
     assert result.waitlist == [] and result.unassignable == []
     assert result.summary.choice_satisfaction == {"choice_1": 4}
-    assert result.summary.displaced == 0
     assert result.summary.warnings == []
 
 
@@ -186,12 +187,60 @@ def test_rejected_and_needs_review_are_never_assigned() -> None:
 
 
 # ------------------------------------------------------------------------------------------------
-# 11.2 — capacity, waitlist, and displacement chains
+# 11.5 — strict first-choice cost ceiling
+# ------------------------------------------------------------------------------------------------
+
+
+def test_cost_ceiling_blocks_listed_higher_tiers() -> None:
+    # The real-data R-I-H pattern (67 applicants): regular first means regular ONLY — never
+    # intensive or honors, even with seats wide open there.
+    records = [_rec("s1", 1, "regular", "intensive", "honors")]
+    result = assign_cohorts(records, CohortCapacities(regular=0), CFG)
+
+    entry = _entry(result, "s1")
+    assert entry.status == "waitlisted"  # regular closed; higher tiers are not an option
+    assert entry.excluded_by_cost == ["intensive", "honors"]
+    assert "regular" in entry.reason
+    assert result.summary.tiers["intensive"].filled == 0
+    assert result.summary.tiers["honors"].filled == 0
+
+
+def test_cost_ceiling_recorded_on_assigned_students() -> None:
+    records = [_rec("s1", 1, "regular", "intensive", "honors")]
+    result = assign_cohorts(records, CohortCapacities(), CFG)
+    entry = _entry(result, "s1")
+    assert entry.assigned_tier == "regular"
+    assert entry.choice_number == 1
+    assert entry.excluded_by_cost == ["intensive", "honors"]
+
+
+def test_intensive_first_excludes_honors_but_not_regular() -> None:
+    # I-R-H: honors (above first choice) is excluded; regular (below) is a real fallback.
+    records = [_rec("s1", 1, "intensive", "regular", "honors")]
+    result = assign_cohorts(records, CohortCapacities(intensive=0), CFG)
+    entry = _entry(result, "s1")
+    assert entry.assigned_tier == "regular"
+    assert entry.choice_number == 2
+    assert entry.excluded_by_cost == ["honors"]
+
+
+def test_honors_first_can_fall_through_all_listed_tiers() -> None:
+    records = [_rec("s1", 1, "honors", "intensive", "regular")]
+    result = assign_cohorts(records, CohortCapacities(honors=0, intensive=0), CFG)
+    entry = _entry(result, "s1")
+    assert entry.assigned_tier == "regular"
+    assert entry.choice_number == 3
+    assert entry.excluded_by_cost == []
+
+
+# ------------------------------------------------------------------------------------------------
+# 11.5 — capped tiers fill strictly by rank; waitlist is a manual-review bucket
 # ------------------------------------------------------------------------------------------------
 
 
 def test_capacity_binds_in_rank_order() -> None:
-    # Two honors-first students, one honors seat: the stronger gets it, the other falls to #2.
+    # Two honors-first students, one honors seat: the stronger gets it, the other falls to
+    # their listed (cheaper) second choice.
     records = [
         _rec("s1", 1, "honors", "intensive"),
         _rec("s2", 2, "honors", "intensive"),
@@ -200,79 +249,54 @@ def test_capacity_binds_in_rank_order() -> None:
     assert _tier_of(result, "s1") == "honors"
     assert _tier_of(result, "s2") == "intensive"
     assert _entry(result, "s2").choice_number == 2
-    assert result.summary.displaced == 0  # falling to an open #2 is not a displacement
 
 
-def test_waitlisted_when_no_chain_exists() -> None:
-    # Both students list only honors; one seat. No displacement possible -> rank 2 waitlisted.
-    records = [_rec("s1", 1, "honors"), _rec("s2", 2, "honors")]
-    result = assign_cohorts(records, CohortCapacities(honors=1), CFG)
-    assert _tier_of(result, "s1") == "honors"
-    entry = _entry(result, "s2")
-    assert entry.status == "waitlisted"
-    assert "honors" in entry.reason
-    assert result.summary.waitlisted == 1
-
-
-def test_one_hop_displacement_seats_a_single_choice_student() -> None:
-    # Plain greedy would waitlist s2; the chain moves flexible s1 to their #2 instead.
+def test_no_displacement_capped_tier_is_purely_rank_ordered() -> None:
+    # Under the old max-matching policy, honors-only s2 would have displaced flexible s1.
+    # Now honors seats go strictly by rank: s1 keeps honors, s2 goes to manual review.
     records = [
         _rec("s1", 1, "honors", "intensive"),
         _rec("s2", 2, "honors"),
     ]
     result = assign_cohorts(records, CohortCapacities(honors=1), CFG)
 
-    assert _tier_of(result, "s2") == "honors"
-    moved = _entry(result, "s1")
-    assert moved.assigned_tier == "intensive"
-    assert moved.choice_number == 2
-    assert moved.displaced_from == "honors"
-    assert result.summary.assigned == 2
-    assert result.summary.waitlisted == 0
-    assert result.summary.displaced == 1
+    assert _tier_of(result, "s1") == "honors"  # never bumped
+    entry = _entry(result, "s2")
+    assert entry.status == "waitlisted"
+    assert result.summary.assigned == 1
+    assert result.summary.waitlisted == 1
 
 
-def test_two_hop_displacement_chain() -> None:
-    # honors=1, intensive=1: seating s3 (honors-only) requires s2 I->R then s1 H->I.
-    records = [
-        _rec("s1", 1, "honors", "intensive"),
-        _rec("s2", 2, "intensive", "regular"),
-        _rec("s3", 3, "honors"),
-    ]
-    result = assign_cohorts(records, CohortCapacities(honors=1, intensive=1), CFG)
-
-    assert _tier_of(result, "s3") == "honors"
-    assert _tier_of(result, "s1") == "intensive"
-    assert _tier_of(result, "s2") == "regular"
-    assert _entry(result, "s1").displaced_from == "honors"
-    assert _entry(result, "s2").displaced_from == "intensive"
-    assert result.summary.assigned == 3
-    assert result.summary.displaced == 2
-
-
-def test_displacement_picks_the_weakest_movable_occupant() -> None:
-    records = [
-        _rec("s1", 1, "honors", "intensive"),
-        _rec("s2", 2, "honors", "intensive"),
-        _rec("s3", 3, "honors"),
-    ]
-    result = assign_cohorts(records, CohortCapacities(honors=2), CFG)
-
-    assert _tier_of(result, "s1") == "honors"  # the stronger flexible student keeps their #1
-    assert _tier_of(result, "s2") == "intensive"
-    assert _entry(result, "s2").displaced_from == "honors"
-    assert _tier_of(result, "s3") == "honors"
-
-
-def test_displacement_never_fires_to_upgrade_a_choice() -> None:
-    # s2's #1 is full but their #2 is open: they take the open seat, nobody is displaced.
-    records = [
-        _rec("s1", 1, "honors"),
-        _rec("s2", 2, "honors", "regular"),
-    ]
+def test_waitlist_reason_names_programs_and_regular_eligibility() -> None:
+    records = [_rec("s1", 1, "honors"), _rec("s2", 2, "honors")]
     result = assign_cohorts(records, CohortCapacities(honors=1), CFG)
+    entry = _entry(result, "s2")
+    assert entry.status == "waitlisted"
+    assert "honors" in entry.reason  # the sole program they chose
+    assert "still eligible for regular" in entry.reason  # staff can place them manually
+    assert "staff decision" in entry.reason
+
+
+def test_listed_regular_is_a_normal_fallback() -> None:
+    # A student who listed regular lands there via the ordinary walk — no manual review needed.
+    records = [_rec("s1", 1, "honors"), _rec("s2", 2, "honors", "regular")]
+    result = assign_cohorts(records, CohortCapacities(honors=1), CFG)
+    entry = _entry(result, "s2")
+    assert entry.status == "assigned"
+    assert entry.assigned_tier == "regular"
+    assert entry.choice_number == 2
+
+
+def test_optional_regular_cap_binds_by_rank() -> None:
+    records = [_rec("s1", 1, "regular"), _rec("s2", 2, "regular"), _rec("s3", 3, "regular")]
+    result = assign_cohorts(records, CohortCapacities(regular=2), CFG)
+    assert _tier_of(result, "s1") == "regular"
     assert _tier_of(result, "s2") == "regular"
-    assert result.summary.displaced == 0
+    entry = _entry(result, "s3")
+    assert entry.status == "waitlisted"
+    assert "regular" in entry.reason
+    assert "still eligible" not in entry.reason  # they chose regular; its cap is simply full
+    assert result.summary.tiers["regular"].open_seats == 0
 
 
 def test_zero_capacity_closes_a_tier() -> None:
@@ -336,7 +360,7 @@ def test_missing_rank_is_processed_last_with_warning() -> None:
 
 
 # ------------------------------------------------------------------------------------------------
-# 11.2 — global invariants: capacity, monotonicity, determinism (brute-force over cap combos)
+# Global invariants: capacity, monotonicity, determinism (brute-force over cap combos)
 # ------------------------------------------------------------------------------------------------
 
 _POPULATION = [
@@ -367,6 +391,15 @@ def test_capacity_is_never_exceeded_across_all_combos() -> None:
         assert total == len(_POPULATION)
 
 
+def test_cost_ceiling_holds_across_all_combos() -> None:
+    # No student is ever assigned a tier more expensive than their first choice.
+    tier_rank = {tier: idx for idx, tier in enumerate(TIERS)}
+    for h, i, r in itertools.product(_CAP_VALUES, repeat=3):
+        result = assign_cohorts(_POPULATION, _caps(h, i, r), CFG)
+        for entry in result.assignments:
+            assert tier_rank[entry.assigned_tier] >= tier_rank[entry.choices[0]]
+
+
 def test_raising_any_capacity_never_reduces_total_assigned() -> None:
     bounded = (0, 1, 2)
     for h, i, r in itertools.product(bounded, repeat=3):
@@ -390,8 +423,8 @@ def test_assignment_is_deterministic_across_reruns() -> None:
 def test_csv_has_pinned_columns_and_every_record_once() -> None:
     records = [
         _rec("s1", 1, "honors", "intensive"),
-        _rec("s2", 2, "honors"),
-        _rec("s3", 3, "honors"),  # waitlisted: honors=1 and no chain after s1 moves
+        _rec("s2", 2, "honors"),  # waitlisted: honors cap taken by s1
+        _rec("s3", 3, "honors"),  # waitlisted
         AuditRecord(
             submission_id="s4",
             name="Student s4",
@@ -406,29 +439,32 @@ def test_csv_has_pinned_columns_and_every_record_once() -> None:
 
     assert lines[0] == (
         "rank,submission_id,name,final_score,status,assigned_tier,"
-        "choice_number,displaced_from,choices,reason"
+        "choice_number,excluded_by_cost,choices,reason"
     )
     assert len(lines) == 1 + len(records)  # every RANKED record exactly once
     # rank order across all statuses
     assert [line.split(",")[1] for line in lines[1:]] == ["s1", "s2", "s3", "s4"]
 
 
-def test_csv_rows_carry_status_tier_and_choice_chain() -> None:
-    records = [_rec("s1", 1, "honors", "intensive"), _rec("s2", 2, "honors")]
-    result = assign_cohorts(records, CohortCapacities(honors=1), CFG)
+def test_csv_rows_carry_status_tier_and_cost_exclusions() -> None:
+    records = [
+        _rec("s1", 1, "regular", "intensive", "honors"),
+        _rec("s2", 2, "honors", "regular"),
+    ]
+    result = assign_cohorts(records, CohortCapacities(), CFG)
     lines = cohort_assignments_csv(result).strip().split("\n")
 
     s1 = lines[1].split(",")
     assert s1[4] == "assigned"
-    assert s1[5] == "intensive"
-    assert s1[6] == "2"
-    assert s1[7] == "honors"  # displaced_from
-    assert s1[8] == "honors > intensive"
+    assert s1[5] == "regular"
+    assert s1[6] == "1"
+    assert s1[7] == "intensive | honors"  # pruned by the cost ceiling
+    assert s1[8] == "regular > intensive > honors"
 
     s2 = lines[2].split(",")
     assert s2[4] == "assigned"
     assert s2[5] == "honors"
-    assert s2[7] == ""  # never displaced
+    assert s2[7] == ""  # nothing above their first choice
 
 
 def test_csv_is_deterministic() -> None:

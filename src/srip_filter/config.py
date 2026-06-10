@@ -121,13 +121,14 @@ class ResumeConfig(_Strict):
 
 
 class CohortConfig(_Strict):
-    """Cohort assignment (PRD §11, Phase 11).
+    """Cohort assignment (PRD §11, Phase 11; tiered cost model since 11.5).
 
     ``tiers`` are the canonical program tokens, matched case-insensitively by containment inside
     the free-text choice strings (the form emits inconsistent values like ``Summer 2026- HONORS``
-    vs ``Summer 2026 - HONORS``). List order is also the deterministic exploration order for
-    displacement-chain search. Per-tier capacities are NOT config — they are a per-request staff
-    input (:class:`~srip_filter.models.CohortCapacities`).
+    vs ``Summer 2026 - HONORS``). **List order is load-bearing:** it is the competitiveness/cost
+    order, most expensive first — the cost ceiling ("never place a student above their first
+    choice") is computed from list position. Per-tier capacities are NOT config — they are a
+    per-request staff input (:class:`~srip_filter.models.CohortCapacities`).
     """
 
     tiers: list[str] = Field(default_factory=lambda: ["honors", "intensive", "regular"])
