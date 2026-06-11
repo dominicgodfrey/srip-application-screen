@@ -937,6 +937,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "better-profanity" },
+    { name = "httpx" },
     { name = "openai" },
     { name = "pandas" },
     { name = "pydantic" },
@@ -964,6 +965,7 @@ dev = [
 requires-dist = [
     { name = "better-profanity", specifier = ">=0.7" },
     { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.111" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "jinja2", marker = "extra == 'api'", specifier = ">=3.1" },
     { name = "openai", specifier = ">=1.40" },
     { name = "pandas", specifier = ">=2.2" },
