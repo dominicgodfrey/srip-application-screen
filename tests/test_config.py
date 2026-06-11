@@ -27,7 +27,7 @@ def test_defaults_match_prd() -> None:
     assert cfg.school.bonus_us_top20 == 15.0
     assert cfg.school.bonus_intl_top50 == 12.0
     assert cfg.school.fuzzy_match_threshold == 88
-    assert cfg.resume.bonus_max == 0.0  # kill switch holds until Phase 12.5 wires the stage
+    assert cfg.resume.bonus_max == 10.0  # PRD §10.1; 0 is the Stage 6 kill switch
 
 
 def test_resume_config_defaults() -> None:

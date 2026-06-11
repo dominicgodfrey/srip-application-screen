@@ -182,6 +182,7 @@
       ]);
 
     const courseworkHtml = renderCoursework(r.coursework_breakdown || []);
+    const resumeHtml = renderResume(r.resume || {});
 
     const metaHtml =
       '<h3 class="subhead">Application</h3>' + kv([
@@ -209,10 +210,38 @@
     els.detailBody.innerHTML =
       '<div class="detail-grid">' +
         "<div>" + metaHtml + gatesHtml + "</div>" +
-        "<div>" + gpaHtml + scoresHtml + schoolHtml + "</div>" +
+        "<div>" + gpaHtml + scoresHtml + schoolHtml + resumeHtml + "</div>" +
       "</div>" + courseworkHtml + listsHtml;
     show(els.detail);
     els.detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  function renderResume(res) {
+    // Stage 6 (Phase 12). Older decisions.jsonl files have no resume block — show nothing.
+    if (res.url_present === undefined) return "";
+    let pairs = [
+      ["URL present", S.bool(res.url_present, false)],
+      ["Fetch attempted", S.bool(res.attempted, false)],
+    ];
+    if (res.attempted) {
+      pairs = pairs.concat([
+        ["Downloaded", S.bool(res.fetched, false)],
+        ["Extracted chars", res.extracted_chars ? S.esc(res.extracted_chars) : "—"],
+      ]);
+    }
+    if (res.failure) pairs.push(["Failure (bonus neutral)", S.esc(res.failure)]);
+    if (res.signals) {
+      const sig = res.signals;
+      pairs = pairs.concat([
+        ["Is a resume", S.bool(sig.is_resume)],
+        ["Relevant projects", S.esc(sig.relevant_projects)],
+        ["Relevant experience", S.esc(sig.relevant_experience)],
+        ["Relevant awards", S.esc(sig.relevant_awards)],
+        ["Skills relevance", S.fmtNum(sig.skills_relevance, 2)],
+        ["Highlights", S.esc(sig.highlights)],
+      ]);
+    }
+    return '<h3 class="subhead">Resume</h3>' + kv(pairs);
   }
 
   function renderCoursework(courses) {

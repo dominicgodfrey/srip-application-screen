@@ -55,10 +55,11 @@ from .outputs import (
     ranked_csv,
     rejected_csv,
 )
+from .resume_fetch import ResumeFetcher
 from .scoring.aggregate import rank_records
 from .scoring.coursework import score_coursework
 from .scoring.essays import grade_essays
-from .scoring.resume import resume_bonus
+from .scoring.resume import score_resume
 from .scoring.school import score_school
 
 # A gate-survivor leaves grade_one marked RANKED with final_score=None; Stage 8 rank_records
@@ -148,6 +149,7 @@ async def grade_one(
     resolution: HeaderResolution,
     client: BaseLLMClient,
     cfg: AppConfig,
+    fetcher: ResumeFetcher | None = None,
 ) -> AuditRecord:
     """Grade one applicant through the ordered fail-fast pipeline (Stages 1→7).
 
@@ -227,7 +229,19 @@ async def grade_one(
         if counting:
             record.reasons.append(f"coursework: {counting} counting course(s)")
 
-        record.scores.resume_bonus = resume_bonus(row, cfg)
+        # Stage 6 — resume bonus (Phase 12): fetch → extract → Task E → price → discard.
+        # Runs only here, on gate-survivors, so rejected rows cost zero downloads/tokens.
+        # Any failure is a 0 bonus + audit note (bonus-only, never a block); no fetcher or
+        # the bonus_max=0 kill switch -> the stage is a free no-op.
+        stage6 = await score_resume(row, fetcher, client, cfg)
+        record.scores.resume_bonus = stage6.bonus
+        record.resume = stage6.assessment
+        if stage6.task_e_called:
+            record.llm_calls.append("task_e")
+        if stage6.error:
+            record.errors.append(stage6.error)
+        if stage6.bonus > 0:
+            record.reasons.append(f"resume: relevant signals, bonus {stage6.bonus}")
 
         school = score_school(row, cfg)
         record.scores.school_bonus = school.bonus
@@ -282,6 +296,7 @@ async def grade_batch(
     client: BaseLLMClient,
     cfg: AppConfig,
     progress: Callable[[int, int], None] | None = None,
+    fetcher: ResumeFetcher | None = None,
 ) -> BatchResult:
     """Run the whole pipeline over an uploaded CSV: ingest → grade → rank → emit (Stages 0-9).
 
@@ -299,6 +314,12 @@ async def grade_batch(
     caller — this is the only HTTP-aware seam, kept signature-compatible (default ``None``). Safe
     under the concurrent gather: increments happen at ``await`` boundaries on the single event loop,
     so the counter is never raced.
+
+    ``fetcher`` is the Stage 6 resume downloader (Phase 12). With the default ``None``, one
+    batch-scoped :class:`~srip_filter.resume_fetch.ResumeFetcher` is built when the resume stage
+    is live (``resume.bonus_max > 0``) and closed with the run; tests inject a MockTransport
+    fetcher (the caller then owns its lifecycle). With the kill switch on, no fetcher exists and
+    Stage 6 is a free no-op.
     """
     ingest = ingest_csv(source)
     total = len(ingest.rows)
@@ -306,16 +327,25 @@ async def grade_batch(
         progress(0, total)
 
     done = 0
+    owns_fetcher = fetcher is None and cfg.resume.bonus_max > 0
+    if owns_fetcher:
+        fetcher = ResumeFetcher(cfg)
 
     async def _graded(deduped: DedupedRow) -> AuditRecord:
         nonlocal done
-        record = await grade_one(deduped, ingest.resolution, client, cfg)
+        record = await grade_one(deduped, ingest.resolution, client, cfg, fetcher)
         done += 1
         if progress is not None:
             progress(done, total)
         return record
 
-    records = list(await asyncio.gather(*(_graded(deduped) for deduped in ingest.rows)))
+    try:
+        records = list(
+            await asyncio.gather(*(_graded(deduped) for deduped in ingest.rows))
+        )
+    finally:
+        if owns_fetcher and fetcher is not None:
+            await fetcher.aclose()
     rank_records(records, cfg)
     return BatchResult(
         records=records,

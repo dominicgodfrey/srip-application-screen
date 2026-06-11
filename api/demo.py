@@ -32,6 +32,7 @@ from srip_filter.models import (
     TaskBOutput,
     TaskCOutput,
     TaskDOutput,
+    TaskEOutput,
 )
 
 _OFFTOPIC = "[[OFFTOPIC]]"
@@ -104,6 +105,20 @@ def _task_d(user: str) -> TaskDOutput:
     )
 
 
+def _task_e(user: str) -> TaskEOutput:
+    """Extract plausible resume signals (demo only; reached only if a demo CSV carries a
+    fetchable resume URL — the shipped sample leaves the column blank)."""
+    return TaskEOutput(
+        is_resume=True,
+        relevant_projects=2,
+        relevant_experience=1,
+        relevant_awards=1,
+        skills_relevance=0.7,
+        highlights="Demo handler: two projects, one internship, one award.",
+        rationale="Demo handler output — not a real assessment.",
+    )
+
+
 def demo_handler(task: str, user: str, schema: type[BaseModel]) -> BaseModel:
     """Route a faked LLM call to the matching optimistic builder.
 
@@ -116,6 +131,7 @@ def demo_handler(task: str, user: str, schema: type[BaseModel]) -> BaseModel:
         "task_b": _task_b,
         "task_c": _task_c,
         "task_d": _task_d,
+        "task_e": _task_e,
     }
     builder = builders.get(task)  # type: ignore[arg-type]
     if builder is None:  # unknown task — should never happen

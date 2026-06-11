@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import io
 
+import httpx
 import pytest
 
 from srip_filter.config import AppConfig
@@ -34,8 +35,10 @@ from srip_filter.models import (
     TaskBOutput,
     TaskCOutput,
     TaskDOutput,
+    TaskEOutput,
 )
 from srip_filter.pipeline import affirmation_ok, build_base_record, grade_batch, grade_one
+from srip_filter.resume_fetch import ResumeFetcher
 
 APP = AppConfig()
 
@@ -280,6 +283,7 @@ _CSV_HEADERS = [
     "What motivates you to apply to Track 2 of the SRIP program? (100-350 words)",
     "Track 2 is designed as a foundation for future research. (100-350 words)",
     "Relevant Coursework",
+    "Resume (optional)",
     "I affirm that the information provided above is truthful and accurate.",
 ]
 _H = dict(
@@ -296,6 +300,7 @@ _H = dict(
     essay1="What motivates you to apply to Track 2 of the SRIP program? (100-350 words)",
     essay2="Track 2 is designed as a foundation for future research. (100-350 words)",
     coursework="Relevant Coursework",
+    resume="Resume (optional)",
     affirmation="I affirm that the information provided above is truthful and accurate.",
 )
 
@@ -323,6 +328,7 @@ def _csv_row(
     affirmation: str = "I affirm this is truthful.",
     institution: str = "High School",
     gpa_explanation: str = "",
+    resume: str = "",
 ) -> dict[str, str]:
     return {
         _H["sid"]: sid,
@@ -334,6 +340,7 @@ def _csv_row(
         _H["essay1"]: essay1,
         _H["essay2"]: essay2,
         _H["coursework"]: coursework,
+        _H["resume"]: resume,
         _H["affirmation"]: affirmation,
         _H["institution"]: institution,
     }
@@ -541,3 +548,162 @@ async def test_failfast_affirmation_route_spends_zero_tokens_in_batch() -> None:
     client = FakeLLMClient(APP, handler=_good_handler)
     await grade_batch(_csv_bytes([_csv_row("s-aff", affirmation="")]), client, APP)
     assert client.calls == []  # the affirmation check precedes every LLM stage
+
+
+# ------------------------------------------------------------------------------------------------
+# Phase 12.5 — Stage 6 resume bonus wired into the pipeline (MockTransport, no real network)
+# ------------------------------------------------------------------------------------------------
+
+_RESUME_HOST = "files.example-bucket.test"
+_RESUME_URL = f"https://{_RESUME_HOST}/applicant/resume.pdf"
+
+
+def _resume_app_config() -> AppConfig:
+    return AppConfig.model_validate(
+        {"resume": {"bonus_max": 10.0, "allowed_url_hosts": [_RESUME_HOST]}}
+    )
+
+
+def _tiny_pdf(text: str) -> bytes:
+    """Minimal one-page PDF drawing ``text`` (synthetic; correct xref offsets)."""
+    escaped = text.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+    stream = f"BT /F1 12 Tf 72 712 Td ({escaped}) Tj ET".encode("latin-1")
+    objs: list[bytes] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_pos = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\n".encode()
+    out += f"startxref\n{xref_pos}\n%%EOF\n".encode()
+    return bytes(out)
+
+
+class _CountingTransportHandler:
+    def __init__(self, responder) -> None:  # type: ignore[no-untyped-def]
+        self.calls = 0
+        self._responder = responder
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        return self._responder(request)
+
+
+def _mock_fetcher(cfg: AppConfig, responder=None):  # type: ignore[no-untyped-def]
+    handler = _CountingTransportHandler(
+        responder or (lambda r: httpx.Response(200, content=_tiny_pdf("Synthetic CS resume")))
+    )
+    return ResumeFetcher(cfg, transport=httpx.MockTransport(handler)), handler
+
+
+def _task_e() -> TaskEOutput:
+    return TaskEOutput(
+        is_resume=True,
+        relevant_projects=2,
+        relevant_experience=1,
+        relevant_awards=0,
+        skills_relevance=0.5,
+        highlights="scripted",
+        rationale="scripted",
+    )
+
+
+def _resume_handler(task, user, schema):  # type: ignore[no-untyped-def]
+    if task == "task_e":
+        return _task_e()
+    return _good_handler(task, user, schema)
+
+
+async def test_survivor_with_resume_gets_bonus_and_audit_trail() -> None:
+    cfg = _resume_app_config()
+    fetcher, handler = _mock_fetcher(cfg)
+    client = FakeLLMClient(cfg, handler=_resume_handler)
+    rows = [_csv_row("s-res", resume=_RESUME_URL)]
+    async with fetcher:
+        result = await grade_batch(_csv_bytes(rows), client, cfg, fetcher=fetcher)
+    rec = result.records[0]
+    assert rec.outcome == "RANKED"
+    assert rec.scores.resume_bonus == pytest.approx(6.0)  # 2*1.5 + 1*2.0 + 0.5*2.0
+    assert rec.final_score == pytest.approx(
+        rec.scores.gpa_points + rec.scores.essay.total + rec.scores.coursework_bonus + 6.0
+    )
+    assert "task_e" in rec.llm_calls
+    assert rec.resume.fetched and rec.resume.signals is not None
+    assert handler.calls == 1
+
+
+async def test_rejected_row_costs_zero_resume_fetches() -> None:
+    # Fail-fast extends to downloads: a Stage-1 reject with a resume URL never hits the network.
+    cfg = _resume_app_config()
+    fetcher, handler = _mock_fetcher(cfg)
+    client = FakeLLMClient(cfg, handler=_resume_handler)
+    rows = [_csv_row("s-rej", essay1="too short", resume=_RESUME_URL)]
+    async with fetcher:
+        result = await grade_batch(_csv_bytes(rows), client, cfg, fetcher=fetcher)
+    assert result.records[0].outcome == "REJECTED"
+    assert handler.calls == 0
+    assert client.calls == []
+
+
+async def test_resume_failure_keeps_applicant_ranked_with_note() -> None:
+    # A dead resume link is neutral: still RANKED, 0 bonus, the failure named in errors[].
+    cfg = _resume_app_config()
+    fetcher, _ = _mock_fetcher(cfg, lambda r: httpx.Response(404))
+    client = FakeLLMClient(cfg, handler=_resume_handler)
+    rows = [_csv_row("s-dead", resume=_RESUME_URL)]
+    async with fetcher:
+        result = await grade_batch(_csv_bytes(rows), client, cfg, fetcher=fetcher)
+    rec = result.records[0]
+    assert rec.outcome == "RANKED"
+    assert rec.scores.resume_bonus == 0.0
+    assert rec.resume.failure == "http_status_404"
+    assert any("http_status_404" in e for e in rec.errors)
+
+
+async def test_inv1_extended_missing_resume_never_reduces_score() -> None:
+    # §12 #1 with the resume signal live: identical applicants, one with a resume — the
+    # resume-less one scores exactly the no-bonus total, never below it.
+    cfg = _resume_app_config()
+    fetcher, _ = _mock_fetcher(cfg)
+    client = FakeLLMClient(cfg, handler=_resume_handler)
+    rows = [
+        _csv_row("s-with", resume=_RESUME_URL, coursework="", institution="High School"),
+        _csv_row("s-without", resume="", coursework="", institution="High School"),
+    ]
+    async with fetcher:
+        result = await grade_batch(_csv_bytes(rows), client, cfg, fetcher=fetcher)
+    by_id = {r.submission_id: r for r in result.records}
+    without = by_id["s-without"]
+    assert without.final_score == pytest.approx(
+        without.scores.gpa_points + without.scores.essay.total
+    )
+    assert by_id["s-with"].final_score > without.final_score
+    assert without.scores.resume_bonus == 0.0
+    assert not without.resume.attempted  # blank cell: no fetch even attempted
+
+
+async def test_kill_switch_restores_stub_behavior_in_batch() -> None:
+    # bonus_max = 0: zero fetches, zero Task E calls, resume_bonus 0 — even with URLs present.
+    cfg = AppConfig.model_validate(
+        {"resume": {"bonus_max": 0.0, "allowed_url_hosts": [_RESUME_HOST]}}
+    )
+    fetcher, handler = _mock_fetcher(cfg)
+    client = FakeLLMClient(cfg, handler=_resume_handler)
+    rows = [_csv_row("s-kill", resume=_RESUME_URL)]
+    async with fetcher:
+        result = await grade_batch(_csv_bytes(rows), client, cfg, fetcher=fetcher)
+    rec = result.records[0]
+    assert rec.outcome == "RANKED" and rec.scores.resume_bonus == 0.0
+    assert handler.calls == 0
+    assert all(task != "task_e" for task, _ in client.calls)

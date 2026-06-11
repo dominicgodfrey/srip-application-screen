@@ -128,7 +128,7 @@ class ResumeConfig(_Strict):
     classifies, config prices (the Task C pattern).
     """
 
-    bonus_max: float = 0.0  # stays 0 until Phase 12.5 wires the real stage; then 10 (PRD §10.1)
+    bonus_max: float = 10.0  # PRD §10.1 ("120 once resume is built"); set 0 to kill the stage
     max_download_bytes: int = 10_485_760  # 10 MiB streaming cap per resume; abort above this
     download_timeout_s: float = 20.0
     download_concurrency: int = 4  # own semaphore, separate from the LLM one
