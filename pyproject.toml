@@ -13,6 +13,7 @@ dependencies = [
     "better-profanity>=0.7",
     "pyyaml>=6.0.1",
     "httpx>=0.27",  # resume download layer (Phase 12); promoted from transitive (via openai)
+    "pypdf>=4.2",  # resume PDF text extraction (Phase 12); lighter than pdfplumber
 ]
 
 [project.optional-dependencies]
