@@ -7,13 +7,15 @@ from srip_filter.models import (
     AuditRecord,
     CourseItem,
     GpaAssessment,
+    ResumeAssessment,
     TaskAOutput,
     TaskBOutput,
     TaskCOutput,
     TaskDOutput,
+    TaskEOutput,
 )
 
-LLM_CONTRACTS = [TaskAOutput, TaskBOutput, TaskCOutput, TaskDOutput, CourseItem]
+LLM_CONTRACTS = [TaskAOutput, TaskBOutput, TaskCOutput, TaskDOutput, TaskEOutput, CourseItem]
 
 
 def test_task_a_valid() -> None:
@@ -94,6 +96,81 @@ def test_task_c_round_trip() -> None:
         rationale="One CS course.",
     )
     assert out.courses[0].category == "cs"
+
+
+def test_task_e_valid_and_bounds() -> None:
+    """Phase 12.1: Task E counts/classifies; negative counts and out-of-range relevance fail."""
+    out = TaskEOutput(
+        is_resume=True,
+        relevant_projects=3,
+        relevant_experience=1,
+        relevant_awards=2,
+        skills_relevance=0.8,
+        highlights="Two shipped web apps; USACO silver.",
+        rationale="Clear CS resume with concrete projects.",
+    )
+    assert out.is_resume is True
+    with pytest.raises(ValidationError):
+        TaskEOutput(
+            is_resume=True,
+            relevant_projects=-1,  # counts are never negative
+            relevant_experience=0,
+            relevant_awards=0,
+            skills_relevance=0.5,
+            highlights="x",
+            rationale="x",
+        )
+    with pytest.raises(ValidationError):
+        TaskEOutput(
+            is_resume=True,
+            relevant_projects=0,
+            relevant_experience=0,
+            relevant_awards=0,
+            skills_relevance=1.5,  # outside [0, 1]
+            highlights="x",
+            rationale="x",
+        )
+
+
+def test_resume_assessment_defaults_and_no_content_fields() -> None:
+    """Phase 12.1: the audit block defaults to 'not attempted' and never carries resume text."""
+    block = ResumeAssessment()
+    assert block.url_present is False
+    assert block.attempted is False
+    assert block.fetched is False
+    assert block.extracted_chars == 0
+    assert block.signals is None
+    assert block.failure == ""
+    # The fetch->extract->discard memory rule: no field can hold resume bytes or text.
+    assert not any(
+        name in ResumeAssessment.model_fields for name in ("text", "content", "body", "bytes")
+    )
+
+
+def test_audit_record_nests_resume_assessment() -> None:
+    rec = AuditRecord(
+        submission_id="x",
+        outcome="RANKED",
+        resume=ResumeAssessment(
+            url_present=True,
+            attempted=True,
+            fetched=True,
+            extracted_chars=4200,
+            signals=TaskEOutput(
+                is_resume=True,
+                relevant_projects=2,
+                relevant_experience=1,
+                relevant_awards=0,
+                skills_relevance=0.7,
+                highlights="Python + JS projects.",
+                rationale="Standard student resume.",
+            ),
+        ),
+    )
+    restored = AuditRecord.model_validate_json(rec.model_dump_json())
+    assert restored.resume == rec.resume
+    assert restored.resume.signals is not None
+    assert restored.resume.signals.relevant_projects == 2
 
 
 def test_extra_key_forbidden() -> None:

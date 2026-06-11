@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from srip_filter.config import AppConfig, require_openai_key
 
-TaskName = Literal["task_a", "task_b", "task_c", "task_d"]
+TaskName = Literal["task_a", "task_b", "task_c", "task_d", "task_e"]
 FakeHandler = Callable[[str, str, type[BaseModel]], "BaseModel | Awaitable[BaseModel]"]
 
 T = TypeVar("T", bound=BaseModel)

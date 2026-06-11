@@ -27,7 +27,28 @@ def test_defaults_match_prd() -> None:
     assert cfg.school.bonus_us_top20 == 15.0
     assert cfg.school.bonus_intl_top50 == 12.0
     assert cfg.school.fuzzy_match_threshold == 88
-    assert cfg.resume.bonus_max == 0.0  # deferred, inert
+    assert cfg.resume.bonus_max == 0.0  # kill switch holds until Phase 12.5 wires the stage
+
+
+def test_resume_config_defaults() -> None:
+    """Phase 12.1: the Stage-6 download/extraction/pricing knobs (PLAN.md Phase 12)."""
+    cfg = AppConfig()
+    assert cfg.resume.max_download_bytes == 10_485_760
+    assert cfg.resume.download_timeout_s == 20.0
+    assert cfg.resume.download_concurrency == 4
+    # SSRF allowlist: the pinned Fillout S3 bucket host (openissue #5), https-only.
+    assert cfg.resume.allowed_url_hosts == [
+        "prod-fillout-oregon-s3.s3.us-west-2.amazonaws.com"
+    ]
+    assert cfg.resume.max_text_chars == 15_000
+    # Signal pricing is config-owned (the model never prices) and never negative.
+    for weight in (
+        cfg.resume.weight_project,
+        cfg.resume.weight_experience,
+        cfg.resume.weight_award,
+        cfg.resume.weight_skills,
+    ):
+        assert weight >= 0.0
 
 
 def test_loads_shipped_config_yaml() -> None:
@@ -38,6 +59,7 @@ def test_loads_shipped_config_yaml() -> None:
     assert cfg.llm.models.task_b == "gpt-4.1"
     assert cfg.llm.models.task_c == "gpt-4.1-mini"
     assert cfg.llm.models.task_d == "gpt-4.1"
+    assert cfg.llm.models.task_e == "gpt-4.1-mini"  # mechanical extraction -> mini tier
     assert cfg.llm.temperature <= 0.2
 
 

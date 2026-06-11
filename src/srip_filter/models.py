@@ -2,7 +2,8 @@
 
 Two families of models:
 
-* **LLM contracts** — the structured-output shapes for Tasks A/B/C/D (PRD §8). Every field is
+* **LLM contracts** — the structured-output shapes for Tasks A/B/C/D (PRD §8) and Task E
+  (resume signal extraction, Phase 12). Every field is
   required (no defaults) and unknown keys are forbidden, so each maps cleanly to an OpenAI
   Structured Outputs ``json_schema`` (``additionalProperties: false``, all-required).
 * **Audit record** — the per-applicant decision record (PRD §9), built in Python and emitted
@@ -110,6 +111,40 @@ class TaskDOutput(_Model):
     rationale: str = Field(description="1-2 sentences for the audit log.")
 
 
+class TaskEOutput(_Model):
+    """Task E — resume signal extraction (PRD §7.2, Phase 12).
+
+    Mechanical extraction (mini tier): the model **counts and classifies** signals relevant to
+    software engineering; it never prices them. The deterministic layer
+    (:func:`srip_filter.scoring.resume.resume_signal_bonus`) applies the config weights —
+    the Task C "model classifies, config prices" pattern. Bonus-only: nothing here can reject.
+    """
+
+    is_resume: bool = Field(
+        description="True if the text is actually a resume/CV (not a cover letter, blank page, "
+        "or unrelated document)."
+    )
+    relevant_projects: int = Field(
+        ge=0,
+        description="Count of concrete software/CS/data projects (personal, school, or club).",
+    )
+    relevant_experience: int = Field(
+        ge=0,
+        description="Count of internships, jobs, or research positions relevant to software/CS.",
+    )
+    relevant_awards: int = Field(
+        ge=0,
+        description="Count of CS/STEM competition awards, hackathon placements, olympiads.",
+    )
+    skills_relevance: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Depth of programming languages/tools/frameworks listed, 0 (none) to 1.",
+    )
+    highlights: str = Field(description="Short note on the strongest signals, for the audit log.")
+    rationale: str = Field(description="1-2 sentence justification for the audit log.")
+
+
 # ============================================================================================
 # Audit record (PRD §9) — built in Python, emitted to decisions.jsonl
 # ============================================================================================
@@ -185,13 +220,30 @@ class Scores(_Model):
     essay: EssaySubscores = Field(default_factory=EssaySubscores)
     coursework_bonus: float = 0.0
     school_bonus: float = 0.0
-    resume_bonus: float = 0.0  # always 0 in current scope (deferred)
+    resume_bonus: float = 0.0  # 0 unless Stage 6 extracts signals (Phase 12); kill switch -> 0
 
 
 class SchoolMatch(_Model):
     matched_name: str | None = None
     list: SchoolListName | None = None
     fuzzy_score: float = 0.0
+
+
+class ResumeAssessment(_Model):
+    """Stage-6 resume result for the audit record (Phase 12, PRD §7.2).
+
+    Carries the fetch/extract/Task-E trail — **never the resume bytes or text** (the
+    fetch→extract→discard memory rule; resume content is PII and is dropped the moment the
+    signals are extracted). ``failure`` holds a typed reason when any step failed; the bonus
+    degrades to 0 and the applicant is unaffected otherwise (bonus-only, §0.3).
+    """
+
+    url_present: bool = False
+    attempted: bool = False  # False when the kill switch (bonus_max == 0) or no URL skipped it
+    fetched: bool = False
+    extracted_chars: int = 0
+    signals: TaskEOutput | None = None  # populated only when Task E ran
+    failure: str = ""  # "" = no failure; otherwise a typed reason for the audit log
 
 
 class AuditRecord(_Model):
@@ -215,6 +267,7 @@ class AuditRecord(_Model):
 
     coursework_breakdown: list[CourseItem] = Field(default_factory=list)
     school_match: SchoolMatch = Field(default_factory=SchoolMatch)
+    resume: ResumeAssessment = Field(default_factory=ResumeAssessment)
 
     reasons: list[str] = Field(default_factory=list)
     llm_calls: list[str] = Field(default_factory=list)
