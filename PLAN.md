@@ -4,19 +4,16 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 12 — Resume bonus (Stage 6, PRD §7.2 — now IN SCOPE) — PLANNED, implementation not started
+Phase 12 — Resume bonus (Stage 6, PRD §7.2) — COMPLETE (12.1–12.6 landed; stage live at
+`bonus_max: 10`; openissue #5 host allowlist resolved)
 
 ## Active Sub-Task
-Phase 12 planned (owner decision: resume parsing moves from "deferred" into scope). The plan
-fills the existing slot — `Scores.resume_bonus` is already in the §10.1 composition,
-`scoring/resume.py` is the deliberate stub, and `resume.bonus_max` (0 today) is the kill switch.
-Sub-task order: 12.1 config+contracts → 12.2 download layer → 12.3 PDF extraction → 12.4 Task E
-prompt + bonus math → 12.5 Stage 6 aggregator + wiring → 12.6 scale verification + docs. See the
-Phase Map Phase 12 breakdown and the Notes-log entry (hosting analysis: per-applicant
-fetch→extract→discard memory rule, SSRF allowlist, pypdf-over-pdfplumber deviation). Next
-action: begin 12.1. Phase 10 (web UI) is complete and demo-ready; other open owner inputs:
-`OPENAI_API_KEY` + retention (openissue #1/#2), curated profanity list (#3), resume URL host
-allowlist (#5, new).
+None — all planned phases (0–12) are complete. The pipeline now scores resumes end-to-end:
+fetch (SSRF-guarded, pinned Fillout S3 host) → pypdf extract → Task E signals → config-priced
+bonus, all bonus-only and per-applicant in memory. A live smoke test against five real export
+URLs verified fetch + extraction (and that an image upload degrades neutrally to `not_a_pdf`).
+Remaining items are owner inputs and deployment: `OPENAI_API_KEY` + retention (openissue
+#1/#2), curated profanity list (#3), and the unscheduled hosting deployment.
 
 ---
 
@@ -523,17 +520,34 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 - [x] Phase 10.5 — synthetic demo CSV (all ten outcome paths, narrow gitignore exception) +
       live-browser verification fixes (choice_N satisfaction keys, duplicate alert)
       (commits: d2cb42c, b9a4809).
+- [x] Phase 12.1 — ResumeConfig expansion (download caps, SSRF host allowlist, signal
+      weights) + `llm.models.task_e` + `TaskEOutput` contract + `ResumeAssessment` audit
+      block (commit: b92b940).
+- [x] Phase 12.2 — `resume_fetch.py` download layer: `ResumeFetcher` (https-only exact-host
+      allowlist, no redirects, port-443-only, streaming size cap, retry-once on transient
+      failures, typed failure reasons, own semaphore); httpx promoted to a direct dep
+      (commit: 6b34f9d).
+- [x] Phase 12.3 — `resume_extract.py`: `extract_resume_text` via pypdf (magic-bytes check,
+      empty-password unlock, per-page text with early stop at the `max_text_chars` cap,
+      typed failures incl. scanned/no-text, never raises) (commit: 7bd957f).
+- [x] Phase 12.4 — Task E prompt (count/classify only, injection-resistant, ESL-safe) +
+      `resume_signal_bonus` pure pricing math (config weights, `bonus_max` cap, never
+      negative, non-resume/kill-switch → 0) (commit: 019a204).
+- [x] Phase 12.5 — `score_resume` Stage 6 aggregator (fetch → extract → Task E → price →
+      discard; every failure = 0 bonus + audit note, never a block) wired into
+      `grade_one`/`grade_batch` (batch-scoped fetcher, injectable for tests); `bonus_max`
+      live at 10; demo-handler `task_e`; audit-browser Resume panel; pipeline invariant +
+      fail-fast-fetch tests (commit: 2ff0eb1).
+- [x] Phase 12.6 — volume test (download-concurrency bound + no-content-retention asserts
+      over 60 rows), live smoke test over 5 real export URLs (transient script, nothing
+      committed), README/openissue/PLAN updates.
 
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Phase 12.1 — `ResumeConfig` expansion + `llm.models.task_e` + `TaskEOutput` contract +
-      `ResumeAssessment` audit block
-- [ ] Phase 12.2–12.6 — download layer, PDF extraction, Task E + bonus math, Stage 6 wiring,
-      scale verification
 - [ ] Owner inputs (openissue.md): `OPENAI_API_KEY` + zero-retention confirmation; curated
-      profanity list; resume URL host allowlist (#5 — needed by 12.1/12.2).
+      profanity list.
 - [ ] (Unscheduled) deployment to a host.
 
 ## How to Verify Completed Work
@@ -578,6 +592,12 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   5. "Cohort what-if" → set Honors=0 → rank 1 moves to her second choice; re-upload a saved
      `decisions.jsonl`; "Download assignments CSV"
   6. "Discard job & results" → subsequent fetches 404 gracefully
+- Phase 12:  `uv run pytest tests/test_resume_fetch.py tests/test_resume_extract.py
+  tests/scoring/test_resume.py tests/test_pipeline.py` (SSRF validation + MockTransport
+  download edges; pypdf extraction edges; Task E prompt + pricing math; the Stage 6
+  aggregator paths; pipeline wiring incl. rejected-row-zero-fetches, §12 #1 with resume
+  live, kill switch, and the 60-row volume/concurrency/no-retention check — all zero spend,
+  zero network)
 
 ---
 
@@ -1027,6 +1047,28 @@ Structural facts only — never real applicant content.
   direct dependency for the download layer. Owner confirmed Fillout resume URLs are publicly
   fetchable (no auth); the exact host allowlist is an owner input (openissue #5).
 
+- **Phase 12 (implementation):** the host allowlist (openissue #5) is **resolved** — the owner
+  supplied sample resume URLs from the real export; all point at one S3 bucket host, pinned in
+  `config.yaml` (`prod-fillout-oregon-s3.s3.us-west-2.amazonaws.com`; hostname only, no PII).
+  A live smoke test over five real URLs (run transiently, nothing committed) verified the
+  chain: four PDFs fetched (85–192 KB) and extracted (1.8k–4.9k chars); one **image upload**
+  (`.png` in the resume slot) fetched but failed extraction with the typed `not_a_pdf` →
+  0 bonus + audit note — image resumes exist in the real data and degrade neutrally by design
+  (no OCR). Implementation decisions: (a) **SSRF policy is exact-host, https-only,
+  port-443-only, redirects disabled** (a redirect could escape the allowlist; S3 public URLs
+  don't redirect); userinfo tricks are neutralized via `urlsplit().hostname`. (b) The fetcher
+  is **batch-scoped**: `grade_batch` builds one `ResumeFetcher` per run when
+  `resume.bonus_max > 0` and closes it with the run; tests inject a `MockTransport` fetcher
+  through the new optional `fetcher` params on `grade_one`/`grade_batch` (default `None` =
+  stage skipped, signature-compatible). (c) `Stage6Result.task_e_called` feeds `llm_calls`
+  explicitly (a parse failure still records the spend). (d) `resume.bonus_max` flipped 0 → 10
+  in code defaults + config.yaml together (the yaml-matches-defaults drift test pins them);
+  0 remains the kill switch (zero fetches, zero tokens — asserted by test). (e) The §12 #1
+  invariant and fail-fast extend to downloads: a Stage-1 reject with a resume URL performs
+  **zero fetches**; a missing/failed resume never lowers a score or changes an outcome.
+  (f) Memory rule asserted at volume: 60-row batch, download concurrency peaks at the
+  semaphore bound, and no resume text/bytes appear in any record or artifact.
+
 ## Owner-Supplied Dependencies (full detail in `openissue.md`)
 - [x] `resources/schools.json` — Top-20 US + Top-50 International (source: U.S. News), frozen for Summer 2026.
 - [~] Profanity list — using `better-profanity` DEFAULT list for now (owner approved).
@@ -1035,6 +1077,5 @@ Structural facts only — never real applicant content.
 - [ ] `OPENAI_API_KEY` in `.env` (openissue.md #1).
 - [ ] OpenAI account set to zero/minimal data retention (openissue.md #2).
 - [x] GPA threshold — settled at 3.0 (PRD §1). No decision needed.
-- [~] Resume parsing — **now in scope (Phase 12)**; owner confirmed Fillout resume URLs are
-      publicly fetchable. Still needed: the resume URL host allowlist (openissue #5). Stage 6
-      stays the inert stub until 12.5 lands.
+- [x] Resume parsing — **built (Phase 12)**. Host allowlist resolved and pinned in
+      `config.yaml` (openissue #5); Stage 6 live at `bonus_max: 10`, kill switch = 0.
