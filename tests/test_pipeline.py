@@ -8,6 +8,7 @@ land in later commits with a scripted :class:`FakeLLMClient`.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 
@@ -691,6 +692,47 @@ async def test_inv1_extended_missing_resume_never_reduces_score() -> None:
     assert by_id["s-with"].final_score > without.final_score
     assert without.scores.resume_bonus == 0.0
     assert not without.resume.attempted  # blank cell: no fetch even attempted
+
+
+async def test_resume_at_volume_holds_memory_and_concurrency_discipline() -> None:
+    # 12.6 scale check: a batch with a resume on every row must (a) bound in-flight downloads
+    # by download_concurrency, (b) fetch each resume exactly once, and (c) retain no resume
+    # bytes/text on any record or artifact — only counted signals survive.
+    marker = "UNIQUEPDFCONTENTMARKER"
+    rows = [_csv_row(f"s-{i:03d}", resume=f"https://{_RESUME_HOST}/r/{i}.pdf") for i in range(60)]
+    cfg = AppConfig.model_validate(
+        {"resume": {"bonus_max": 10.0, "download_concurrency": 3,
+                    "allowed_url_hosts": [_RESUME_HOST]}}
+    )
+
+    in_flight = 0
+    peak = 0
+    calls = 0
+    pdf = _tiny_pdf(f"{marker} Python projects and research experience")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak, calls
+        calls += 1
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.005)  # hold the slot so overlap is observable
+        in_flight -= 1
+        return httpx.Response(200, content=pdf)
+
+    fetcher = ResumeFetcher(cfg, transport=httpx.MockTransport(handler))
+    client = FakeLLMClient(cfg, handler=_resume_handler)
+    async with fetcher:
+        result = await grade_batch(_csv_bytes(rows), client, cfg, fetcher=fetcher)
+
+    assert calls == 60  # one fetch per applicant, none for free
+    assert peak <= 3  # the download semaphore binds, independent of LLM concurrency
+    assert all(r.outcome == "RANKED" for r in result.records)
+    assert all(r.scores.resume_bonus == pytest.approx(6.0) for r in result.records)
+    # Memory rule: the extracted text (and the PDF bytes) never reach a record or artifact.
+    assert marker not in result.decisions_jsonl
+    for record in result.records:
+        assert marker not in record.model_dump_json()
+        assert record.resume.extracted_chars > 0  # extraction happened, content was discarded
 
 
 async def test_kill_switch_restores_stub_behavior_in_batch() -> None:

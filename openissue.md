@@ -56,17 +56,17 @@ committed to the repo. See `CLAUDE.md` → Privacy & Security.
 
 ## Blocking for Phase 12 (resume parsing)
 
-### 5. Resume URL host allowlist  ·  STATUS: NEEDED
-- **What:** the exact domain(s) the Fillout export's `Resume (optional)` URLs point at
-  (e.g. a specific `*.s3.amazonaws.com` bucket host and/or a `fillout.com` subdomain), to pin
-  in `resume.allowed_url_hosts` in `config.yaml`.
-- **Why:** the server downloads URLs taken from an uploaded CSV. An https-only **host
-  allowlist** is the SSRF guard — without it a crafted CSV could make the host probe its own
-  internal network. The allowlist must be exact, so it has to come from the real export.
-- **Already confirmed by owner:** the resume URLs are **publicly fetchable** (no auth needed),
-  so a plain GET works once the hosts are pinned.
-- **How:** copy 2–3 resume URLs from the real CSV (the URL itself is fine to share; don't
-  share the PDF contents) and list the hostnames here or directly in `config.yaml`.
+### 5. Resume URL host allowlist  ·  STATUS: RESOLVED
+- **Resolved (Phase 12):** the owner supplied sample resume URLs from the real export; all
+  point at one S3 bucket host, now pinned in `config.yaml` →
+  `resume.allowed_url_hosts: [prod-fillout-oregon-s3.s3.us-west-2.amazonaws.com]`.
+  A live smoke test against five real URLs confirmed public fetchability and extraction.
+- **Note from the live sample:** some applicants upload **images** (e.g. a `.png`) in the
+  resume slot. These download fine but fail extraction with the typed `not_a_pdf` reason →
+  0 bonus + an audit note, never a block. OCR is deliberately out of scope.
+- **If Fillout ever changes buckets:** add the new hostname to `resume.allowed_url_hosts`
+  (exact host match, https only). The original rationale stands: the allowlist is the SSRF
+  guard for URLs arriving in an uploaded CSV.
 
 ---
 

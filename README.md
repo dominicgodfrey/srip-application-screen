@@ -27,3 +27,8 @@ Set `OPENAI_API_KEY` in `.env` (copy from `.env.example`) before running LLM sta
 ## Privacy
 This system processes minors' PII. Nothing is written to disk or a database; never commit
 `data/`, `.env`, results files, or any real applicant content. Test fixtures are synthetic.
+
+Resume PDFs (Stage 6) are downloaded only from the https hosts pinned in
+`resume.allowed_url_hosts` (`config.yaml`), processed in memory one applicant at a time
+(fetch → extract → discard), and never stored or logged. Setting `resume.bonus_max: 0`
+disables the stage entirely (zero fetches, zero LLM calls).

@@ -223,11 +223,11 @@ The LLM client is mocked with a fake in unit tests. A small live suite is gated 
 - Don't raise/lower the 3.0 GPA threshold for high-schoolers.
 - Don't flag merely-awkward or ESL grammar as gibberish — that's a soft penalty in Task D, not a gate.
 - Don't persist applicant data to disk or a database. Stateless only.
-- Don't build resume parsing outside the Phase 12 plan (PLAN.md Phase Map). Until 12.5 lands,
-  Stage 6 stays the inert `resume_bonus = 0` stub; `resume.bonus_max: 0` is the permanent kill
-  switch. Resume fetching must honor the https-only + `allowed_url_hosts` SSRF guard, the
-  per-applicant fetch→extract→discard memory rule, and the bonus-only invariants (failure → 0
-  bonus + audit note, never a block).
+- Don't weaken the Stage 6 resume guardrails (built in Phase 12): the https-only exact-host
+  `allowed_url_hosts` SSRF allowlist (no redirects), the per-applicant fetch→extract→discard
+  memory rule (resume bytes/text never reach a record, artifact, or log), and the bonus-only
+  invariants (any failure → 0 bonus + audit note, never a block). `resume.bonus_max: 0` is the
+  permanent kill switch (zero fetches, zero tokens).
 - Don't run LLM calls before the deterministic gates that precede them. Fail-fast ordering is load-bearing.
 - Don't commit `data/`, `.env`, results files, or any real applicant content.
 - Don't add a database, queue, or orchestration framework without recording the reason in PLAN.md.
