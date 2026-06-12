@@ -47,7 +47,7 @@ from .ingest import (
     ingest_csv,
 )
 from .llm.client import BaseLLMClient
-from .models import AuditRecord, HitGate, ProgramChoices
+from .models import AuditRecord, EssayTexts, HitGate, ProgramChoices
 from .outputs import (
     build_summary,
     decisions_jsonl,
@@ -162,6 +162,7 @@ async def grade_one(
     """
     record = build_base_record(deduped, resolution)
     row = deduped.row
+    record.essays = EssayTexts(e1=row.essay1, e2=row.essay2)
     try:
         # Stage 1 — essay deterministic gates (token-free; all checks computed for the audit).
         stage1 = run_essay_gates(row, cfg)
@@ -209,7 +210,12 @@ async def grade_one(
         record.llm_calls.extend(("task_d_e1", "task_d_e2"))
         record.gates.essay_relevance = stage4.essay_relevance
         # Reconcile the two gibberish findings: Stage 1's cheap heuristic + Task D's backstop.
-        record.gates.gibberish = HitGate(hit=stage1.gibberish.hit or stage4.gibberish.hit)
+        gib_terms = list(stage1.gibberish.terms)
+        if stage4.gibberish.hit:
+            gib_terms.append("task_d")
+        record.gates.gibberish = HitGate(
+            hit=stage1.gibberish.hit or stage4.gibberish.hit, terms=gib_terms
+        )
         if stage4.verdict == "reject":
             return _terminal(record, "REJECTED", _STAGE_4, stage4.primary_reason)
         if stage4.verdict == "needs_review":
@@ -289,6 +295,12 @@ class BatchResult:
     needs_review_csv: str
     summary: dict
     ingest_report: IngestReport
+    # The graded input rows + header resolution, retained (in memory only, same lifetime as the
+    # records) so a human can re-run scoring on a single applicant after the batch — the
+    # promote-to-RANKED path (:func:`promote_record`). Empty/None for results deserialized from
+    # an old artifact.
+    rows: tuple[DedupedRow, ...] = ()
+    resolution: HeaderResolution | None = None
 
 
 async def grade_batch(
@@ -347,6 +359,16 @@ async def grade_batch(
         if owns_fetcher and fetcher is not None:
             await fetcher.aclose()
     rank_records(records, cfg)
+    return _build_result(records, ingest.report, tuple(ingest.rows), ingest.resolution)
+
+
+def _build_result(
+    records: list[AuditRecord],
+    report: IngestReport,
+    rows: tuple[DedupedRow, ...],
+    resolution: HeaderResolution | None,
+) -> BatchResult:
+    """Assemble a :class:`BatchResult` (Stage 9 artifacts) from finalized, ranked records."""
     return BatchResult(
         records=records,
         decisions_jsonl=decisions_jsonl(records),
@@ -354,5 +376,163 @@ async def grade_batch(
         rejected_csv=rejected_csv(records),
         needs_review_csv=needs_review_csv(records),
         summary=build_summary(records),
-        ingest_report=ingest.report,
+        ingest_report=report,
+        rows=rows,
+        resolution=resolution,
+    )
+
+
+# ================================================================================================
+# Manual promote-to-RANKED (the §10.2 human-resolution path)
+# ================================================================================================
+# A NEEDS_REVIEW applicant is, per PRD §10.2, resolved by a human and then "scored and folded
+# into the ranking". rescore_one is that fold: it re-runs the *scoring* stages on the original
+# row with the gates recorded-but-bypassed, so the auditor sees exactly what the applicant would
+# score and where the problems are. The override is explicit and auditable (manual_override=True,
+# every bypassed gate named in reasons[]); it is never taken automatically by the pipeline.
+
+
+async def rescore_one(
+    deduped: DedupedRow,
+    resolution: HeaderResolution,
+    client: BaseLLMClient,
+    cfg: AppConfig,
+    fetcher: ResumeFetcher | None = None,
+) -> AuditRecord:
+    """Force one applicant through every scoring stage, bypassing (but recording) gate failures.
+
+    Unlike :func:`grade_one`, no gate is terminal: a Stage-1/3/4 failure is written into the
+    audit blocks and ``reasons[]`` (prefixed ``OVERRIDE:``) and scoring continues. Whatever
+    cannot be scored contributes 0 (e.g. an unresolvable GPA → 0 GPA points; a gibberish/
+    off-topic essay → that essay scores 0). The result is a ``RANKED`` record with
+    ``manual_override=True`` ready for :func:`~srip_filter.scoring.aggregate.rank_records`.
+    """
+    record = build_base_record(deduped, resolution)
+    row = deduped.row
+    record.manual_override = True
+    record.essays = EssayTexts(e1=row.essay1, e2=row.essay2)
+    try:
+        # Stage 1 — recorded, never terminal here.
+        stage1 = run_essay_gates(row, cfg)
+        record.gates.essay_length = stage1.length_gate
+        record.gates.profanity = stage1.profanity
+        record.gates.gibberish = stage1.gibberish
+        if stage1.rejected:
+            record.reasons.append(f"OVERRIDE: stage1 gate bypassed ({stage1.primary_reason})")
+
+        if not affirmation_ok(row, resolution):
+            record.reasons.append("OVERRIDE: truthfulness affirmation not checked")
+
+        # Stage 2-3 — GPA. Unscoreable or rejected-at-gate → 0 points, never a stop.
+        gpa = await assess_gpa(row, client, cfg)
+        record.gpa = gpa.assessment
+        record.gates.gpa_gate = gpa.gate
+        if gpa.assessment.source == "llm":
+            record.llm_calls.append("task_a")
+        if gpa.assessment.explanation_eval is not None:
+            record.llm_calls.append("task_b")
+        if gpa.verdict == "pass":
+            record.scores.gpa_points = gpa.gpa_points
+            record.reasons.append(f"PASS gpa_gate: {gpa.gate.reason}")
+        else:
+            record.scores.gpa_points = 0.0
+            record.reasons.append(f"OVERRIDE: gpa gate bypassed, 0 GPA points ({gpa.reason})")
+
+        # Stage 4 — essays. A gated (gibberish/off-topic) essay scores 0; a parse failure → 0.
+        stage4 = await grade_essays(
+            row,
+            stage1.length_penalty_e1,
+            stage1.length_penalty_e2,
+            resolution.role_to_header[ESSAY1],
+            resolution.role_to_header[ESSAY2],
+            client,
+            cfg,
+        )
+        record.llm_calls.extend(("task_d_e1", "task_d_e2"))
+        record.gates.essay_relevance = stage4.essay_relevance
+        gib_terms = list(stage1.gibberish.terms)
+        if stage4.gibberish.hit:
+            gib_terms.append("task_d")
+        record.gates.gibberish = HitGate(
+            hit=stage1.gibberish.hit or stage4.gibberish.hit, terms=gib_terms
+        )
+        record.scores.essay = stage4.subscores
+        if stage4.verdict == "pass":
+            record.reasons.append(f"essays on-topic; quality total {stage4.subscores.total}")
+        else:
+            record.reasons.append(
+                f"OVERRIDE: essay gate bypassed ({stage4.primary_reason}); "
+                f"gated essay scores 0"
+            )
+
+        # Stages 5/6/7 — bonuses, exactly as in grade_one (additive only).
+        coursework = await score_coursework(row, client, cfg)
+        record.scores.coursework_bonus = coursework.bonus
+        record.coursework_breakdown = coursework.courses
+        if row.coursework.strip():
+            record.llm_calls.append("task_c")
+        if coursework.error:
+            record.errors.append(coursework.error)
+
+        stage6 = await score_resume(row, fetcher, client, cfg)
+        record.scores.resume_bonus = stage6.bonus
+        record.resume = stage6.assessment
+        if stage6.task_e_called:
+            record.llm_calls.append("task_e")
+        if stage6.error:
+            record.errors.append(stage6.error)
+
+        school = score_school(row, cfg)
+        record.scores.school_bonus = school.bonus
+        record.school_match = school.match
+
+        record.outcome = "RANKED"
+        record.decided_at_stage = "manual_override"
+        record.primary_reason = "Manually promoted into the ranking by a human reviewer"
+        return record
+    except Exception as exc:  # same per-row isolation as grade_one
+        record.errors.append(f"{type(exc).__name__}: {exc}")
+        return _terminal(
+            record, "NEEDS_REVIEW", _STAGE_ERROR, "Unexpected error during manual rescore"
+        )
+
+
+async def promote_record(
+    result: BatchResult,
+    submission_id: str,
+    client: BaseLLMClient,
+    cfg: AppConfig,
+) -> tuple[BatchResult, AuditRecord]:
+    """Promote one REJECTED/NEEDS_REVIEW applicant into the ranking and rebuild the artifacts.
+
+    Finds the applicant's original row (retained on the :class:`BatchResult`), re-runs every
+    scoring stage via :func:`rescore_one`, swaps the new ``manual_override`` record in, re-ranks
+    the whole population, and rebuilds the five Stage-9 artifacts. Returns the new result and the
+    promoted record. Raises ``KeyError`` if the submission id (or its retained row) is unknown,
+    ``ValueError`` if the record is already RANKED.
+    """
+    record = next((r for r in result.records if r.submission_id == submission_id), None)
+    if record is None:
+        raise KeyError(submission_id)
+    if record.outcome == "RANKED":
+        raise ValueError("Applicant is already ranked.")
+    deduped = next(
+        (d for d in result.rows if d.row.submission_id == submission_id), None
+    )
+    if deduped is None or result.resolution is None:
+        raise KeyError(submission_id)
+
+    owns_fetcher = cfg.resume.bonus_max > 0
+    fetcher = ResumeFetcher(cfg) if owns_fetcher else None
+    try:
+        promoted = await rescore_one(deduped, result.resolution, client, cfg, fetcher)
+    finally:
+        if fetcher is not None:
+            await fetcher.aclose()
+
+    records = [promoted if r.submission_id == submission_id else r for r in result.records]
+    rank_records(records, cfg)
+    return (
+        _build_result(records, result.ingest_report, result.rows, result.resolution),
+        promoted,
     )

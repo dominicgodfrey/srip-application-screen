@@ -32,6 +32,7 @@ from srip_filter.cohort import assign_cohorts
 from srip_filter.config import AppConfig, get_config
 from srip_filter.llm.client import BaseLLMClient, FakeLLMClient, OpenAILLMClient
 from srip_filter.models import CohortCapacities, CohortResult
+from srip_filter.pipeline import promote_record
 
 from .cohorts import CohortFormat, cohort_response, parse_decisions_jsonl
 from .jobs import (
@@ -229,6 +230,57 @@ def create_app(
             )
         app.state.registry.evict(job_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post(
+        "/jobs/{job_id}/records/{submission_id}/promote",
+        response_model=None,
+        responses={
+            404: {"model": ErrorResponse, "description": "Unknown job or submission id"},
+            409: {"model": ErrorResponse, "description": "Results not ready / already ranked"},
+            503: {"model": ErrorResponse, "description": "LLM client not configured"},
+        },
+        tags=["jobs"],
+    )
+    async def promote_submission(job_id: str, submission_id: str) -> dict:
+        """Manually promote a REJECTED/NEEDS_REVIEW applicant into the ranking (PRD §10.2).
+
+        The human-resolution path: re-runs every scoring stage on the applicant's original row
+        with gate failures recorded-but-bypassed (``manual_override=true`` in the audit record),
+        folds them into the ranking, and rebuilds all artifacts. Spends LLM tokens for the
+        re-score. Returns the promoted record and the refreshed summary.
+        """
+        job = app.state.registry.get(job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No job with that id; it may have expired or been discarded.",
+            )
+        if job.state is not JobState.SUCCEEDED or job.result is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Results are not available; job state is '{job.state}'.",
+            )
+        client = app.state.llm_client
+        if client is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="LLM client is not configured.",
+            )
+        try:
+            new_result, promoted = await promote_record(
+                job.result, submission_id, client, cfg
+            )
+        except KeyError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No applicant with that submission id in this job.",
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+            ) from None
+        job.result = new_result
+        return {"record": promoted.model_dump(), "summary": new_result.summary}
 
     # -- Cohort assignment (Phase 11, PRD §11) ---------------------------------------------------
     # Capacities are per-request staff knobs (None/omitted = unlimited), so they ride as query

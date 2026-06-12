@@ -38,7 +38,14 @@ from srip_filter.models import (
     TaskDOutput,
     TaskEOutput,
 )
-from srip_filter.pipeline import affirmation_ok, build_base_record, grade_batch, grade_one
+from srip_filter.pipeline import (
+    affirmation_ok,
+    build_base_record,
+    grade_batch,
+    grade_one,
+    promote_record,
+    rescore_one,
+)
 from srip_filter.resume_fetch import ResumeFetcher
 
 APP = AppConfig()
@@ -749,3 +756,95 @@ async def test_kill_switch_restores_stub_behavior_in_batch() -> None:
     assert rec.outcome == "RANKED" and rec.scores.resume_bonus == 0.0
     assert handler.calls == 0
     assert all(task != "task_e" for task, _ in client.calls)
+
+
+# ------------------------------------------------------------------------------------------------
+# Manual promote-to-RANKED (rescore_one / promote_record)
+# ------------------------------------------------------------------------------------------------
+
+
+async def test_rescore_one_bypasses_stage1_gate_and_scores() -> None:
+    client = FakeLLMClient(APP, handler=_good_handler)
+    rec = await rescore_one(
+        _applicant(essay1="too short to count"), _resolution(*_SURVIVOR_ROLES), client, APP
+    )
+    assert rec.outcome == "RANKED"
+    assert rec.manual_override is True
+    assert rec.decided_at_stage == "manual_override"
+    # The bypassed gate stays visible in the audit blocks and is named in reasons[].
+    assert rec.gates.essay_length.hard_fail is True
+    assert any(reason.startswith("OVERRIDE:") for reason in rec.reasons)
+    # Scoring still ran: GPA points and essay subscores are present. The hard-short essay 1
+    # still carries the max soft length penalty (18 - 5), essay 2 is clean (18).
+    assert rec.scores.gpa_points == pytest.approx(20.0)
+    assert rec.scores.essay.total == pytest.approx(31.0)
+
+
+async def test_rescore_one_unresolvable_gpa_scores_zero_points() -> None:
+    def handler(task, user, schema):  # type: ignore[no-untyped-def]
+        if task == "task_a":
+            return TaskAOutput(
+                normalized_gpa=None,
+                original_scale="unknown",
+                conversion_method="unplaceable",
+                confidence="low",
+                requires_manual_review=True,
+                rationale="",
+            )
+        return _good_handler(task, user, schema)
+
+    client = FakeLLMClient(APP, handler=handler)
+    rec = await rescore_one(
+        _applicant(gpa="my school does not give GPAs"),
+        _resolution(*_SURVIVOR_ROLES),
+        client,
+        APP,
+    )
+    assert rec.outcome == "RANKED"
+    assert rec.scores.gpa_points == 0.0
+    assert any("gpa gate bypassed" in reason for reason in rec.reasons)
+    # Essays still scored: the applicant ranks on what is scoreable.
+    assert rec.scores.essay.total == pytest.approx(36.0)
+
+
+async def test_promote_record_folds_into_ranking_and_rebuilds_artifacts() -> None:
+    rows = [
+        _csv_row("s-good"),
+        _csv_row("s-short", essay1="too short"),  # REJECTED at Stage 1
+    ]
+    client = FakeLLMClient(APP, handler=_good_handler)
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    assert result.summary["counts"]["REJECTED"] == 1
+
+    new_result, promoted = await promote_record(result, "s-short", client, APP)
+    assert promoted.outcome == "RANKED"
+    assert promoted.manual_override is True
+    assert promoted.rank is not None and promoted.final_score is not None
+    # The whole population was re-ranked and the artifacts rebuilt.
+    assert new_result.summary["counts"] == {
+        "total": 2,
+        "RANKED": 2,
+        "REJECTED": 0,
+        "NEEDS_REVIEW": 0,
+    }
+    assert new_result.ranked_csv.count("\n") == 3  # header + two RANKED rows
+    assert '"manual_override":true' in new_result.decisions_jsonl
+    # The original result object is untouched (frozen rebuild, no aliasing surprises).
+    assert result.summary["counts"]["REJECTED"] == 1
+
+
+async def test_promote_record_unknown_or_already_ranked() -> None:
+    rows = [_csv_row("s-good")]
+    client = FakeLLMClient(APP, handler=_good_handler)
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    with pytest.raises(KeyError):
+        await promote_record(result, "nope", client, APP)
+    with pytest.raises(ValueError):
+        await promote_record(result, "s-good", client, APP)
+
+
+async def test_records_carry_essay_text_for_audit_ui() -> None:
+    client = FakeLLMClient(APP, handler=_good_handler)
+    rec = await grade_one(_applicant(), _resolution(*_SURVIVOR_ROLES), client, APP)
+    assert rec.essays.e1 == _GOOD_ESSAY
+    assert rec.essays.e2 == _GOOD_ESSAY_2
