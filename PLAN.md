@@ -4,16 +4,18 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 12 — Resume bonus (Stage 6, PRD §7.2) — COMPLETE (12.1–12.6 landed; stage live at
-`bonus_max: 10`; openissue #5 host allowlist resolved)
+Phase 13 — Audit/UX refinements from the owner's first real-data review — COMPLETE
+(13.1–13.4 landed; see Completed)
 
 ## Active Sub-Task
-None — all planned phases (0–12) are complete. The pipeline now scores resumes end-to-end:
-fetch (SSRF-guarded, pinned Fillout S3 host) → pypdf extract → Task E signals → config-priced
-bonus, all bonus-only and per-applicant in memory. A live smoke test against five real export
-URLs verified fetch + extraction (and that an image upload degrades neutrally to `not_a_pdf`).
-Remaining items are owner inputs and deployment: `OPENAI_API_KEY` + retention (openissue
-#1/#2), curated profanity list (#3), and the unscheduled hosting deployment.
+None — phases 0–13 are complete. Phase 13 (owner feedback, 2026-06-11) delivered: the
+profanity false-positive fix (curated ALLOW list; 0 flags on the reference CSV), auditable
+gate detail (offending tokens / gibberish signals recorded per essay), essays carried on the
+audit record with collapsible display + problem highlighting, a GPA column for every
+candidate, the manual promote-to-RANKED path (rescore + re-rank, audited override), LLM-call
+help bubbles, and a live ETA on the progress bar. Remaining: owner inputs (openissue #1/#2
+key+retention, #3 BLOCK slur list, #6 GPA-normalization NEEDS_REVIEW volume decision) and
+the unscheduled hosting deployment.
 
 ---
 
@@ -542,12 +544,29 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       over 60 rows), live smoke test over 5 real export URLs (transient script, nothing
       committed), README/openissue/PLAN updates.
 
+- [x] Phase 13.1 — profanity false-positive fix + auditable gate detail: curated ALLOW list
+      in `resources/profanity.txt` (observed clinical false positives — 7 good-faith rows on
+      the reference CSV, now 0 flags); `profanity_terms()`; `HitGate.terms` records offending
+      tokens / fired gibberish signals (`e1:`/`e2:` prefixed, `eN:task_d` for the Task D
+      backstop); `EssayTexts` + `manual_override` on `AuditRecord` (commit: 60ac523).
+- [x] Phase 13.2 — manual promote-to-RANKED (PRD §10.2 human-resolution path):
+      `rescore_one` (all scoring stages, gates recorded-but-bypassed, unscoreable → 0) +
+      `promote_record` (swap, re-rank, rebuild artifacts); `BatchResult` retains rows +
+      resolution in memory; `POST /jobs/{id}/records/{sid}/promote`; essays carried on every
+      record (commit: bba2a71).
+- [x] Phase 13.3 + 13.4 — audit/upload UI + openissue update: GPA column (raw shown when not
+      normalized), collapsible essays with auto-open + highlight on profanity/gibberish/
+      off-topic rejections, promote button, LLM-call help bubbles, progress-bar ETA;
+      openissue #3 status + new #6 (commit: 2928600; commit message says only "[plan]
+      openissue…" due to a quoting mishap but contains the whole UI change — verified live
+      in the browser via the demo server).
+
 ## In Progress
 - (none)
 
 ## Next Up
 - [ ] Owner inputs (openissue.md): `OPENAI_API_KEY` + zero-retention confirmation; curated
-      profanity list.
+      BLOCK slur list (#3); GPA-normalization NEEDS_REVIEW mitigation decision (#6).
 - [ ] (Unscheduled) deployment to a host.
 
 ## How to Verify Completed Work
@@ -598,6 +617,13 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   aggregator paths; pipeline wiring incl. rejected-row-zero-fetches, §12 #1 with resume
   live, kill switch, and the 60-row volume/concurrency/no-retention check — all zero spend,
   zero network)
+- Phase 13:  `uv run pytest tests/gates/test_essays.py tests/test_pipeline.py
+  tests/api/test_promote.py` (allowlist regressions vs the committed wordlist, profanity_terms,
+  Stage-1 terms recording; rescore gate-bypass + zero-GPA-points; promote re-rank/artifact
+  rebuild + KeyError/ValueError edges; promote endpoint 200/404/409). UI: run the demo server
+  (`SRIP_DEV_FAKE_LLM=1`), upload the demo CSV, open /audit — GPA column, click the gibberish
+  reject (essay 2 auto-opens flagged), promote it (becomes RANKED + manual override), hover a
+  "?" on the LLM-call chips.
 
 ---
 
@@ -625,6 +651,19 @@ Structural facts only — never real applicant content.
 - **Deployment:** thin FastAPI shell over a transport-agnostic core; long runs use a
   background job + progress polling (free-tier HTTP timeouts can't hold a multi-minute
   request). Target free/cheap hosting (Render / Railway / Fly.io). No DB, no auth initially.
+- **Essays on the audit record (Phase 13):** `AuditRecord.essays` carries both essay texts
+  verbatim so the audit UI can display them with the problem section highlighted. Consistent
+  with the privacy model — `decisions.jsonl` already carries names/emails, lives only in the
+  transient in-memory job, and is the user's own uploaded data returned to them.
+- **Manual promote (Phase 13):** a human can push a `REJECTED`/`NEEDS_REVIEW` applicant into
+  the ranking; the system re-runs every scoring stage (gates recorded-but-bypassed, prefixed
+  `OVERRIDE:` in reasons, `manual_override=true`) and re-ranks. This is the PRD §10.2
+  "human resolves the blocker" path made concrete; it is never taken automatically, and a
+  promoted record keeps every original gate verdict visible. `BatchResult` now retains the
+  ingested rows + header resolution (memory-only, same lifetime as the job) to enable it.
+- **GPA-normalization volume (openissue #6):** measured deterministic split on the reference
+  CSV = 243 resolved / 180 → Task A / 43 blank → NEEDS_REVIEW. Mitigation decision is the
+  owner's; promote-from-audit is the interim workflow.
 - **Scale target:** up to ~2000 rows in memory; if it ever grows beyond that, revisit a real
   job queue (arq/RQ) — not before.
 - **Git:** remote is https://github.com/dominicgodfrey/srip-application-screen.git. Convention
