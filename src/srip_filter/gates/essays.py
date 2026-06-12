@@ -172,6 +172,24 @@ def profanity_gate(text: str, matcher: Profanity | None = None) -> bool:
     return (matcher or _default_matcher()).contains_profanity(text)
 
 
+def profanity_terms(text: str, matcher: Profanity | None = None) -> tuple[str, ...]:
+    """Return the distinct tokens in ``text`` that individually trip the profanity matcher.
+
+    Used for the audit trail (and the audit-UI highlight) when :func:`profanity_gate` hits —
+    a human auditor must be able to see *which* word caused a rejection. Tokenized with the
+    same PRD §2 word rule as everything else; lowercased, order of first appearance.
+    """
+    if not text.strip():
+        return ()
+    m = matcher or _default_matcher()
+    seen: dict[str, None] = {}
+    for token in _WORD_RE.findall(text):
+        lowered = token.lower()
+        if lowered not in seen and m.contains_profanity(token):
+            seen[lowered] = None
+    return tuple(seen)
+
+
 # ================================================================================================
 # 2.3 — Gibberish heuristics (PRD §4.2, no dictionary)
 # ================================================================================================
@@ -331,10 +349,30 @@ def run_essay_gates(
     e1 = length_gate(row.essay1, cfg.essay_length)
     e2 = length_gate(row.essay2, cfg.essay_length)
     profanity_hit = profanity_gate(row.essay1, matcher) or profanity_gate(row.essay2, matcher)
-    gibberish_hit = (
-        gibberish_gate(row.essay1, cfg.gibberish).hit
-        or gibberish_gate(row.essay2, cfg.gibberish).hit
-    )
+    # Only resolve *which* tokens tripped when there was a hit (the common clean path stays
+    # one matcher call per essay).
+    profane_terms: tuple[str, ...] = ()
+    if profanity_hit:
+        profane_terms = tuple(
+            dict.fromkeys(
+                profanity_terms(row.essay1, matcher) + profanity_terms(row.essay2, matcher)
+            )
+        )
+    gib1 = gibberish_gate(row.essay1, cfg.gibberish)
+    gib2 = gibberish_gate(row.essay2, cfg.gibberish)
+    gibberish_hit = gib1.hit or gib2.hit
+    gib_terms = [
+        f"e{n}:{signal}"
+        for n, res in ((1, gib1), (2, gib2))
+        if res.hit
+        for signal, fired in (
+            ("consonant_run", res.consonant_run),
+            ("low_entropy", res.low_entropy),
+            ("repeat_run", res.repeat_run),
+            ("low_unique_ratio", res.low_unique_ratio),
+        )
+        if fired
+    ]
 
     length_block = EssayLengthGate(
         e1_wc=e1.wc,
@@ -351,8 +389,8 @@ def run_essay_gates(
         rejected=rejected,
         primary_reason=reason,
         length_gate=length_block,
-        profanity=HitGate(hit=profanity_hit),
-        gibberish=HitGate(hit=gibberish_hit),
+        profanity=HitGate(hit=profanity_hit, terms=list(profane_terms)),
+        gibberish=HitGate(hit=gibberish_hit, terms=gib_terms),
         length_penalty_e1=e1.length_penalty,
         length_penalty_e2=e2.length_penalty,
     )

@@ -172,9 +172,15 @@ class EssayLengthGate(_Model):
 
 
 class HitGate(_Model):
-    """A simple boolean gate result (profanity, gibberish)."""
+    """A boolean gate result (profanity, gibberish) plus what tripped it.
+
+    ``terms`` makes a hit auditable: for profanity it lists the offending tokens; for
+    gibberish it names the deterministic signals that fired (prefixed ``e1:``/``e2:``) or
+    ``task_d`` when the LLM backstop flagged it. Empty when ``hit`` is False.
+    """
 
     hit: bool = False
+    terms: list[str] = Field(default_factory=list)
 
 
 class GpaGate(_Model):
@@ -246,6 +252,19 @@ class ResumeAssessment(_Model):
     failure: str = ""  # "" = no failure; otherwise a typed reason for the audit log
 
 
+class EssayTexts(_Model):
+    """The applicant's two essays, verbatim, carried on the audit record for the audit UI.
+
+    Returned to the user inside ``decisions.jsonl`` (their own uploaded data) and held only in
+    the transient in-memory job — never persisted server-side. Needed so a human auditor can
+    read the essays (and see the highlighted profanity/gibberish section) without re-opening
+    the source CSV.
+    """
+
+    e1: str = ""
+    e2: str = ""
+
+
 class AuditRecord(_Model):
     """One decision record per applicant (PRD §9)."""
 
@@ -264,6 +283,12 @@ class AuditRecord(_Model):
     gates: Gates = Field(default_factory=Gates)
     gpa: GpaAssessment = Field(default_factory=GpaAssessment)
     scores: Scores = Field(default_factory=Scores)
+    essays: EssayTexts = Field(default_factory=EssayTexts)
+
+    # True when a human pushed a REJECTED/NEEDS_REVIEW applicant into the ranking via the
+    # audit UI (the §10.2 human-resolution path). The original gate verdicts stay visible in
+    # `gates`/`reasons`; this flag keeps the override honest in the audit trail.
+    manual_override: bool = False
 
     coursework_breakdown: list[CourseItem] = Field(default_factory=list)
     school_match: SchoolMatch = Field(default_factory=SchoolMatch)

@@ -1,19 +1,12 @@
 # SRIP Track 2 — Profanity / slur gate wordlist  (PRD §4.2, Phase 2.2)
 #
-# ───────────────────────── PLACEHOLDER — NOT YET CURATED ─────────────────────────
-# This file is an inert scaffold. The Stage 1 profanity gate currently runs on the
-# `better-profanity` DEFAULT built-in list (owner approved "use the current list for
-# now"). Nothing below is loaded yet. See openissue.md #3.
-#
-# When the owner supplies the curated content, Phase 2.2 will load this file and:
-#   - add every BLOCK term to the profanity matcher (whole-token, case-insensitive,
-#     light leetspeak normalization), and
-#   - subtract every ALLOW term so clinical / anatomical vocabulary never trips the
-#     gate (a real extenuating-circumstances explanation may legitimately use it).
+# LOADED LIVE by the Stage 1 profanity gate (src/srip_filter/gates/essays.py):
+#   matcher = better-profanity DEFAULT list  +  BLOCK terms below  −  ALLOW terms below.
 #
 # ───────────────────────────────── FORMAT ───────────────────────────────────────
 #   - One term per line. Blank lines and lines starting with `#` are ignored.
-#   - Lines beginning with `ALLOW:` are allowlist (medical/anatomical) exemptions.
+#   - Lines beginning with `ALLOW:` are allowlist exemptions — removed from the
+#     matcher even if the default list contains them.
 #   - Every other non-comment line is a BLOCK term (slur / profane exclamation).
 #   - Terms are matched as whole tokens, case-insensitive. Do not add inflections by
 #     hand unless a specific form must be caught; the matcher normalizes light
@@ -21,13 +14,33 @@
 #
 # ============================ BLOCK  (slurs / profanity) =========================
 # TODO(owner): primary concern is slurs. Add curated terms below, one per line.
-# (Intentionally empty in the placeholder — see openissue.md #3.)
+# (Still awaiting the owner's curated list — see openissue.md #3. The default
+# better-profanity list covers common profanity/slurs in the meantime.)
 
 
-# ====================== ALLOW  (medical / anatomical, never block) ===============
-# TODO(owner): clinical/anatomical terms that must NOT be flagged even if a default
-# list would catch them. Prefix each with `ALLOW:`. Examples of the intended kind:
-# ALLOW: breast
-# ALLOW: rectal
-# ALLOW: anus
-# (Intentionally commented-out in the placeholder — see openissue.md #3.)
+# ====================== ALLOW  (medical / clinical / innocuous, never block) =====
+# Every term below appeared in a *good-faith* applicant essay in the reference
+# dataset and was false-positively flagged by the better-profanity default list
+# (e.g. "stroke awareness campaigns", "organ donation", "facial recognition",
+# "oral presentation", "sex-based differences in medicine"). Clinical/technical
+# vocabulary must never trip the gate (PRD §4.2 medical/anatomical exception).
+ALLOW: stroke
+ALLOW: strokes
+ALLOW: organ
+ALLOW: organs
+ALLOW: oral
+ALLOW: orally
+ALLOW: facial
+ALLOW: thrust
+ALLOW: thrusts
+ALLOW: sex
+ALLOW: sexes
+ALLOW: sex-based
+ALLOW: sex-specific
+ALLOW: breast
+ALLOW: breasts
+ALLOW: prostate
+ALLOW: rectal
+ALLOW: anus
+ALLOW: vaginal
+ALLOW: penis

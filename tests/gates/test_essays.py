@@ -18,6 +18,7 @@ from srip_filter.gates.essays import (
     length_gate,
     load_profanity_wordlist,
     profanity_gate,
+    profanity_terms,
     run_essay_gates,
     word_count,
 )
@@ -369,3 +370,53 @@ def test_empty_essays_reject_via_length_not_silent():
     result = run_essay_gates(row, APP_CFG)
     assert result.rejected is True
     assert result.primary_reason != ""  # never a silent rejection
+
+
+# ------------------------------------------------------------ curated allowlist (real resources/)
+
+
+def test_default_matcher_allows_clinical_terms_from_resources_file():
+    # Regression for real false positives observed in the reference dataset: better-profanity's
+    # default list flags these innocuous/clinical words; resources/profanity.txt allowlists them.
+    matcher = build_profanity_matcher()  # the real committed wordlist
+    for phrase in (
+        "apps that support stroke awareness campaigns",
+        "I volunteered for an organ donation drive",
+        "my project uses facial recognition",
+        "I gave an oral presentation about algorithms",
+        "the thrust of my argument is simple",
+        "sex-based differences in clinical medicine",
+    ):
+        assert profanity_gate(phrase, matcher) is False, phrase
+
+
+def test_default_matcher_still_flags_real_profanity():
+    matcher = build_profanity_matcher()
+    assert profanity_gate("this program is fucking great", matcher) is True
+
+
+# ------------------------------------------------------------ profanity_terms (audit highlight)
+
+
+def test_profanity_terms_names_the_offending_tokens(tmp_path):
+    path = _write_wordlist(tmp_path, ["frobslur", "blortcuss"])
+    matcher = build_profanity_matcher(path)
+    terms = profanity_terms("you frobslur and Blortcuss and frobslur again", matcher)
+    assert terms == ("frobslur", "blortcuss")  # deduped, lowercased, first-appearance order
+
+
+def test_profanity_terms_empty_on_clean_text(tmp_path):
+    matcher = build_profanity_matcher(_write_wordlist(tmp_path, ["frobslur"]))
+    assert profanity_terms("a perfectly clean sentence", matcher) == ()
+
+
+def test_stage1_records_profanity_terms_and_gibberish_signals():
+    matcher = build_profanity_matcher(Path("no_such_file.txt"))
+    matcher.add_censor_words(["frobslur"])
+    row = _app(_varied_essay(200) + " frobslur", " ".join(["asdf"] * 70))
+    result = run_essay_gates(row, APP_CFG, matcher=matcher)
+    assert result.rejected is True
+    assert result.profanity.terms == ["frobslur"]
+    assert result.gibberish.hit is True
+    assert all(t.startswith("e2:") for t in result.gibberish.terms)
+    assert result.gibberish.terms  # the fired signals are named for the audit trail
