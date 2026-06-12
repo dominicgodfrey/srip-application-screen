@@ -15,11 +15,10 @@ committed to the repo. See `CLAUDE.md` → Privacy & Security.
   needs it. Without it, only the deterministic gates run.
 - **Never** hard-code it, commit it, or write it into any output/log.
 
-### 2. OpenAI data-retention setting  ·  STATUS: NOT CONFIRMED
+### 2. OpenAI data-retention setting  ·  STATUS: RESOLVED (owner confirmed, 2026-06-12)
 - **What:** set the OpenAI account/project to **zero / minimal data retention**.
-- **Why:** essays and GPAs are minors' PII. Default API retention is ~30 days. (API inputs are
-  not used for training by default, but retention should still be turned down.)
-- **Action:** confirm in the OpenAI dashboard, then mark this done.
+- **Resolved:** the owner confirmed the account is already configured for minimal retention.
+  No further action; re-verify only if the OpenAI account/project changes.
 
 ---
 
@@ -74,7 +73,11 @@ committed to the repo. See `CLAUDE.md` → Privacy & Security.
 
 ## Open — needs an owner decision
 
-### 6. GPA normalization routes too many applicants to NEEDS_REVIEW  ·  STATUS: OPEN
+### 6. GPA normalization routes too many applicants to NEEDS_REVIEW  ·  STATUS: SETTLED (owner decision, 2026-06-12)
+- **Decision:** current behavior is acceptable. The goal was to reduce reviewer workload, and
+  reading through a small number of NEEDS_REVIEW applications is fine. No mitigation will be
+  built; promote-from-audit (and now demote) remains the human-resolution workflow.
+- Original analysis kept below for reference.
 - **Observation (owner, 2026-06-11):** "GPA scale normalization is removing too many
   candidates." (They are not removed — `NEEDS_REVIEW` is never a rejection — but they drop
   out of the ranked list until a human resolves them, which reads as removal.)

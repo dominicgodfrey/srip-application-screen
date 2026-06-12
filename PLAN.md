@@ -4,18 +4,17 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 15 — owner feedback round 3 (cohort tooling) — COMPLETE (see Completed)
+Phase 16 — owner feedback round 4 (demote + parsing polish) — COMPLETE (see Completed)
 
 ## Active Sub-Task
-None — phases 0–14 are complete. Phase 14 (owner feedback, 2026-06-12) delivered: blank-GPA
-non-answer rejection, the 2.0 GPA hard floor, steeper Task B severity scaling, the
-applicant's rescue explanation + resume link on the audit detail, exclusion-only coursework
-grading (flat bonus, < B excludes, null = unstated), Task C separation guidance + demo-parser
-fix, wave-batched grading for live progress, the "Cohort Allocation" rename, a named CSV
-source + labeled alternate-upload on the cohort page, and a jargon sweep (plain-language
-stage labels everywhere user-visible). Remaining: owner inputs (openissue #1/#2
-key+retention, #3 BLOCK slur list, #6 GPA-normalization NEEDS_REVIEW volume decision) and
-the unscheduled hosting deployment.
+None — phases 0–16 are complete. Phase 16 (owner feedback, 2026-06-12) delivered:
+fraction/percent coursework-grade splitting ("Biology 9/10 Civics 8/10" → separate courses)
+in both the Task C prompt and the demo parser, the last "Cohort what-if" label (upload page)
+renamed "Cohort Allocation", and the manual **demote** override (RANKED → REJECTED,
+deterministic, no LLM spend, reversible via promote). Owner resolved openissue #2 (retention
+confirmed) and settled #6 (GPA-normalization NEEDS_REVIEW volume accepted as-is). Remaining:
+owner inputs (openissue #1 API key, #3 BLOCK slur list) and the unscheduled hosting
+deployment.
 
 ---
 
@@ -594,12 +593,23 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       carried ApplicantRow → AuditRecord → CohortAssignment; demo CSV gained a synthetic
       phone column. (commits: 2438bff core/API, cb8c3bc UI)
 
+- [x] Phase 16 — owner feedback round 4 (2026-06-12): (1) coursework splitting extended to
+      fraction/percent grades with no dash ("Biology 9/10 Visual Communication 6/10 …" is
+      N courses, one per grade token) — Task C SYSTEM prompt guidance + the demo parser
+      (`_GRADE_RE` token scan replacing the dash-pair regex; fraction/percent → grade_pct);
+      (2) upload-page "Cohort what-if" button → "Cohort Allocation" (last remaining
+      user-visible instance); (3) manual **demote** (`demote_record` in pipeline.py +
+      `POST /jobs/{id}/records/{sid}/demote` + audit-UI "Remove from ranking…" button):
+      RANKED → REJECTED as a recorded manual override — deterministic, zero LLM spend, all
+      gate verdicts/subscores retained, population re-ranked, artifacts rebuilt, reversible
+      via promote. Owner resolutions recorded in openissue.md: #2 retention RESOLVED,
+      #6 GPA-normalization volume SETTLED (current behavior accepted).
+
 ## In Progress
 - (none)
 
 ## Next Up
-- [ ] Owner inputs (openissue.md): `OPENAI_API_KEY` + zero-retention confirmation; curated
-      BLOCK slur list (#3); GPA-normalization NEEDS_REVIEW mitigation decision (#6).
+- [ ] Owner inputs (openissue.md): `OPENAI_API_KEY` (#1); curated BLOCK slur list (#3).
 - [ ] (Unscheduled) deployment to a host.
 
 ## How to Verify Completed Work
@@ -666,6 +676,12 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   Ivan Sokolov (blank GPA) now REJECTED, Dev Shah's detail shows "Applicant's explanation",
   coursework grades show "—" when unstated, nav reads "Cohort Allocation", cohort Source
   names the CSV.
+- Phase 16:  `uv run pytest tests/test_pipeline.py tests/api/test_promote.py` (demote core:
+  no-LLM-spend, re-rank, KeyError/ValueError edges, demote→promote reversibility; endpoint
+  200/404/409). UI: demo server → audit → open a RANKED record → "Remove from ranking…" →
+  record becomes REJECTED (override badge), promote button reappears. Coursework: a cell like
+  "Biology 9/10 Civics 8/10" decomposes into separate courses in the detail panel; upload-page
+  next-steps button reads "Cohort Allocation".
 - Phase 15:  `uv run pytest tests/test_ingest.py tests/test_cohort.py tests/api/test_cohorts.py`
   (phone role resolution/carry, cohort-grouped CSV order, roster content + empty tier,
   roster endpoint download + unknown-tier 422). UI: demo server → Cohort Allocation page —
