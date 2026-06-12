@@ -50,6 +50,7 @@
       const res = await S.api("/jobs", { method: "POST", body: fd });
       const body = await res.json();
       S.setJobId(body.job_id);
+      etaBase = null; // fresh run, fresh rate measurement
       els.uploadNote.textContent = "";
       hide(els.summarySection);
       show(els.progressSection);
@@ -63,12 +64,34 @@
   });
 
   // ----- Poll -----------------------------------------------------------------
+  // ETA: measured from the first progress sample of this run (not upload time, so ingest /
+  // queue delay doesn't skew the rate), shown once a few rows have finished.
+  let etaBase = null; // { t: ms timestamp, done: rows finished at that moment }
+
+  function etaText(done, total) {
+    if (!done || done >= total) return "";
+    if (!etaBase || done < etaBase.done) etaBase = { t: Date.now(), done: done };
+    const advanced = done - etaBase.done;
+    const elapsedS = (Date.now() - etaBase.t) / 1000;
+    if (advanced < 3 || elapsedS < 2) return ""; // not enough signal for a stable estimate yet
+    const remainingS = Math.round((total - done) * (elapsedS / advanced));
+    return " — about " + fmtDuration(remainingS) + " remaining";
+  }
+
+  function fmtDuration(s) {
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + "m " + (s % 60) + "s";
+    return Math.floor(m / 60) + "h " + (m % 60) + "m";
+  }
+
   function setProgress(done, total, label) {
     if (total) {
       const pct = Math.round((done / total) * 100);
       els.progressFill.classList.remove("indeterminate");
       els.progressFill.style.width = pct + "%";
-      els.progressLabel.textContent = label || (done + " of " + total + " applicants graded");
+      els.progressLabel.textContent =
+        (label || (done + " of " + total + " applicants graded")) + etaText(done, total);
     } else {
       els.progressFill.classList.add("indeterminate");
       els.progressFill.style.width = "";

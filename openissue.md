@@ -25,13 +25,15 @@ committed to the repo. See `CLAUDE.md` → Privacy & Security.
 
 ## Blocking — specific stage, has a working stopgap
 
-### 3. Curated profanity / slur list  ·  STATUS: PLACEHOLDER FILE AWAITING CONTENT
-- **Current:** using `better-profanity`'s **default built-in list** (owner approved "use the
-  current list for now"). The Stage 1 profanity gate works today with it.
-- **Scaffold in place:** `resources/profanity.txt` now exists as an inert, documented
-  placeholder (committed). It is **not loaded yet** and contains no curated terms — it defines
-  the format (`BLOCK` terms one per line; `ALLOW:`-prefixed medical/anatomical exemptions) and
-  is ready to be filled.
+### 3. Curated profanity / slur list  ·  STATUS: ALLOWLIST CURATED; BLOCK LIST STILL AWAITED
+- **Current:** `better-profanity`'s default built-in list **plus a curated ALLOW list** in
+  `resources/profanity.txt` (loaded live). The allowlist was populated 2026-06-11 from the
+  false positives the default list produced on the reference dataset — 7 good-faith
+  applicants were being rejected over clinical/innocuous words (`stroke`, `organ`, `oral`,
+  `facial`, `thrust`, `sex-based`, …). A scan after the fix shows 0 profanity flags on the
+  reference CSV.
+- **Still needed from owner:** the **BLOCK side** — curated slurs and profane exclamations
+  the default list may miss. The file format is documented in `resources/profanity.txt`.
 - **Needed from owner:** populate `resources/profanity.txt` with —
   - **slurs to block** (the primary concern),
   - **profane exclamations**,
@@ -67,6 +69,34 @@ committed to the repo. See `CLAUDE.md` → Privacy & Security.
 - **If Fillout ever changes buckets:** add the new hostname to `resume.allowed_url_hosts`
   (exact host match, https only). The original rationale stands: the allowlist is the SSRF
   guard for URLs arriving in an uploaded CSV.
+
+---
+
+## Open — needs an owner decision
+
+### 6. GPA normalization routes too many applicants to NEEDS_REVIEW  ·  STATUS: OPEN
+- **Observation (owner, 2026-06-11):** "GPA scale normalization is removing too many
+  candidates." (They are not removed — `NEEDS_REVIEW` is never a rejection — but they drop
+  out of the ranked list until a human resolves them, which reads as removal.)
+- **Measured on the reference CSV (466 rows, deterministic pass only):**
+  243 resolved deterministically · 180 routed to LLM Task A (mostly weighted `>4.0` values
+  like `4.27`, `4.42`, `weighted: 4.4`; Task A resolves many but returns
+  `requires_manual_review` for the genuinely unplaceable) · 43 blank → straight to
+  `NEEDS_REVIEW` (no token spent).
+- **Why it is conservative by design:** PRD §6.1 — "Do not reject for a missing/unscalable
+  scale" and never guess a GPA that gates someone. The blank-GPA cohort (43 = 9.2%) is the
+  floor; no normalization change can fix a blank cell.
+- **Interim path (shipped):** the audit browser now shows the raw GPA for every candidate
+  and a human can **promote** any `NEEDS_REVIEW`/`REJECTED` applicant — the system re-runs
+  all scoring on them (unscoreable GPA contributes 0 points) and folds them into the ranking
+  as an audited manual override.
+- **Candidate mitigations (owner to pick):**
+  1. Extend the deterministic parser for the common weighted patterns (`4.0 < x ≤ 5.0`
+     unweighted-cap heuristic) instead of routing them to Task A.
+  2. Loosen Task A acceptance (treat `confidence: med` + a stated scale as placeable).
+  3. Decide a policy for blank GPAs (currently NEEDS_REVIEW; alternatives: score GPA as 0
+     points and rank on essays alone, or keep manual review).
+- **Action:** owner picks a mitigation; until then promote-from-audit is the workflow.
 
 ---
 

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import IO
 
 from .config import AppConfig
-from .gates.essays import run_essay_gates
+from .gates.essays import Stage1Result, run_essay_gates
 from .gates.gpa import assess_gpa
 from .ingest import (
     AFFIRMATION,
@@ -58,7 +58,7 @@ from .outputs import (
 from .resume_fetch import ResumeFetcher
 from .scoring.aggregate import rank_records
 from .scoring.coursework import score_coursework
-from .scoring.essays import grade_essays
+from .scoring.essays import Stage4Result, grade_essays
 from .scoring.resume import score_resume
 from .scoring.school import score_school
 
@@ -144,6 +144,20 @@ def _terminal(
     return record
 
 
+def _reconcile_gibberish(stage1: Stage1Result, stage4: Stage4Result) -> HitGate:
+    """Merge Stage 1's heuristic gibberish finding with Task D's per-essay backstop.
+
+    Terms stay essay-attributed (``e1:``/``e2:`` prefixes) so the audit UI can open and
+    highlight the right essay: Stage 1 already prefixes its fired signal names; a Task D
+    backstop hit contributes ``eN:task_d`` for whichever essay the model flagged.
+    """
+    terms = list(stage1.gibberish.terms)
+    for n, grade in ((1, stage4.e1_grade), (2, stage4.e2_grade)):
+        if grade is not None and grade.is_gibberish:
+            terms.append(f"e{n}:task_d")
+    return HitGate(hit=stage1.gibberish.hit or stage4.gibberish.hit, terms=terms)
+
+
 async def grade_one(
     deduped: DedupedRow,
     resolution: HeaderResolution,
@@ -210,12 +224,7 @@ async def grade_one(
         record.llm_calls.extend(("task_d_e1", "task_d_e2"))
         record.gates.essay_relevance = stage4.essay_relevance
         # Reconcile the two gibberish findings: Stage 1's cheap heuristic + Task D's backstop.
-        gib_terms = list(stage1.gibberish.terms)
-        if stage4.gibberish.hit:
-            gib_terms.append("task_d")
-        record.gates.gibberish = HitGate(
-            hit=stage1.gibberish.hit or stage4.gibberish.hit, terms=gib_terms
-        )
+        record.gates.gibberish = _reconcile_gibberish(stage1, stage4)
         if stage4.verdict == "reject":
             return _terminal(record, "REJECTED", _STAGE_4, stage4.primary_reason)
         if stage4.verdict == "needs_review":
@@ -450,12 +459,7 @@ async def rescore_one(
         )
         record.llm_calls.extend(("task_d_e1", "task_d_e2"))
         record.gates.essay_relevance = stage4.essay_relevance
-        gib_terms = list(stage1.gibberish.terms)
-        if stage4.gibberish.hit:
-            gib_terms.append("task_d")
-        record.gates.gibberish = HitGate(
-            hit=stage1.gibberish.hit or stage4.gibberish.hit, terms=gib_terms
-        )
+        record.gates.gibberish = _reconcile_gibberish(stage1, stage4)
         record.scores.essay = stage4.subscores
         if stage4.verdict == "pass":
             record.reasons.append(f"essays on-topic; quality total {stage4.subscores.total}")
