@@ -66,8 +66,11 @@ def _task_b(user: str) -> TaskBOutput:
     )
 
 
-# "Name - A Name2 - B+ ..." pattern: course names with letter grades interleaved after dashes.
-_PAIR_RE = re.compile(r"(.+?)\s*-\s*([A-DF][+\-]?\*?)(?=\s+\S|\s*$)")
+# Grade tokens interleaved in a run of courses: a letter grade after a dash ("Biology - A"),
+# or a standalone fraction/percentage ("Biology 9/10", "AP Calc 92%") — no dash required.
+_GRADE_RE = re.compile(
+    r"(?:-\s*[A-DF][+\-]?\*?|\d{1,3}(?:\.\d+)?\s*/\s*\d{1,3}|\d{1,3}(?:\.\d+)?\s*%)(?=\s|$)"
+)
 # Letter grade -> percentage, mirroring the Task C prompt's conversion table.
 _GRADE_PCT = {
     "A": 95,
@@ -84,11 +87,49 @@ _GRADE_PCT = {
 }
 
 
+def _grade_to_pct(grade_raw: str) -> int | None:
+    """Normalize a captured grade token to a 0-100 percentage; None when unparseable."""
+    g = grade_raw.strip()
+    if not g:
+        return None
+    pct = _GRADE_PCT.get(g.rstrip("*"))
+    if pct is not None:
+        return pct
+    try:
+        if g.endswith("%"):
+            return round(float(g[:-1].strip()))
+        if "/" in g:
+            num, _, den = g.partition("/")
+            return round(float(num) / float(den) * 100)
+    except (ValueError, ZeroDivisionError):
+        return None
+    return None
+
+
+def _split_pairs(fragment: str) -> list[tuple[str, str]]:
+    """Split one fragment into (name, grade_raw) pairs on interleaved grade tokens."""
+    matches = list(_GRADE_RE.finditer(fragment))
+    if not matches:
+        return [(fragment, "")]
+    pairs: list[tuple[str, str]] = []
+    prev_end = 0
+    for m in matches:
+        name = fragment[prev_end : m.start()].strip(" \t-")
+        if name:
+            pairs.append((name, m.group().lstrip("- ").strip()))
+        prev_end = m.end()
+    tail = fragment[prev_end:].strip(" \t-")
+    if tail:
+        pairs.append((tail, ""))
+    return pairs
+
+
 def _task_c(user: str) -> TaskCOutput:
     """Decompose the coursework cell with light splitting (demo only).
 
-    Splits on commas/semicolons/newlines, then unpacks dash-interleaved "Name - A Name2 - B"
-    runs. A course without an explicit grade gets grade_pct=None (never an invented grade) —
+    Splits on commas/semicolons/newlines, then unpacks grade-interleaved runs — both
+    "Name - A Name2 - B" dash pairs and "Name 9/10 Name2 92%" fraction/percent pairs.
+    A course without an explicit grade gets grade_pct=None (never an invented grade) —
     matching the real Task C contract.
     """
     # The user prompt wraps the raw cell as COURSEWORK_RAW: """...""" — pull the inner text.
@@ -98,13 +139,8 @@ def _task_c(user: str) -> TaskCOutput:
         inner = match.group(1)
     pairs: list[tuple[str, str]] = []  # (name, grade_raw); grade_raw "" when unstated
     for fragment in (f.strip() for f in re.split(r"[,\n;]", inner)):
-        if not fragment:
-            continue
-        dash_pairs = _PAIR_RE.findall(fragment)
-        if dash_pairs:
-            pairs.extend((name.strip(), grade.strip()) for name, grade in dash_pairs)
-        else:
-            pairs.append((fragment, ""))
+        if fragment:
+            pairs.extend(_split_pairs(fragment))
     courses: list[CourseItem] = []
     for i, (name, grade_raw) in enumerate(pairs[:8]):  # cap for a tidy demo panel
         category, weight = _CATEGORIES[i % len(_CATEGORIES)]
@@ -112,7 +148,7 @@ def _task_c(user: str) -> TaskCOutput:
             CourseItem(
                 name=name[:80],
                 grade_raw=grade_raw,
-                grade_pct=_GRADE_PCT.get(grade_raw.rstrip("*")),
+                grade_pct=_grade_to_pct(grade_raw),
                 category=category,  # type: ignore[arg-type]
                 counts=True,
                 category_weight=weight,
