@@ -335,12 +335,39 @@ def test_gate_below_threshold_blank_explanation_rejected() -> None:
     assert "no explanation" in res.gate.reason  # names the blocker (PRD §12)
 
 
-def test_gate_unresolved_scale_needs_review_never_rejected() -> None:
-    # A blank GPA normalizes to manual review; the gate must send it to NEEDS_REVIEW.
+def test_gate_blank_gpa_no_explanation_rejected() -> None:
+    # An empty GPA cell with no extenuating-circumstances text is an affirmative non-answer.
     res = gpa_gate_deterministic("", normalize_gpa_deterministic("", CFG), "", CFG)
+    assert res is not None
+    assert res.verdict == "reject"
+    assert "No GPA provided" in res.gate.reason
+    assert res.gpa_points == 0.0
+
+
+def test_gate_blank_gpa_with_explanation_needs_review() -> None:
+    # A blank GPA with an explanation present stays human-reviewed, never auto-rejected.
+    res = gpa_gate_deterministic(
+        "", normalize_gpa_deterministic("", CFG), "My school does not issue GPAs", CFG
+    )
     assert res is not None
     assert res.verdict == "needs_review"
     assert res.gate.passed is False
+
+
+def test_gate_below_hard_floor_rejected_even_with_explanation() -> None:
+    res = gpa_gate_deterministic(
+        "1.8", _resolved_norm(1.8), "I was hospitalized for two semesters", CFG
+    )
+    assert res is not None
+    assert res.verdict == "reject"
+    assert "hard floor" in res.gate.reason
+    assert res.gpa_points == 0.0
+
+
+def test_gate_exactly_hard_floor_defers_to_task_b() -> None:
+    # 2.0 is AT the floor, not below it — an explanation still gets a Task B hearing.
+    res = gpa_gate_deterministic("2.0", _resolved_norm(2.0), "documented hardship", CFG)
+    assert res is None
 
 
 def test_gate_below_threshold_with_explanation_defers_to_task_b() -> None:
@@ -392,10 +419,26 @@ async def test_assess_deterministic_pass_makes_no_llm_call() -> None:
     assert client.calls == []
 
 
-async def test_assess_blank_needs_review_no_llm() -> None:
+async def test_assess_blank_no_explanation_rejected_no_llm() -> None:
     client = _client(_dispatch())
     res = await assess_gpa(_row(""), client, APP)
+    assert res.verdict == "reject"
+    assert client.calls == []
+
+
+async def test_assess_blank_with_explanation_needs_review_no_llm() -> None:
+    client = _client(_dispatch())
+    res = await assess_gpa(_row("", "my school does not issue GPAs"), client, APP)
     assert res.verdict == "needs_review"
+    assert client.calls == []
+
+
+async def test_assess_below_hard_floor_rejected_no_llm() -> None:
+    # Below the 2.0 floor no explanation can rescue — and no Task B token is spent.
+    client = _client(_dispatch())
+    res = await assess_gpa(_row("1.5", "severe documented hardship"), client, APP)
+    assert res.verdict == "reject"
+    assert "hard floor" in res.reason
     assert client.calls == []
 
 
@@ -406,6 +449,8 @@ async def test_assess_below_threshold_task_b_rank_passes_at_gradient_bottom() ->
     assert res.gpa_points == 0.0  # bottom of the gradient — deficit reflected, not erased
     assert res.assessment.explanation_eval is not None
     assert res.assessment.explanation_eval.recommended_outcome == "rank"
+    # The applicant's own reason is carried on the audit record for the reviewer to read.
+    assert res.assessment.explanation_text == "I was hospitalized for a semester"
     assert client.calls[0][0] == "task_b"
 
 
@@ -433,7 +478,7 @@ async def test_assess_task_b_parse_failure_needs_review_never_rejects() -> None:
 async def test_invariant_below_threshold_never_scores_above_gradient_bottom() -> None:
     # Even an approved sub-3.0 applicant never earns points above the bottom (0) of the band.
     client = _client(_dispatch(task_b=_task_b("rank")))
-    for gpa in ("2.9", "2.5", "2.0", "1.0"):
+    for gpa in ("2.9", "2.5", "2.0"):  # >= hard_floor; below it Task B never fires
         res = await assess_gpa(_row(gpa, "documented hardship"), client, APP)
         assert res.verdict == "pass"
         assert res.gpa_points == 0.0
@@ -448,9 +493,10 @@ async def test_invariant_below_threshold_no_points_without_approved_task_b() -> 
 
 
 async def test_invariant_nothing_unscoreable_is_rejected() -> None:
-    # Blank, Task A manual-review, and parse failures must all be NEEDS_REVIEW, never REJECTED.
-    blank = await assess_gpa(_row(""), _client(_dispatch()), APP)
-    assert blank.verdict == "needs_review"
+    # Unresolvable-but-present scales and parse failures must be NEEDS_REVIEW, never REJECTED.
+    # (A blank GPA with a blank explanation is a non-answer, not unscoreable — it rejects.)
+    blank_with_expl = await assess_gpa(_row("", "no GPA at my school"), _client(_dispatch()), APP)
+    assert blank_with_expl.verdict == "needs_review"
 
     manual = await assess_gpa(
         _row("IGCSE A*A*A"),

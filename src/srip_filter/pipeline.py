@@ -132,9 +132,7 @@ _STAGE_8 = "stage8"
 _STAGE_ERROR = "error"
 
 
-def _terminal(
-    record: AuditRecord, outcome: str, stage: str, reason: str
-) -> AuditRecord:
+def _terminal(record: AuditRecord, outcome: str, stage: str, reason: str) -> AuditRecord:
     """Stamp a terminal outcome on a record and return it (REJECTED/NEEDS_REVIEW are unscored)."""
     record.outcome = outcome  # type: ignore[assignment]
     record.decided_at_stage = stage
@@ -273,9 +271,7 @@ async def grade_one(
         return record
     except Exception as exc:  # per-row isolation: a bad row → NEEDS_REVIEW, never an aborted batch
         record.errors.append(f"{type(exc).__name__}: {exc}")
-        return _terminal(
-            record, "NEEDS_REVIEW", _STAGE_ERROR, "Unexpected error during grading"
-        )
+        return _terminal(record, "NEEDS_REVIEW", _STAGE_ERROR, "Unexpected error during grading")
 
 
 # ================================================================================================
@@ -360,10 +356,16 @@ async def grade_batch(
             progress(done, total)
         return record
 
+    # Rows are graded in bounded waves rather than one giant gather. With a single gather, the
+    # client's FIFO semaphore services every row's stage-N call before any row's stage-N+1 call,
+    # so no row *finishes* until the very end and live progress sits at 0 for most of the run.
+    # Waves keep the semaphore saturated while letting completions arrive steadily.
+    wave_size = max(1, cfg.llm.max_concurrency * 4)
+    records: list[AuditRecord] = []
     try:
-        records = list(
-            await asyncio.gather(*(_graded(deduped) for deduped in ingest.rows))
-        )
+        for start in range(0, total, wave_size):
+            wave = ingest.rows[start : start + wave_size]
+            records.extend(await asyncio.gather(*(_graded(deduped) for deduped in wave)))
     finally:
         if owns_fetcher and fetcher is not None:
             await fetcher.aclose()
@@ -427,7 +429,9 @@ async def rescore_one(
         record.gates.profanity = stage1.profanity
         record.gates.gibberish = stage1.gibberish
         if stage1.rejected:
-            record.reasons.append(f"OVERRIDE: stage1 gate bypassed ({stage1.primary_reason})")
+            record.reasons.append(
+                f"OVERRIDE: essay quality gate bypassed ({stage1.primary_reason})"
+            )
 
         if not affirmation_ok(row, resolution):
             record.reasons.append("OVERRIDE: truthfulness affirmation not checked")
@@ -465,8 +469,7 @@ async def rescore_one(
             record.reasons.append(f"essays on-topic; quality total {stage4.subscores.total}")
         else:
             record.reasons.append(
-                f"OVERRIDE: essay gate bypassed ({stage4.primary_reason}); "
-                f"gated essay scores 0"
+                f"OVERRIDE: essay gate bypassed ({stage4.primary_reason}); gated essay scores 0"
             )
 
         # Stages 5/6/7 — bonuses, exactly as in grade_one (additive only).
@@ -520,9 +523,7 @@ async def promote_record(
         raise KeyError(submission_id)
     if record.outcome == "RANKED":
         raise ValueError("Applicant is already ranked.")
-    deduped = next(
-        (d for d in result.rows if d.row.submission_id == submission_id), None
-    )
+    deduped = next((d for d in result.rows if d.row.submission_id == submission_id), None)
     if deduped is None or result.resolution is None:
         raise KeyError(submission_id)
 

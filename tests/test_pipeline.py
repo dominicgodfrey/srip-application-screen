@@ -223,7 +223,7 @@ async def test_survivor_is_ranked_with_full_scores() -> None:
     assert rec.rank is None
     assert rec.scores.gpa_points == pytest.approx(20.0)  # (3.5 - 3.0)/1.0 * 40
     assert rec.scores.essay.total == pytest.approx(36.0)  # 18 + 18, no penalties
-    assert rec.scores.coursework_bonus == pytest.approx(2.85)  # 1.0 * 0.95 * 3.0
+    assert rec.scores.coursework_bonus == pytest.approx(3.0)  # flat 1.0 * 3.0
     assert rec.scores.school_bonus == 0.0  # "High School" → no match
     assert rec.scores.resume_bonus == 0.0
     assert rec.llm_calls == ["task_d_e1", "task_d_e2", "task_c"]  # GPA resolved deterministically
@@ -243,9 +243,7 @@ async def test_stage1_reject_spends_zero_llm() -> None:
 
 async def test_unchecked_affirmation_needs_review_zero_llm() -> None:
     client = FakeLLMClient(APP, handler=_good_handler)
-    rec = await grade_one(
-        _applicant(affirmation=""), _resolution(*_SURVIVOR_ROLES), client, APP
-    )
+    rec = await grade_one(_applicant(affirmation=""), _resolution(*_SURVIVOR_ROLES), client, APP)
     assert rec.outcome == "NEEDS_REVIEW"
     assert rec.decided_at_stage == "affirmation"
     assert client.calls == []  # affirmation is checked before any LLM stage
@@ -708,8 +706,13 @@ async def test_resume_at_volume_holds_memory_and_concurrency_discipline() -> Non
     marker = "UNIQUEPDFCONTENTMARKER"
     rows = [_csv_row(f"s-{i:03d}", resume=f"https://{_RESUME_HOST}/r/{i}.pdf") for i in range(60)]
     cfg = AppConfig.model_validate(
-        {"resume": {"bonus_max": 10.0, "download_concurrency": 3,
-                    "allowed_url_hosts": [_RESUME_HOST]}}
+        {
+            "resume": {
+                "bonus_max": 10.0,
+                "download_concurrency": 3,
+                "allowed_url_hosts": [_RESUME_HOST],
+            }
+        }
     )
 
     in_flight = 0

@@ -72,10 +72,18 @@ class CourseItem(_Model):
     """A single decomposed course (PRD §8.4)."""
 
     name: str
-    grade_raw: str = Field(description="Grade exactly as written by the applicant.")
-    grade_pct: int = Field(ge=0, le=100, description="Grade normalized to a 0-100 percentage.")
+    grade_raw: str = Field(
+        description="Grade exactly as written by the applicant; empty string if none stated."
+    )
+    grade_pct: int | None = Field(
+        ge=0,
+        le=100,
+        description="Grade normalized to a 0-100 percentage; null when no grade was stated.",
+    )
     category: CourseCategory
-    counts: bool = Field(description="False if grade_pct < 80 or category == 'other'.")
+    counts: bool = Field(
+        description="False if category == 'other' or an explicit grade falls below a B."
+    )
     category_weight: float = Field(
         ge=0.0,
         description="cs=1.0, math=0.8, data=0.6, other=0.0 (tunable in config).",
@@ -212,6 +220,7 @@ class GpaAssessment(_Model):
     below_threshold: bool | None = None
     requires_manual_review: bool = False
     source: GpaSource | None = None
+    explanation_text: str = ""  # the applicant's extenuating-circumstances text, verbatim
     explanation_eval: TaskBOutput | None = None  # populated only if Task B ran
 
 
@@ -245,6 +254,7 @@ class ResumeAssessment(_Model):
     """
 
     url_present: bool = False
+    url: str = ""  # the resume link as submitted, so a reviewer can open it from the audit UI
     attempted: bool = False  # False when the kill switch (bonus_max == 0) or no URL skipped it
     fetched: bool = False
     extracted_chars: int = 0

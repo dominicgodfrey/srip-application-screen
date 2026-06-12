@@ -90,6 +90,18 @@ def ranked_csv(records: list[AuditRecord]) -> str:
     return _write_csv(header, rows)
 
 
+# Internal stage ids -> plain-language labels. The downloaded files are read by program staff
+# who never saw the development plan, so internal "stageN" ids must not leak into them.
+_STAGE_LABELS = {
+    "stage1": "essay quality checks",
+    "stage2": "GPA normalization",
+    "stage3": "GPA gate",
+    "stage4": "essay grading",
+    "stage8": "final scoring & ranking",
+    "manual_override": "manual override",
+}
+
+
 def rejected_csv(records: list[AuditRecord]) -> str:
     """``REJECTED`` applicants (PRD §12): id, name, the failing stage/gate, and ``primary_reason``
     (which itself names the failing gate — §12 #3). Sorted by ``submission_id`` for stable reruns.
@@ -97,7 +109,13 @@ def rejected_csv(records: list[AuditRecord]) -> str:
     header = ["submission_id", "name", "failing_stage", "primary_reason"]
     rejected = sorted(_by_outcome(records, "REJECTED"), key=lambda r: r.submission_id)
     rows: list[list[object]] = [
-        [r.submission_id, r.name, r.decided_at_stage, r.primary_reason] for r in rejected
+        [
+            r.submission_id,
+            r.name,
+            _STAGE_LABELS.get(r.decided_at_stage, r.decided_at_stage),
+            r.primary_reason,
+        ]
+        for r in rejected
     ]
     return _write_csv(header, rows)
 

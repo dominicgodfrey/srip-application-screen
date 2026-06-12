@@ -98,9 +98,7 @@ def _percentage_to_gpa(pct: float, ncfg: GpaNormalizationConfig) -> float:
     return pct / lowest.min_pct * lowest.gpa if lowest.min_pct > 0 else 0.0
 
 
-def _resolved(
-    gpa_value: float, scale: str, method: str, cfg: GpaConfig
-) -> GpaNormalization:
+def _resolved(gpa_value: float, scale: str, method: str, cfg: GpaConfig) -> GpaNormalization:
     """Build a resolved deterministic result, capped at ``gpa_max`` and rounded."""
     capped = round(min(gpa_value, cfg.normalization.gpa_max), 4)
     return GpaNormalization(
@@ -243,9 +241,7 @@ def _from_task_a(out: TaskAOutput, cfg: GpaConfig) -> GpaNormalization:
     )
 
 
-async def normalize_gpa(
-    raw: str, client: BaseLLMClient, cfg: AppConfig
-) -> GpaNormalization:
+async def normalize_gpa(raw: str, client: BaseLLMClient, cfg: AppConfig) -> GpaNormalization:
     """Stage 2: normalize a raw GPA, deterministic-first, with LLM Task A as the fallback.
 
     Resolves and returns immediately for any value the deterministic parser handled or sent to
@@ -311,11 +307,16 @@ def gpa_points(normalized_gpa: float, cfg: GpaConfig) -> float:
 
 
 def build_assessment(
-    raw: str, norm: GpaNormalization, explanation_eval: TaskBOutput | None = None
+    raw: str,
+    norm: GpaNormalization,
+    explanation_eval: TaskBOutput | None = None,
+    explanation: str = "",
 ) -> GpaAssessment:
     """Project a :class:`GpaNormalization` onto the audit ``GpaAssessment`` block (PRD §9).
 
-    ``explanation_eval`` is the Task B output, populated only when Task B ran (Phase 3.4).
+    ``explanation_eval`` is the Task B output, populated only when Task B ran.
+    ``explanation`` is the applicant's extenuating-circumstances text, carried verbatim so the
+    audit UI can show the reason that rescued (or failed to rescue) a sub-threshold GPA.
     """
     return GpaAssessment(
         raw=raw or None,
@@ -326,6 +327,7 @@ def build_assessment(
         below_threshold=norm.below_threshold,
         requires_manual_review=norm.requires_manual_review,
         source=norm.source,
+        explanation_text=explanation.strip(),
         explanation_eval=explanation_eval,
     )
 
@@ -335,30 +337,56 @@ def gpa_gate_deterministic(
 ) -> GpaGateResult | None:
     """Decide the GPA gate branches that need no LLM; return ``None`` if Task B is required.
 
-    * unresolved scale (null GPA or ``requires_manual_review``) → ``needs_review`` (PRD §6.2:
-      never a rejection — protects the international contingent);
+    * blank GPA cell with a blank explanation → ``reject`` (nothing offered to evaluate);
+    * unresolved scale otherwise (null GPA or ``requires_manual_review``) → ``needs_review``
+      (never a rejection — protects the international contingent);
+    * GPA < ``hard_floor`` → ``reject`` regardless of explanation (no Task B call);
     * GPA ≥ ``threshold`` → ``pass`` with gradient points;
     * GPA < ``threshold`` with a blank explanation → ``reject``;
-    * GPA < ``threshold`` with an explanation present → ``None`` (Phase 3.4 calls Task B).
+    * GPA < ``threshold`` with an explanation present → ``None`` (Task B decides).
     """
     if norm.normalized_gpa is None or norm.requires_manual_review:
+        # A truly empty GPA cell with no extenuating-circumstances text is an affirmative
+        # non-answer, not an unresolvable scale — reject it. Anything else unresolved (foreign
+        # scales, "school doesn't offer GPAs", or blank-with-explanation) stays human-reviewed.
+        if not raw.strip() and not explanation.strip():
+            reason = "No GPA provided and no explanation given"
+            return GpaGateResult(
+                verdict="reject",
+                gpa_points=0.0,
+                reason=reason,
+                assessment=build_assessment(raw, norm, explanation=explanation),
+                gate=GpaGate(passed=False, reason=reason),
+            )
         reason = "GPA scale could not be normalized"
         return GpaGateResult(
             verdict="needs_review",
             gpa_points=0.0,
             reason=reason,
-            assessment=build_assessment(raw, norm),
+            assessment=build_assessment(raw, norm, explanation=explanation),
             gate=GpaGate(passed=False, reason=reason),
         )
 
     g = norm.normalized_gpa
+    if g < cfg.hard_floor:
+        reason = (
+            f"GPA {g} below the hard floor of {cfg.hard_floor} — "
+            "not eligible regardless of explanation"
+        )
+        return GpaGateResult(
+            verdict="reject",
+            gpa_points=0.0,
+            reason=reason,
+            assessment=build_assessment(raw, norm, explanation=explanation),
+            gate=GpaGate(passed=False, reason=reason),
+        )
     if g >= cfg.threshold:
         points = gpa_points(g, cfg)
         return GpaGateResult(
             verdict="pass",
             gpa_points=points,
             reason="",
-            assessment=build_assessment(raw, norm),
+            assessment=build_assessment(raw, norm, explanation=explanation),
             gate=GpaGate(passed=True, reason=f"normalized {g} >= {cfg.threshold}"),
         )
 
@@ -368,7 +396,7 @@ def gpa_gate_deterministic(
             verdict="reject",
             gpa_points=0.0,
             reason=reason,
-            assessment=build_assessment(raw, norm),
+            assessment=build_assessment(raw, norm, explanation=explanation),
             gate=GpaGate(passed=False, reason=reason),
         )
 
@@ -386,10 +414,15 @@ def gpa_gate_deterministic(
 
 
 def _task_b_result(
-    out: TaskBOutput, raw: str, norm: GpaNormalization, normalized_gpa: float, cfg: GpaConfig
+    out: TaskBOutput,
+    raw: str,
+    norm: GpaNormalization,
+    normalized_gpa: float,
+    explanation: str,
+    cfg: GpaConfig,
 ) -> GpaGateResult:
     """Turn a Task B verdict into a gate result; store the eval in the assessment either way."""
-    assessment = build_assessment(raw, norm, out)
+    assessment = build_assessment(raw, norm, out, explanation=explanation)
     if out.recommended_outcome == "rank":
         # Below threshold -> gpa_points clamps to 0: deficit reflected, never erased (§8.1).
         return GpaGateResult(
@@ -439,7 +472,7 @@ async def assess_gpa(row: ApplicantRow, client: BaseLLMClient, cfg: AppConfig) -
             verdict="needs_review",
             gpa_points=0.0,
             reason=reason,
-            assessment=build_assessment(row.gpa, norm),
+            assessment=build_assessment(row.gpa, norm, explanation=row.gpa_explanation),
             gate=GpaGate(passed=False, reason=reason),
         )
-    return _task_b_result(out, row.gpa, norm, normalized_gpa, cfg.gpa)
+    return _task_b_result(out, row.gpa, norm, normalized_gpa, row.gpa_explanation, cfg.gpa)

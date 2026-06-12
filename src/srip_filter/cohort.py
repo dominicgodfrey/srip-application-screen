@@ -169,7 +169,7 @@ def assign_cohorts(
     if needs_review_count:
         warnings.append(
             f"{needs_review_count} NEEDS_REVIEW applicant(s) are excluded from this assignment; "
-            "resolve and re-rank before final cohort filling (PRD §11)."
+            "resolve and re-rank them before final cohort filling."
         )
     if any(r.rank is None for r in ranked):
         warnings.append(

@@ -24,6 +24,7 @@ gibberish:
 # GPA gate + gradient (Stages 2-3, §8.1)
 gpa:
   threshold: 3.0        # B average; deny line AND bottom of the scoring gradient
+  hard_floor: 2.0       # below this no explanation can rescue -> REJECTED (no Task B call)
   score_max: 40         # points awarded at a normalized GPA of 4.0
   # Deterministic normalization (Stage 2, §6.1). A bare value above gpa_max is treated as
   # weighted/out-of-scale and routed to LLM Task A; the percentage table maps detectable
@@ -45,14 +46,16 @@ essay_scoring:
   quality_max_each: 20  # per essay; 40 total
   grammar_penalty_max: 3
 
-# Coursework bonus (Stage 5, Task C) — additive only, never subtracts
+# Coursework bonus (Stage 5, Task C) — additive only, never subtracts. Grades are ignored
+# unless explicitly stated below a B: such a course is excluded entirely; any other counting
+# course contributes a flat weight * unit (the grade never scales the bonus).
 coursework:
   bonus_max: 15
   weight_cs: 1.0
   weight_math: 0.8
   weight_data: 0.6
   weight_other: 0.0
-  min_grade_pct: 80     # courses graded below this are ignored (weight 0)
+  min_grade_pct: 85     # B; an explicit grade below this excludes the course entirely
   unit: 3.0
 
 # School bonus (Stage 7) — additive only, never subtracts

@@ -77,11 +77,11 @@ class Stage6Result:
     task_e_called: bool
 
 
-def _skipped(url_present: bool) -> Stage6Result:
+def _skipped(url: str) -> Stage6Result:
     """No-op result (kill switch / no URL / no fetcher): neutral, no fetch, no token."""
     return Stage6Result(
         bonus=0.0,
-        assessment=ResumeAssessment(url_present=url_present),
+        assessment=ResumeAssessment(url_present=bool(url), url=url),
         error="",
         task_e_called=False,
     )
@@ -116,9 +116,9 @@ async def score_resume(
     """
     url = row.resume_url.strip()
     if cfg.resume.bonus_max <= 0 or not url or fetcher is None:
-        return _skipped(url_present=bool(url))
+        return _skipped(url)
 
-    assessment = ResumeAssessment(url_present=True, attempted=True)
+    assessment = ResumeAssessment(url_present=True, url=url, attempted=True)
 
     fetched = await fetcher.fetch(url)
     if not fetched.ok:

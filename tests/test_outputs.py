@@ -128,7 +128,7 @@ def test_rejected_csv_names_the_failing_gate() -> None:
     assert rows[0] == ["submission_id", "name", "failing_stage", "primary_reason"]
     assert len(rows) == 2  # header + 1 rejected
     assert rows[1][0] == "x1"
-    assert rows[1][2] == "stage1"
+    assert rows[1][2] == "essay quality checks"  # plain-language label, not "stage1"
     assert "length gate" in rows[1][3]
 
 

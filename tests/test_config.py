@@ -23,7 +23,7 @@ def test_defaults_match_prd() -> None:
     assert cfg.essay_scoring.quality_max_each == 20
     assert cfg.essay_scoring.grammar_penalty_max == 3
     assert cfg.coursework.bonus_max == 15.0
-    assert cfg.coursework.min_grade_pct == 80.0
+    assert cfg.coursework.min_grade_pct == 85.0  # B; explicit grade below this excludes
     assert cfg.school.bonus_us_top20 == 15.0
     assert cfg.school.bonus_intl_top50 == 12.0
     assert cfg.school.fuzzy_match_threshold == 88
@@ -37,9 +37,7 @@ def test_resume_config_defaults() -> None:
     assert cfg.resume.download_timeout_s == 20.0
     assert cfg.resume.download_concurrency == 4
     # SSRF allowlist: the pinned Fillout S3 bucket host (openissue #5), https-only.
-    assert cfg.resume.allowed_url_hosts == [
-        "prod-fillout-oregon-s3.s3.us-west-2.amazonaws.com"
-    ]
+    assert cfg.resume.allowed_url_hosts == ["prod-fillout-oregon-s3.s3.us-west-2.amazonaws.com"]
     assert cfg.resume.max_text_chars == 15_000
     # Signal pricing is config-owned (the model never prices) and never negative.
     for weight in (

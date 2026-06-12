@@ -67,23 +67,25 @@ def _weight_for(category: CourseCategory, cfg: CourseworkConfig) -> float:
 
 
 def coursework_bonus(out: TaskCOutput, cfg: CourseworkConfig) -> CourseworkResult:
-    """Apply the PRD §8.4 bonus math to a Task C output. Pure function, never negative.
+    """Apply the coursework bonus math to a Task C output. Pure function, never negative.
 
-    For each course, weight and ``counts`` are **recomputed from config**: ``counts`` is
-    ``category != "other" and grade_pct >= min_grade_pct``, and a counting course contributes
-    ``weight * (grade_pct/100) * unit``. The sum is capped at ``bonus_max`` and floored at 0.
-    Returns the bonus plus the reconciled ``courses[]`` (weights/counts as actually applied).
+    For each course, weight and ``counts`` are **recomputed from config**. Grades are ignored
+    unless explicitly stated below a B: a course counts when ``category != "other"`` and its
+    grade is either unstated (``grade_pct is None``) or at/above ``min_grade_pct``; an explicit
+    grade below the floor excludes the course entirely. A counting course contributes a flat
+    ``weight * unit`` — the grade never scales the bonus. The sum is capped at ``bonus_max`` and
+    floored at 0. Returns the bonus plus the reconciled ``courses[]`` (weights/counts as
+    actually applied).
     """
     reconciled: list[CourseItem] = []
     total = 0.0
     for course in out.courses:
         weight = _weight_for(course.category, cfg)
-        counts = course.category != "other" and course.grade_pct >= cfg.min_grade_pct
+        grade_ok = course.grade_pct is None or course.grade_pct >= cfg.min_grade_pct
+        counts = course.category != "other" and grade_ok
         if counts:
-            total += weight * (course.grade_pct / 100.0) * cfg.unit
-        reconciled.append(
-            course.model_copy(update={"category_weight": weight, "counts": counts})
-        )
+            total += weight * cfg.unit
+        reconciled.append(course.model_copy(update={"category_weight": weight, "counts": counts}))
     bonus = max(0.0, min(cfg.bonus_max, total))
     return CourseworkResult(bonus=round(bonus, 4), courses=reconciled)
 

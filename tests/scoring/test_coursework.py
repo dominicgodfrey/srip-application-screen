@@ -71,19 +71,33 @@ def test_empty_coursework_scores_zero() -> None:
 
 
 def test_cs_course_uses_cs_weight() -> None:
-    # per_course = weight_cs(1.0) * 0.95 * unit(3.0) = 2.85
+    # per_course = weight_cs(1.0) * unit(3.0) = 3.0 — flat; the grade never scales the bonus
     r = coursework_bonus(_task_c(_course(grade_pct=95, category="cs")), CFG)
-    assert r.bonus == pytest.approx(2.85)
+    assert r.bonus == pytest.approx(3.0)
 
 
 def test_math_and_data_weighted_below_cs() -> None:
-    # math: 0.8 * 0.95 * 3.0 = 2.28 ; data: 0.6 * 0.95 * 3.0 = 1.71
+    # math: 0.8 * 3.0 = 2.4 ; data: 0.6 * 3.0 = 1.8 (flat per-course contributions)
     math = coursework_bonus(_task_c(_course(category="math")), CFG).bonus
     data = coursework_bonus(_task_c(_course(category="data")), CFG).bonus
     cs = coursework_bonus(_task_c(_course(category="cs")), CFG).bonus
-    assert math == pytest.approx(2.28)
-    assert data == pytest.approx(1.71)
+    assert math == pytest.approx(2.4)
+    assert data == pytest.approx(1.8)
     assert cs > math > data  # relevance ordering holds
+
+
+def test_grade_does_not_scale_bonus() -> None:
+    # An 85 and a 100 in the same category contribute identically.
+    low = coursework_bonus(_task_c(_course(category="cs", grade_pct=85)), CFG).bonus
+    high = coursework_bonus(_task_c(_course(category="cs", grade_pct=100)), CFG).bonus
+    assert low == high == pytest.approx(3.0)
+
+
+def test_ungraded_course_counts_at_full_weight() -> None:
+    # No explicit grade (grade_pct=None) is neutral — the course still counts.
+    r = coursework_bonus(_task_c(_course(category="cs", grade_pct=None)), CFG)
+    assert r.bonus == pytest.approx(3.0)
+    assert r.courses[0].counts is True
 
 
 def test_other_category_contributes_zero() -> None:
@@ -93,17 +107,17 @@ def test_other_category_contributes_zero() -> None:
     assert r.courses[0].category_weight == pytest.approx(CFG.weight_other)
 
 
-def test_grade_below_floor_is_ignored() -> None:
-    # 79% < 80% floor -> counts False -> 0, even for a CS course.
-    r = coursework_bonus(_task_c(_course(category="cs", grade_pct=79)), CFG)
+def test_explicit_grade_below_b_excludes_course() -> None:
+    # 82 (B-) < 85 (B) floor -> the course is excluded entirely, even for CS.
+    r = coursework_bonus(_task_c(_course(category="cs", grade_pct=82)), CFG)
     assert r.bonus == 0.0
     assert r.courses[0].counts is False
 
 
 def test_grade_at_floor_counts() -> None:
-    # exactly 80% counts: 1.0 * 0.80 * 3.0 = 2.4
-    r = coursework_bonus(_task_c(_course(category="cs", grade_pct=80)), CFG)
-    assert r.bonus == pytest.approx(2.4)
+    # exactly a B (85) counts at the flat contribution: 1.0 * 3.0 = 3.0
+    r = coursework_bonus(_task_c(_course(category="cs", grade_pct=85)), CFG)
+    assert r.bonus == pytest.approx(3.0)
     assert r.courses[0].counts is True
 
 
@@ -165,8 +179,8 @@ async def test_bonus_composition_from_task_c() -> None:
         )
     )
     r = await score_coursework(_row(), client, APP)
-    # cs: 1.0*0.95*3 = 2.85 ; math: 0.8*0.90*3 = 2.16
-    assert r.bonus == pytest.approx(5.01)
+    # cs: 1.0*3.0 = 3.0 ; math: 0.8*3.0 = 2.4 (flat; grades don't scale)
+    assert r.bonus == pytest.approx(5.4)
     assert len(r.courses) == 2
     assert r.error == ""
     assert r.raw is not None
