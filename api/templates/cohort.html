@@ -33,7 +33,7 @@ strictly by rank; no one is placed above their first-choice (cost-ceiling) tier.
     <h3 class="subhead">Use a different decisions.jsonl</h3>
     <form id="reupload-form" class="btn-row">
       <input class="form-input" type="file" id="decisions-file" accept=".jsonl,application/x-ndjson" style="max-width: 24rem;">
-      <button type="submit" class="btn btn-secondary">Use this decisions.jsonl</button>
+      <button type="submit" class="btn btn-secondary">Update decisions.jsonl</button>
     </form>
   </div>
 
@@ -54,13 +54,22 @@ strictly by rank; no one is placed above their first-choice (cost-ceiling) tier.
         </table>
       </div>
       <p class="muted small" id="choice-satisfaction" style="margin-bottom: 0;"></p>
-      <div class="btn-row" style="margin-top: 1rem;">
+      <div class="btn-row" style="margin-top: 1rem;" id="cohort-downloads">
         <button class="btn btn-secondary" id="download-cohort-csv" type="button">Download assignments CSV</button>
+        <!-- per-cohort roster buttons are appended here by cohort.js -->
       </div>
+      <p class="muted small" style="margin-bottom: 0;">The assignments CSV is grouped by cohort.
+      Each cohort roster includes name, email, and phone number for outreach.</p>
     </div>
 
     <div class="section">
       <h2 class="section-title">Assignments</h2>
+      <div class="btn-row" style="margin-bottom: 0.75rem;">
+        <label class="field-label" for="assign-tier-filter" style="margin: 0;">Filter by program</label>
+        <select class="form-input" id="assign-tier-filter" style="max-width: 12rem;">
+          <option value="">All programs</option>
+        </select>
+      </div>
       <div class="table-wrap">
         <table class="data" id="assign-table">
           <thead><tr>

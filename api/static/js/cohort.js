@@ -22,6 +22,8 @@
     tierBody: document.querySelector("#tier-table tbody"),
     satisfaction: document.getElementById("choice-satisfaction"),
     csvBtn: document.getElementById("download-cohort-csv"),
+    downloadsRow: document.getElementById("cohort-downloads"),
+    tierFilter: document.getElementById("assign-tier-filter"),
     assignBody: document.querySelector("#assign-table tbody"),
     waitlistSection: document.getElementById("waitlist-section"),
     waitlistBody: document.querySelector("#waitlist-table tbody"),
@@ -38,7 +40,7 @@
   function show(el) { el.classList.remove("hidden"); }
   function hide(el) { el.classList.add("hidden"); }
 
-  function capacityParams(format) {
+  function capacityParams(format, tier) {
     const params = new URLSearchParams();
     const caps = [["honors", els.capHonors], ["intensive", els.capIntensive], ["regular", els.capRegular]];
     for (const [name, input] of caps) {
@@ -46,11 +48,12 @@
       if (v !== "" && Number(v) >= 0) params.set(name, String(Math.floor(Number(v))));
     }
     if (format) params.set("format", format);
+    if (tier) params.set("tier", tier);
     return params;
   }
 
-  async function compute(format) {
-    const params = capacityParams(format);
+  async function compute(format, tier) {
+    const params = capacityParams(format, tier);
     if (sourceFile) {
       const fd = new FormData();
       fd.append("file", sourceFile, sourceFile.name || "decisions.jsonl");
@@ -96,14 +99,14 @@
   });
 
   // ----- CSV export --------------------------------------------------------------
-  els.csvBtn.addEventListener("click", async () => {
+  async function downloadCsv(tier, filename) {
     try {
-      const res = await compute("csv");
+      const res = await compute("csv", tier);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "cohort_assignments.csv";
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -111,7 +114,22 @@
     } catch (err) {
       S.toast(err.detail || "CSV download failed.", "danger");
     }
-  });
+  }
+
+  els.csvBtn.addEventListener("click", () => downloadCsv("", "cohort_assignments.csv"));
+
+  // One roster button per tier (rank, name, email, phone for the assigned members).
+  function renderRosterButtons(tiers) {
+    els.downloadsRow.querySelectorAll(".roster-btn").forEach((b) => b.remove());
+    Object.keys(tiers).forEach((tier) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-secondary roster-btn";
+      btn.textContent = "Download " + tier + " roster CSV";
+      btn.addEventListener("click", () => downloadCsv(tier, "cohort_" + tier + ".csv"));
+      els.downloadsRow.appendChild(btn);
+    });
+  }
 
   // ----- Render --------------------------------------------------------------------
   function stat(value, label, cls) {
@@ -138,8 +156,32 @@
       "</tr>").join("");
   }
 
+  let lastResult = null; // kept so the tier filter re-renders without a server round-trip
+
+  function renderAssignments(result) {
+    const filter = els.tierFilter.value;
+    const all = result.assignments || [];
+    const shown = filter ? all.filter((a) => a.assigned_tier === filter) : all;
+    els.assignBody.innerHTML = rowsFor(shown, true);
+  }
+
+  els.tierFilter.addEventListener("change", () => {
+    if (lastResult) renderAssignments(lastResult);
+  });
+
+  function syncTierFilter(tiers) {
+    const current = els.tierFilter.value;
+    const names = Object.keys(tiers);
+    els.tierFilter.innerHTML = '<option value="">All programs</option>' +
+      names.map((t) => '<option value="' + S.esc(t) + '">' + S.esc(t) + "</option>").join("");
+    if (names.indexOf(current) !== -1) els.tierFilter.value = current;
+  }
+
   function render(result) {
+    lastResult = result;
     const sum = result.summary || {};
+    syncTierFilter(sum.tiers || {});
+    renderRosterButtons(sum.tiers || {});
 
     // The core's warnings[] already covers NEEDS_REVIEW exclusions — render them verbatim.
     els.warnings.innerHTML = (sum.warnings || []).map((w) =>
@@ -167,7 +209,7 @@
       ? "Assigned choice satisfaction — " + parts.join(", ")
       : "";
 
-    els.assignBody.innerHTML = rowsFor(result.assignments || [], true);
+    renderAssignments(result);
 
     const waitlist = result.waitlist || [];
     els.waitlistBody.innerHTML = rowsFor(waitlist, false);
