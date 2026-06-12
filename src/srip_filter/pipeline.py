@@ -84,6 +84,7 @@ def build_base_record(deduped: DedupedRow, resolution: HeaderResolution) -> Audi
         submission_id=row.submission_id,
         name=name,
         email=row.email,
+        phone=row.phone,
         program_choices=ProgramChoices(
             first=row.first_choice or None,
             second=row.second_choice or None,

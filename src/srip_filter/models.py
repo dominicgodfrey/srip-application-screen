@@ -281,6 +281,7 @@ class AuditRecord(_Model):
     submission_id: str
     name: str = ""
     email: str = ""
+    phone: str = ""
     program_choices: ProgramChoices = Field(default_factory=ProgramChoices)
     dedup: DedupInfo = Field(default_factory=DedupInfo)
 
@@ -344,6 +345,8 @@ class CohortAssignment(_Model):
 
     submission_id: str
     name: str = ""
+    email: str = ""
+    phone: str = ""
     rank: int | None = None
     final_score: float | None = None
     status: AssignmentStatus

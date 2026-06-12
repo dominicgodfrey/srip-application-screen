@@ -315,6 +315,7 @@ def create_app(
         intensive: _Capacity = None,
         regular: _Capacity = None,
         format: CohortFormat = "json",
+        tier: str | None = None,
     ) -> Response:
         """What-if cohort assignment over a completed grading job's records (PRD §11).
 
@@ -334,7 +335,7 @@ def create_app(
                 detail=f"Results are not available; job state is '{job.state}'.",
             )
         capacities = CohortCapacities(honors=honors, intensive=intensive, regular=regular)
-        return cohort_response(assign_cohorts(job.result.records, capacities, cfg), format)
+        return cohort_response(assign_cohorts(job.result.records, capacities, cfg), format, tier)
 
     @app.post(
         "/cohorts",
@@ -355,6 +356,7 @@ def create_app(
         intensive: _Capacity = None,
         regular: _Capacity = None,
         format: CohortFormat = "json",
+        tier: str | None = None,
     ) -> Response:
         """Cohort assignment from a re-uploaded ``decisions.jsonl`` (PRD §11).
 
@@ -365,7 +367,7 @@ def create_app(
         raw = await read_upload_capped(file, cfg.api.max_upload_bytes)
         records = parse_decisions_jsonl(raw, cfg.api.max_rows)
         capacities = CohortCapacities(honors=honors, intensive=intensive, regular=regular)
-        return cohort_response(assign_cohorts(records, capacities, cfg), format)
+        return cohort_response(assign_cohorts(records, capacities, cfg), format, tier)
 
     return app
 

@@ -41,6 +41,7 @@ LAST_NAME = "last_name"
 EMAIL = "email"
 INSTITUTION = "institution"
 STATE = "state"
+PHONE = "phone"
 FIRST_CHOICE = "first_choice"
 SECOND_CHOICE = "second_choice"
 THIRD_CHOICE = "third_choice"
@@ -94,6 +95,12 @@ COLUMN_SPECS: tuple[ColumnSpec, ...] = (
         contains=("undergraduate institution",),
     ),
     ColumnSpec(STATE, required=False, exact=("What is your state of residence?",)),
+    ColumnSpec(
+        PHONE,
+        required=False,
+        exact=("What is your phone number?",),
+        contains=("phone number",),
+    ),
     ColumnSpec(FIRST_CHOICE, required=False, exact=("First Choice",)),
     ColumnSpec(SECOND_CHOICE, required=False, exact=("Second Choice (optional)",)),
     ColumnSpec(THIRD_CHOICE, required=False, exact=("Third Choice (optional)",)),
@@ -229,6 +236,7 @@ class ApplicantRow(BaseModel):
     email: str = ""
     institution: str = ""
     state: str = ""
+    phone: str = ""
     first_choice: str = ""
     second_choice: str = ""
     third_choice: str = ""

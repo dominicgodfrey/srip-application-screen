@@ -14,7 +14,12 @@ from __future__ import annotations
 
 import itertools
 
-from srip_filter.cohort import assign_cohorts, cohort_assignments_csv, normalize_choices
+from srip_filter.cohort import (
+    assign_cohorts,
+    cohort_assignments_csv,
+    cohort_roster_csv,
+    normalize_choices,
+)
 from srip_filter.config import AppConfig
 from srip_filter.models import (
     AuditRecord,
@@ -438,12 +443,25 @@ def test_csv_has_pinned_columns_and_every_record_once() -> None:
     lines = cohort_assignments_csv(result).strip().split("\n")
 
     assert lines[0] == (
-        "rank,submission_id,name,final_score,status,assigned_tier,"
+        "assigned_tier,rank,submission_id,name,email,phone,final_score,status,"
         "choice_number,excluded_by_cost,choices,reason"
     )
     assert len(lines) == 1 + len(records)  # every RANKED record exactly once
-    # rank order across all statuses
-    assert [line.split(",")[1] for line in lines[1:]] == ["s1", "s2", "s3", "s4"]
+    # assigned first (grouped by tier), then waitlist, then unassignable
+    assert [line.split(",")[2] for line in lines[1:]] == ["s1", "s2", "s3", "s4"]
+
+
+def test_csv_grouped_by_cohort_then_rank() -> None:
+    # Lower-ranked honors assignee must still appear before a higher-ranked regular one:
+    # the file is grouped by cohort (tier order), not globally rank-ordered.
+    records = [
+        _rec("s1", 1, "regular"),
+        _rec("s2", 2, "honors"),
+        _rec("s3", 3, "honors"),
+    ]
+    result = assign_cohorts(records, CohortCapacities(), CFG)
+    lines = cohort_assignments_csv(result).strip().split("\n")
+    assert [line.split(",")[2] for line in lines[1:]] == ["s2", "s3", "s1"]
 
 
 def test_csv_rows_carry_status_tier_and_cost_exclusions() -> None:
@@ -454,17 +472,42 @@ def test_csv_rows_carry_status_tier_and_cost_exclusions() -> None:
     result = assign_cohorts(records, CohortCapacities(), CFG)
     lines = cohort_assignments_csv(result).strip().split("\n")
 
-    s1 = lines[1].split(",")
-    assert s1[4] == "assigned"
-    assert s1[5] == "regular"
-    assert s1[6] == "1"
-    assert s1[7] == "intensive | honors"  # pruned by the cost ceiling
-    assert s1[8] == "regular > intensive > honors"
+    # Cohort grouping puts the honors row (s2) first, the regular row (s1) second.
+    s2 = lines[1].split(",")
+    assert s2[0] == "honors"
+    assert s2[7] == "assigned"
+    assert s2[9] == ""  # nothing above their first choice
 
-    s2 = lines[2].split(",")
-    assert s2[4] == "assigned"
-    assert s2[5] == "honors"
-    assert s2[7] == ""  # nothing above their first choice
+    s1 = lines[2].split(",")
+    assert s1[0] == "regular"
+    assert s1[7] == "assigned"
+    assert s1[8] == "1"
+    assert s1[9] == "intensive | honors"  # pruned by the cost ceiling
+    assert s1[10] == "regular > intensive > honors"
+
+
+def test_roster_csv_contains_only_one_cohort_with_contact_columns() -> None:
+    records = [
+        _rec("s1", 1, "honors"),
+        _rec("s2", 2, "regular"),
+        _rec("s3", 3, "honors"),
+    ]
+    for r in records:
+        r.email = f"{r.submission_id}@example.org"
+        r.phone = f"555-{r.rank:04d}"
+    result = assign_cohorts(records, CohortCapacities(), CFG)
+    lines = cohort_roster_csv(result, "honors").strip().split("\n")
+
+    assert lines[0] == "rank,submission_id,name,email,phone,final_score"
+    assert [line.split(",")[1] for line in lines[1:]] == ["s1", "s3"]  # by rank, honors only
+    assert lines[1].split(",")[3] == "s1@example.org"
+    assert lines[1].split(",")[4] == "555-0001"
+
+
+def test_roster_csv_empty_cohort_is_header_only() -> None:
+    result = assign_cohorts([_rec("s1", 1, "honors")], CohortCapacities(), CFG)
+    lines = cohort_roster_csv(result, "intensive").strip().split("\n")
+    assert lines == ["rank,submission_id,name,email,phone,final_score"]
 
 
 def test_csv_is_deterministic() -> None:

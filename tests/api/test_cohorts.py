@@ -196,8 +196,28 @@ def test_upload_cohorts_csv_format_download() -> None:
         resp.headers["content-disposition"] == 'attachment; filename="cohort_assignments.csv"'
     )
     lines = resp.text.strip().split("\n")
-    assert lines[0].startswith("rank,submission_id,name,final_score,status,assigned_tier")
+    assert lines[0].startswith("assigned_tier,rank,submission_id,name,email,phone")
     assert len(lines) == 1 + 3  # one row per RANKED record
+
+
+def test_upload_cohorts_tier_roster_csv_download() -> None:
+    resp = TestClient(_app()).post(
+        "/cohorts", params={"format": "csv", "tier": "honors"}, files=_jsonl_upload(_RECORDS)
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-disposition"] == 'attachment; filename="cohort_honors.csv"'
+    lines = resp.text.strip().split("\n")
+    assert lines[0] == "rank,submission_id,name,email,phone,final_score"
+    # honors members only (s1, s2 by rank); s3 chose regular, "rej" never enters the pool
+    assert [line.split(",")[1] for line in lines[1:]] == ["s1", "s2"]
+
+
+def test_upload_cohorts_unknown_tier_422() -> None:
+    resp = TestClient(_app()).post(
+        "/cohorts", params={"format": "csv", "tier": "platinum"}, files=_jsonl_upload(_RECORDS)
+    )
+    assert resp.status_code == 422
+    assert "Unknown tier" in resp.json()["detail"]
 
 
 def test_upload_cohorts_garbage_line_422_names_line_not_content() -> None:

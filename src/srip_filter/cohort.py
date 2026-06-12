@@ -23,7 +23,7 @@ choice (the realistic case), and recomputation is instant for staff what-if iter
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from .config import AppConfig
 from .models import (
@@ -122,6 +122,8 @@ def assign_cohorts(
                 CohortAssignment(
                     submission_id=record.submission_id,
                     name=record.name,
+                    email=record.email,
+                    phone=record.phone,
                     rank=record.rank,
                     final_score=record.final_score,
                     status="unassignable",
@@ -142,6 +144,8 @@ def assign_cohorts(
                 CohortAssignment(
                     submission_id=record.submission_id,
                     name=record.name,
+                    email=record.email,
+                    phone=record.phone,
                     rank=record.rank,
                     final_score=record.final_score,
                     status="assigned",
@@ -156,6 +160,8 @@ def assign_cohorts(
                 CohortAssignment(
                     submission_id=record.submission_id,
                     name=record.name,
+                    email=record.email,
+                    phone=record.phone,
                     rank=record.rank,
                     final_score=record.final_score,
                     status="waitlisted",
@@ -209,46 +215,91 @@ def assign_cohorts(
 # ================================================================================================
 
 
-def _row_key(entry: CohortAssignment) -> tuple[bool, int, str]:
+def _rank_key(entry: CohortAssignment) -> tuple[bool, int, str]:
     return (entry.rank is None, entry.rank if entry.rank is not None else 0, entry.submission_id)
 
 
-def cohort_assignments_csv(result: CohortResult) -> str:
-    """All buckets as one rank-ordered CSV — one row per ``RANKED`` applicant.
+def _cohort_sort_key(result: CohortResult) -> Callable[[CohortAssignment], tuple]:
+    """Sort key grouping rows by assigned cohort (tier order), then rank within each group.
 
-    Per-tier rosters and the waitlist are filters of this file (``status`` / ``assigned_tier``
-    columns), so staff gets a single download instead of four. ``choices`` shows the normalized
-    preference order joined with `` > ``; ``excluded_by_cost`` lists tiers pruned by the
-    first-choice cost ceiling, joined with `` | ``.
+    Assigned rows come first, grouped in the configured tier order (the ``summary.tiers``
+    insertion order); waitlisted rows follow, then unassignable — so each cohort's roster
+    reads as one contiguous block.
+    """
+    tier_order = {tier: position for position, tier in enumerate(result.summary.tiers)}
+    unplaced = len(tier_order)  # waitlist/unassignable sort after every real tier
+
+    def key(entry: CohortAssignment) -> tuple:
+        group = tier_order.get(entry.assigned_tier or "", unplaced)
+        status_order = (
+            0 if entry.status == "assigned" else 1 if entry.status == "waitlisted" else 2
+        )
+        return (group, status_order, *_rank_key(entry))
+
+    return key
+
+
+def cohort_assignments_csv(result: CohortResult) -> str:
+    """All buckets as one CSV, **grouped by assigned cohort** (tier order, then rank within).
+
+    One row per ``RANKED`` applicant: each tier's roster is a contiguous block, followed by
+    the waitlist and any unassignable rows — so staff can read or split the file by cohort
+    directly. ``choices`` shows the normalized preference order joined with `` > ``;
+    ``excluded_by_cost`` lists tiers pruned by the first-choice cost ceiling, joined with
+    `` | ``.
     """
     header = [
+        "assigned_tier",
         "rank",
         "submission_id",
         "name",
+        "email",
+        "phone",
         "final_score",
         "status",
-        "assigned_tier",
         "choice_number",
         "excluded_by_cost",
         "choices",
         "reason",
     ]
     entries = sorted(
-        [*result.assignments, *result.waitlist, *result.unassignable], key=_row_key
+        [*result.assignments, *result.waitlist, *result.unassignable],
+        key=_cohort_sort_key(result),
     )
     rows: list[list[object]] = [
         [
+            entry.assigned_tier,
             entry.rank,
             entry.submission_id,
             entry.name,
+            entry.email,
+            entry.phone,
             entry.final_score,
             entry.status,
-            entry.assigned_tier,
             entry.choice_number,
             " | ".join(entry.excluded_by_cost),
             " > ".join(entry.choices),
             entry.reason,
         ]
         for entry in entries
+    ]
+    return _write_csv(header, rows)
+
+
+def cohort_roster_filename(tier: str) -> str:
+    """Download filename for one cohort's roster CSV."""
+    return f"cohort_{tier}.csv"
+
+
+def cohort_roster_csv(result: CohortResult, tier: str) -> str:
+    """One cohort's roster: the applicants assigned to ``tier``, by rank, with contact details.
+
+    The staff-facing per-cohort export (name, email, phone) used for outreach once an
+    allocation is settled. Contains only ``assigned`` rows for the requested tier.
+    """
+    header = ["rank", "submission_id", "name", "email", "phone", "final_score"]
+    members = sorted((a for a in result.assignments if a.assigned_tier == tier), key=_rank_key)
+    rows: list[list[object]] = [
+        [a.rank, a.submission_id, a.name, a.email, a.phone, a.final_score] for a in members
     ]
     return _write_csv(header, rows)

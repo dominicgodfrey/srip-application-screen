@@ -44,6 +44,7 @@ GOOD_HEADERS = [
     "What is your email address?",
     "Please list your undergraduate institution of study below.",
     "What is your state of residence?",
+    "What is your phone number?",
     "First Choice",
     "Second Choice (optional)",
     "Third Choice (optional)",
@@ -70,6 +71,13 @@ def test_resolves_all_roles_from_good_headers() -> None:
     assert not res.ambiguous
     # Every contract role is present in the canonical export.
     assert set(res.role_to_header) >= set(REQUIRED_ROLES)
+
+
+def test_phone_role_resolves_and_populates_row() -> None:
+    res = resolve_headers(GOOD_HEADERS)
+    record = {res.role_to_header["phone"]: " (555) 010-0001 "}
+    row = ApplicantRow.from_record(record, res)
+    assert row.phone == "(555) 010-0001"
 
 
 def test_long_columns_matched_by_substring() -> None:

@@ -19,7 +19,12 @@ from fastapi import HTTPException
 from fastapi.responses import Response
 from pydantic import ValidationError
 
-from srip_filter.cohort import COHORT_ASSIGNMENTS_FILE, cohort_assignments_csv
+from srip_filter.cohort import (
+    COHORT_ASSIGNMENTS_FILE,
+    cohort_assignments_csv,
+    cohort_roster_csv,
+    cohort_roster_filename,
+)
 from srip_filter.models import AuditRecord, CohortResult
 
 from .jobs import _HTTP_413_TOO_LARGE, _HTTP_422_UNPROCESSABLE
@@ -66,8 +71,25 @@ def parse_decisions_jsonl(raw: bytes, max_rows: int) -> list[AuditRecord]:
     return records
 
 
-def cohort_response(result: CohortResult, format: CohortFormat) -> Response:
-    """Render an assignment result in the requested form: JSON (default) or the CSV download."""
+def cohort_response(
+    result: CohortResult, format: CohortFormat, tier: str | None = None
+) -> Response:
+    """Render an assignment result: JSON (default), the full cohort-grouped CSV, or — with
+    ``tier`` — one cohort's roster CSV (rank, name, email, phone) for outreach."""
+    if format == "csv" and tier is not None:
+        if tier not in result.summary.tiers:
+            raise HTTPException(
+                status_code=_HTTP_422_UNPROCESSABLE,
+                detail=f"Unknown tier '{tier}'; valid tiers: "
+                f"{', '.join(result.summary.tiers)}.",
+            )
+        return Response(
+            content=cohort_roster_csv(result, tier),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{cohort_roster_filename(tier)}"'
+            },
+        )
     if format == "csv":
         return Response(
             content=cohort_assignments_csv(result),
