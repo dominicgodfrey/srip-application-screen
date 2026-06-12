@@ -4,7 +4,7 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 14 — owner feedback round 2 (policy + UX) — COMPLETE (see Completed)
+Phase 15 — owner feedback round 3 (cohort tooling) — COMPLETE (see Completed)
 
 ## Active Sub-Task
 None — phases 0–14 are complete. Phase 14 (owner feedback, 2026-06-12) delivered: blank-GPA
@@ -583,6 +583,17 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       "(PRD §11)" stripped from the cohort warning. Plus: `/static` now serves
       `Cache-Control: no-cache` (stale-JS fix observed live during verification).
 
+- [x] Phase 15 — owner feedback round 3 (2026-06-12, cohort tooling): (1) cohort source
+      button renamed "Update decisions.jsonl"; (2) `cohort_assignments_csv` is grouped by
+      assigned cohort (tier order, rank within; waitlist/unassignable trail) and carries
+      email + phone; a "Filter by program" select scopes the Assignments table client-side;
+      (3) per-cohort roster CSVs (`cohort_<tier>.csv`: rank, id, name, email, phone, score)
+      via `?format=csv&tier=<name>` on both cohort endpoints (unknown tier → 422) + one
+      download button per tier in the UI. Enabler: new optional `phone` ingest role
+      ("What is your phone number?" — present in the real export, previously ignored),
+      carried ApplicantRow → AuditRecord → CohortAssignment; demo CSV gained a synthetic
+      phone column. (commits: 2438bff core/API, cb8c3bc UI)
+
 ## In Progress
 - (none)
 
@@ -655,6 +666,11 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   Ivan Sokolov (blank GPA) now REJECTED, Dev Shah's detail shows "Applicant's explanation",
   coursework grades show "—" when unstated, nav reads "Cohort Allocation", cohort Source
   names the CSV.
+- Phase 15:  `uv run pytest tests/test_ingest.py tests/test_cohort.py tests/api/test_cohorts.py`
+  (phone role resolution/carry, cohort-grouped CSV order, roster content + empty tier,
+  roster endpoint download + unknown-tier 422). UI: demo server → Cohort Allocation page —
+  "Filter by program" select scopes the table, three "Download <tier> roster CSV" buttons,
+  source form button reads "Update decisions.jsonl".
 
 ---
 

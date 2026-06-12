@@ -52,6 +52,7 @@ Use these column headers verbatim. Quirks discovered in the actual file are note
 | `What is your email address?` | Dedup primary | 6 emails appear >1 time → 6 surplus submissions. |
 | `Please list your undergraduate institution of study below.` | School bonus (§7) | **364/466 = "High School".** Free text; misspellings and non-US names expected. 0 blank. |
 | `What is your state of residence?` | Metadata | — |
+| `What is your phone number?` | Cohort rosters | Optional contact field; carried through the audit record into the per-cohort roster CSVs (name/email/phone) for staff outreach. Not used in any gate or score. |
 | `First Choice`, `Second Choice (optional)`, `Third Choice (optional)` | Future cohort sizing | Values like `Summer 2026- HONORS / INTENSIVE / REGULAR`. Not used for reject/rank; carried into the audit record for the downstream cohort tool. |
 | `GPA` | GPA gate (§6) | **The messiest field.** 394 numeric, 81 of those > 4.5 (weighted / 10-pt / percentage), 43 blank, 19 unparseable free text (`N/A`, `92/100 (Ethiopian National Curriculum)`, `IGCSE grades: A*,A*,A,B...`, `5/5`, `"my school doesn't offer GPAs"`, achievements stuffed into the cell). |
 | `If your cumulative GPA is below 3.3, please briefly describe any extenuating circumstances...` | LLM Task B input | Explanation field. (Form copy still says 3.3; our logic uses 3.0 — applicants between 3.0–3.3 simply won't have filled it, which is fine since they pass.) Often blank. |
