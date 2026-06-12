@@ -77,6 +77,9 @@ From PRD §0. If an implementation choice conflicts with any of these, the princ
   `NEEDS_REVIEW`.
 - **GPA threshold is 3.0 (B average).** Both the deny line and the bottom of the gradient. Do
   not raise or lower it for high schoolers (78% of applicants are high-schoolers).
+  **Hard floor 2.0:** below it, no explanation can rescue — REJECTED with no Task B call.
+  **A blank GPA with a blank explanation is a non-answer → REJECTED** (owner decision
+  2026-06-12); blank-with-explanation or any non-blank unresolvable scale stays NEEDS_REVIEW.
 - **Three outcomes only: `REJECTED`, `RANKED`, `NEEDS_REVIEW`.** No accept/waitlist here.
 - **Auditability is a feature.** Every applicant produces a structured decision record (§9)
   explaining every gate and subscore. It is returned to the user, never stored server-side.

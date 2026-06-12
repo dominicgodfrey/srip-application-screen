@@ -27,13 +27,17 @@
 - **3.0 (a B average) is the threshold.** It is both the deny line and the bottom of the positive-signal range. Do **not** raise or lower it for high schoolers.
 - **GPA ≥ 3.0** passes the gate and earns points on a **gradient** — higher is strictly better. A 3.2 must score meaningfully lower than a 3.7 (see §8.1).
 - **GPA < 3.0** requires an extenuating-circumstances explanation, and **the explanation must scale with how far below 3.0 the GPA is.** A 2.9 needs a modest, realistic reason; a 2.4 needs a strong, concrete one. No explanation → `REJECTED`. Adequate explanation → `RANKED` (scored; the deficit is reflected in a low GPA subscore). Inadequate/unrealistic → `REJECTED`. Adjudicated by **LLM Task B** (§8.2).
+- **GPA < 2.0 is a hard floor (owner decision, 2026-06-12):** automatic `REJECTED` regardless of any explanation — Task B is never called below the floor.
+- **A blank GPA cell with a blank explanation is an affirmative non-answer → `REJECTED`** (owner decision, 2026-06-12). A blank GPA *with* an explanation present, or any non-blank unresolvable scale, still goes to `NEEDS_REVIEW` — never auto-rejected.
 - A B average corresponds to ~83% / 3.0 on the conversion table in §6.1, so "below a B regardless of scale" and "below 3.0" are the same line.
 
 | Normalized GPA (4.0 scale) | No explanation | Explanation present (severity-scaled) |
 |---|---|---|
 | ≥ 3.0 | Pass → gradient points, higher = better | n/a (already passing) |
-| < 3.0 | `REJECTED` | `RANKED` if reason is strong & realistic enough for the deficit; else `REJECTED` |
-| Unscalable / blank | `NEEDS_REVIEW` (human resolves scale, then re-rank) | `NEEDS_REVIEW` |
+| 2.0 ≤ GPA < 3.0 | `REJECTED` | `RANKED` if reason is strong & realistic enough for the deficit; else `REJECTED` |
+| < 2.0 (hard floor) | `REJECTED` | `REJECTED` — no explanation can rescue below the floor |
+| Unscalable (non-blank) | `NEEDS_REVIEW` (human resolves scale, then re-rank) | `NEEDS_REVIEW` |
+| Blank cell | `REJECTED` (non-answer) | `NEEDS_REVIEW` |
 
 ---
 
@@ -116,10 +120,12 @@ Relevance ranking (most → least): **CS > Math > Data > (everything else = igno
 - Data (data science, analytics, ML, databases): slightly weaker positive.
 - Anything else: **ignored, weight 0.** Not a penalty.
 
-Grade rules:
-- Each course grade is normalized with the **same scale logic as §6** (percentage → 4.0, etc.).
-- **A course graded below 80% (≈ B-/2.7) is ignored entirely** (weight 0).
-- A counting course (≥80%) contributes a positive amount **scaled by its grade** — a relevant course with a mediocre-but-passing grade still counts, just less.
+Grade rules (revised per owner decision, 2026-06-12 — grades are exclusion-only):
+- A grade is considered **only when explicitly stated** for that course. A course with no stated
+  grade counts at full weight — never guess or default a grade.
+- **A course explicitly graded below a B (< 85%) is excluded entirely** (weight 0).
+- Any counting course contributes a **flat** amount (`category_weight × COURSE_UNIT`); the grade
+  never scales the bonus up or down.
 
 Bonus only. Empty coursework (56 applicants) → 0 bonus, no penalty.
 
@@ -162,7 +168,11 @@ Normalization output: `{normalized_gpa: float|null, original_scale, conversion_m
 
 ```
 if normalized_gpa is null or requires_manual_review:
+    if gpa_cell is blank and explanation is blank:
+        → REJECTED (reason: "No GPA provided and no explanation given")   # non-answer
     → NEEDS_REVIEW (reason: "GPA scale could not be normalized")     # not a rejection
+elif normalized_gpa < 2.0:                # hard floor
+    → REJECTED (reason: "GPA below the hard floor of 2.0")           # explanation cannot rescue
 elif normalized_gpa >= 3.0:
     → PASS, compute GPA points (§8.1, gradient 3.0 → 4.0)
 else:                                   # below 3.0
@@ -297,9 +307,10 @@ Output schema:
 }
 ```
 
-Coursework bonus (deterministic, from Task C output):
+Coursework bonus (deterministic, from Task C output; flat per-course — grades exclude, never scale):
 ```
-per_course = category_weight * (grade_pct/100) * COURSE_UNIT      # only if counts == true
+counts     = category != "other" and (grade_pct is null or grade_pct >= 85)
+per_course = category_weight * COURSE_UNIT                        # only if counts == true
 coursework_bonus = min(COURSEWORK_BONUS_MAX, sum(per_course))     # default cap 15
 ```
 Empty coursework → 0, no penalty. The `courses[]` array is stored verbatim in the audit record for the future UI.
@@ -405,6 +416,7 @@ len_penalty_max: 5
 
 # GPA
 gpa_threshold: 3.0          # B average; deny line and bottom of the gradient
+gpa_hard_floor: 2.0         # below this no explanation can rescue -> REJECTED
 gpa_score_max: 40
 
 # Essay scoring
@@ -417,7 +429,7 @@ course_weight_cs: 1.0
 course_weight_math: 0.8
 course_weight_data: 0.6
 course_weight_other: 0.0
-course_min_grade_pct: 80
+course_min_grade_pct: 85    # B; an explicit grade below this excludes the course entirely
 course_unit: 3.0
 
 # School (bonus)

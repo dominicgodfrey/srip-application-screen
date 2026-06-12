@@ -4,16 +4,16 @@ Session-to-session memory. See `CLAUDE.md` for how to build, `SRIP_Application_F
 for what to build.
 
 ## Current Phase
-Phase 13 — Audit/UX refinements from the owner's first real-data review — COMPLETE
-(13.1–13.4 landed; see Completed)
+Phase 14 — owner feedback round 2 (policy + UX) — COMPLETE (see Completed)
 
 ## Active Sub-Task
-None — phases 0–13 are complete. Phase 13 (owner feedback, 2026-06-11) delivered: the
-profanity false-positive fix (curated ALLOW list; 0 flags on the reference CSV), auditable
-gate detail (offending tokens / gibberish signals recorded per essay), essays carried on the
-audit record with collapsible display + problem highlighting, a GPA column for every
-candidate, the manual promote-to-RANKED path (rescore + re-rank, audited override), LLM-call
-help bubbles, and a live ETA on the progress bar. Remaining: owner inputs (openissue #1/#2
+None — phases 0–14 are complete. Phase 14 (owner feedback, 2026-06-12) delivered: blank-GPA
+non-answer rejection, the 2.0 GPA hard floor, steeper Task B severity scaling, the
+applicant's rescue explanation + resume link on the audit detail, exclusion-only coursework
+grading (flat bonus, < B excludes, null = unstated), Task C separation guidance + demo-parser
+fix, wave-batched grading for live progress, the "Cohort Allocation" rename, a named CSV
+source + labeled alternate-upload on the cohort page, and a jargon sweep (plain-language
+stage labels everywhere user-visible). Remaining: owner inputs (openissue #1/#2
 key+retention, #3 BLOCK slur list, #6 GPA-normalization NEEDS_REVIEW volume decision) and
 the unscheduled hosting deployment.
 
@@ -561,6 +561,28 @@ with the API. Build in order — fail-fast ordering means later stages depend on
       openissue…" due to a quoting mishap but contains the whole UI change — verified live
       in the browser via the demo server).
 
+- [x] Phase 14 — owner feedback round 2 (2026-06-12), ten items, all landed:
+      (1) blank GPA + blank explanation → REJECTED (non-answer; blank-with-explanation and
+      non-blank unresolvable scales stay NEEDS_REVIEW); (2) the applicant's
+      extenuating-circumstances text is carried on `GpaAssessment.explanation_text` and shown
+      in the audit detail ("Applicant's explanation"); (3) resume link carried on
+      `ResumeAssessment.url` + rendered as an "open resume" link; (4) coursework grades are
+      exclusion-only — explicit grade below a B (< 85) excludes the course, otherwise flat
+      `weight × unit` (grade never scales the bonus); `grade_pct` now nullable (null = no
+      grade stated, never guessed); Task C prompt gained explicit dash-interleaved
+      separation guidance; demo handler parses "Name - A Name2 - B" runs and no longer
+      invents A- grades; (5) `grade_batch` grades rows in bounded waves
+      (`4 × max_concurrency`) so progress ticks steadily instead of sitting at 0 (FIFO
+      semaphore lockstep), upload label "Queued…" → "Starting grading…"; (6) GPA < 2.0 hard
+      floor → REJECTED with no Task B call (`gpa.hard_floor`); (7) Task B system prompt bar
+      steepened (2.7 serious+causal, near-floor exceptional, doubt at large gap → reject);
+      (8) "Cohort what-if" renamed "Cohort Allocation" (nav, title, h1); (9) cohort Source
+      block names the uploaded CSV (job carries `filename`, exposed on `JobStatus`) + a
+      labeled "Use a different decisions.jsonl" subsection; (10) no internal jargon
+      user-visible: stage ids → plain labels in `rejected.csv` and the audit detail,
+      "(PRD §11)" stripped from the cohort warning. Plus: `/static` now serves
+      `Cache-Control: no-cache` (stale-JS fix observed live during verification).
+
 ## In Progress
 - (none)
 
@@ -605,7 +627,8 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   2. PowerShell: `$env:SRIP_DEV_FAKE_LLM = "1"; uv run uvicorn api.main:app --port 8000`
      (or set a real `OPENAI_API_KEY` in `.env` and omit the flag for a true, token-spending run)
   3. Open `http://localhost:8000/` → upload `resources/demo/sample_applications.csv` → progress →
-     summary shows 4 RANKED / 4 REJECTED / 2 NEEDS_REVIEW → all five downloads work
+     summary shows 4 RANKED / 5 REJECTED / 1 NEEDS_REVIEW (Phase 14: blank GPA without an
+     explanation now rejects) → all five downloads work
   4. "Browse audit records" → sort/filter → open a row → gates/GPA/scores/coursework/school/trail
      all render
   5. "Cohort what-if" → set Honors=0 → rank 1 moves to her second choice; re-upload a saved
@@ -625,11 +648,33 @@ with the API. Build in order — fail-fast ordering means later stages depend on
   reject (essay 2 auto-opens flagged), promote it (becomes RANKED + manual override), hover a
   "?" on the LLM-call chips.
 
+- Phase 14:  `uv run pytest tests/gates/test_gpa.py tests/scoring/test_coursework.py
+  tests/test_outputs.py tests/test_pipeline.py` (blank-GPA reject/review split, hard-floor
+  reject with zero LLM calls, explanation_text carry, flat coursework math + null-grade
+  counting, plain-language `failing_stage` labels). UI: demo server → upload demo CSV →
+  Ivan Sokolov (blank GPA) now REJECTED, Dev Shah's detail shows "Applicant's explanation",
+  coursework grades show "—" when unstated, nav reads "Cohort Allocation", cohort Source
+  names the CSV.
+
 ---
 
 ## Notes / Decisions Log
 
 Structural facts only — never real applicant content.
+
+- **Phase 14 policy changes (owner, 2026-06-12), PRD §1/§5/§6.2/§8.4/§10.3 updated to match:**
+  blank GPA + blank explanation = affirmative non-answer → REJECTED (narrow carve-out from
+  "unscoreable → NEEDS_REVIEW"; blank-with-explanation and non-blank unresolvable scales are
+  still NEEDS_REVIEW). GPA hard floor 2.0 (`gpa.hard_floor`) — below it Task B never runs.
+  Coursework grades are exclusion-only: explicit < 85 (below B) excludes the course; counting
+  courses contribute flat `weight × unit`; `min_grade_pct` 80 → 85; `CourseItem.grade_pct` is
+  nullable (null = no grade stated; the model is instructed never to guess one).
+- **Wave-batched grading:** `grade_batch` gathers rows in chunks of `4 × llm.max_concurrency`
+  instead of one global gather — with a FIFO semaphore the global gather finishes no row until
+  nearly all are done, so live progress sat at 0 for most of a run. Waves keep the semaphore
+  saturated; no config knob added (derived from `max_concurrency`).
+- **Static assets:** served with `Cache-Control: no-cache` (ETag revalidation each load) —
+  browsers' heuristic caching kept serving stale JS after UI changes.
 
 - **LLM provider = OpenAI** (cloud, all tasks). PRD text says "Anthropic SDK"; superseded by
   owner decision. Use OpenAI Structured Outputs (strict json_schema → pydantic) as the primary
