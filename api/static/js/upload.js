@@ -54,7 +54,7 @@
       els.uploadNote.textContent = "";
       hide(els.summarySection);
       show(els.progressSection);
-      setProgress(null, null, "Queued…");
+      setProgress(null, null, "Starting grading…");
       poll(body.job_id);
     } catch (err) {
       els.uploadBtn.disabled = false;

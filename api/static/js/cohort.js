@@ -182,7 +182,14 @@
 
   // ----- Initial load ---------------------------------------------------------------
   if (jobId) {
-    els.sourceNote.textContent = "Source: grading job " + jobId;
+    els.sourceNote.textContent = "Source: results from the current grading run.";
+    // Name the uploaded CSV so it's unambiguous which file these results came from.
+    S.api("/jobs/" + encodeURIComponent(jobId)).then((res) => res.json()).then((job) => {
+      if (!sourceFile && job.filename) {
+        els.sourceNote.textContent =
+          "Source: results from the current grading run of “" + job.filename + "”.";
+      }
+    }).catch(() => {});
     recompute();
   }
 })();

@@ -36,6 +36,7 @@ class JobStatus(BaseModel):
 
     job_id: str
     state: JobState
+    filename: str = ""
     rows_done: int
     rows_total: int | None = None
     summary: dict | None = None
@@ -52,6 +53,7 @@ class JobStatus(BaseModel):
         return cls(
             job_id=job.job_id,
             state=job.state,
+            filename=job.filename,
             rows_done=job.rows_done,
             rows_total=job.rows_total,
             summary=summary,

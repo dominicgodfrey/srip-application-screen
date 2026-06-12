@@ -51,6 +51,20 @@ logger = logging.getLogger(__name__)
 
 _HERE = Path(__file__).parent
 
+
+class _RevalidatedStaticFiles(StaticFiles):
+    """StaticFiles that always revalidates (Cache-Control: no-cache).
+
+    Without a Cache-Control header browsers apply heuristic freshness and keep serving a stale
+    app.js/app.css for minutes after a deploy or restart. ``no-cache`` still allows conditional
+    (ETag/304) requests, so the cost is one revalidation round-trip per asset per load.
+    """
+
+    def file_response(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
 # Dev/demo only: launch with SRIP_DEV_FAKE_LLM=1 to wire a zero-spend, no-key FakeLLMClient backed
 # by api.demo.demo_handler, so the whole UI can be demoed end-to-end without an OpenAI key. Never
 # set this in production — it does not call any model.
@@ -120,7 +134,7 @@ def create_app(
     # the JSON API above, so no CORS. Paths are resolved off this file so CWD doesn't matter.
     templates = Jinja2Templates(directory=str(_HERE / "templates"))
     app.state.templates = templates
-    app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
+    app.mount("/static", _RevalidatedStaticFiles(directory=str(_HERE / "static")), name="static")
     register_pages(app, templates)
 
     @app.get("/health", response_model=HealthResponse, tags=["meta"])
@@ -156,7 +170,7 @@ def create_app(
         raw = await read_upload_capped(file, cfg.api.max_upload_bytes)
         validate_csv(raw, cfg)
 
-        job = app.state.registry.create()
+        job = app.state.registry.create(filename=file.filename or "")
         task = asyncio.create_task(run_job(job, raw, client, cfg))
         app.state.background_tasks.add(task)
         task.add_done_callback(app.state.background_tasks.discard)
@@ -267,18 +281,14 @@ def create_app(
                 detail="LLM client is not configured.",
             )
         try:
-            new_result, promoted = await promote_record(
-                job.result, submission_id, client, cfg
-            )
+            new_result, promoted = await promote_record(job.result, submission_id, client, cfg)
         except KeyError:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No applicant with that submission id in this job.",
             ) from None
         except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-            ) from None
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
         job.result = new_result
         return {"record": promoted.model_dump(), "summary": new_result.summary}
 

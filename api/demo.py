@@ -66,28 +66,59 @@ def _task_b(user: str) -> TaskBOutput:
     )
 
 
+# "Name - A Name2 - B+ ..." pattern: course names with letter grades interleaved after dashes.
+_PAIR_RE = re.compile(r"(.+?)\s*-\s*([A-DF][+\-]?\*?)(?=\s+\S|\s*$)")
+# Letter grade -> percentage, mirroring the Task C prompt's conversion table.
+_GRADE_PCT = {
+    "A": 95,
+    "A-": 92,
+    "A+": 97,
+    "B+": 88,
+    "B": 85,
+    "B-": 82,
+    "C+": 78,
+    "C": 75,
+    "C-": 72,
+    "D": 65,
+    "F": 50,
+}
+
+
 def _task_c(user: str) -> TaskCOutput:
-    """Decompose the coursework cell with a light comma split (demo only)."""
+    """Decompose the coursework cell with light splitting (demo only).
+
+    Splits on commas/semicolons/newlines, then unpacks dash-interleaved "Name - A Name2 - B"
+    runs. A course without an explicit grade gets grade_pct=None (never an invented grade) —
+    matching the real Task C contract.
+    """
     # The user prompt wraps the raw cell as COURSEWORK_RAW: """...""" — pull the inner text.
     inner = user
     match = re.search(r'"""(.*)"""', user, flags=re.DOTALL)
     if match:
         inner = match.group(1)
-    fragments = [f.strip() for f in re.split(r"[,\n;]", inner) if f.strip()]
+    pairs: list[tuple[str, str]] = []  # (name, grade_raw); grade_raw "" when unstated
+    for fragment in (f.strip() for f in re.split(r"[,\n;]", inner)):
+        if not fragment:
+            continue
+        dash_pairs = _PAIR_RE.findall(fragment)
+        if dash_pairs:
+            pairs.extend((name.strip(), grade.strip()) for name, grade in dash_pairs)
+        else:
+            pairs.append((fragment, ""))
     courses: list[CourseItem] = []
-    for i, fragment in enumerate(fragments[:6]):  # cap for a tidy demo panel
+    for i, (name, grade_raw) in enumerate(pairs[:8]):  # cap for a tidy demo panel
         category, weight = _CATEGORIES[i % len(_CATEGORIES)]
         courses.append(
             CourseItem(
-                name=fragment[:80],
-                grade_raw="A-",
-                grade_pct=90,
+                name=name[:80],
+                grade_raw=grade_raw,
+                grade_pct=_GRADE_PCT.get(grade_raw.rstrip("*")),
                 category=category,  # type: ignore[arg-type]
                 counts=True,
                 category_weight=weight,
             )
         )
-    return TaskCOutput(courses=courses, rationale="Demo handler: light comma-split decomposition.")
+    return TaskCOutput(courses=courses, rationale="Demo handler: light split decomposition.")
 
 
 def _task_d(user: str) -> TaskDOutput:

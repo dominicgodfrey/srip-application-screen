@@ -131,6 +131,17 @@
   });
 
   // ----- Detail panel ----------------------------------------------------------
+  // Internal pipeline stage ids -> plain-language labels for reviewers.
+  var STAGE_LABELS = {
+    stage1: "essay quality checks",
+    stage2: "GPA normalization",
+    stage3: "GPA gate",
+    stage4: "essay grading",
+    stage8: "final scoring & ranking",
+    manual_override: "manual override",
+  };
+  function stageLabel(stage) { return STAGE_LABELS[stage] || stage; }
+
   function kv(pairs) {
     return '<dl class="kv">' + pairs.map(([k, v]) =>
       "<dt>" + S.esc(k) + "</dt><dd>" + (v === "" || v === null || v === undefined ? "—" : v) + "</dd>"
@@ -174,6 +185,9 @@
       ["Below 3.0", gpa.below_threshold === null ? "—" : S.bool(gpa.below_threshold, false)],
       ["Source", S.esc(gpa.source)],
     ];
+    if (gpa.explanation_text) {
+      gpaPairs.push(["Applicant's explanation", S.esc(gpa.explanation_text)]);
+    }
     if (gpa.explanation_eval) {
       const e = gpa.explanation_eval;
       gpaPairs = gpaPairs.concat([
@@ -213,7 +227,7 @@
       ["Choices", S.esc([choices.first, choices.second, choices.third].filter(Boolean).join(" → "))],
       ["Duplicate email", S.bool(dedup.is_duplicate_email, false)],
       ["Duplicate name", S.bool(dedup.is_duplicate_name, false)],
-      ["Decided at", S.esc(r.decided_at_stage)],
+      ["Decided at", S.esc(stageLabel(r.decided_at_stage))],
       ["Primary reason", S.esc(r.primary_reason)],
     ];
     if (r.manual_override) {
@@ -384,6 +398,10 @@
       ["URL present", S.bool(res.url_present, false)],
       ["Fetch attempted", S.bool(res.attempted, false)],
     ];
+    if (res.url) {
+      pairs.splice(1, 0, ["Resume link",
+        '<a href="' + S.esc(res.url) + '" target="_blank" rel="noopener noreferrer">open resume</a>']);
+    }
     if (res.attempted) {
       pairs = pairs.concat([
         ["Downloaded", S.bool(res.fetched, false)],
@@ -413,8 +431,10 @@
       '<th class="no-sort num">%</th><th class="no-sort">Category</th>' +
       '<th class="no-sort">Counts</th></tr></thead><tbody>' +
       courses.map((c) =>
-        "<tr><td>" + S.esc(c.name) + "</td><td>" + S.esc(c.grade_raw) +
-        '</td><td class="num">' + S.esc(c.grade_pct) + "</td><td>" + S.esc(c.category) +
+        "<tr><td>" + S.esc(c.name) + "</td><td>" + (c.grade_raw ? S.esc(c.grade_raw) : "—") +
+        '</td><td class="num">' +
+        (c.grade_pct === null || c.grade_pct === undefined ? "—" : S.esc(c.grade_pct)) +
+        "</td><td>" + S.esc(c.category) +
         "</td><td>" + S.bool(c.counts) + "</td></tr>").join("") +
       "</tbody></table></div>";
   }

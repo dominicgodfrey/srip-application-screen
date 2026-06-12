@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Cohort what-if — {{ app_title }}{% endblock %}
+{% block title %}Cohort Allocation — {{ app_title }}{% endblock %}
 
 {% block content %}
-<h1 class="page-title">Cohort what-if</h1>
+<h1 class="page-title">Cohort Allocation</h1>
 <p class="muted">Set per-tier seat caps and watch the assignment recompute live. Tiers fill
 strictly by rank; no one is placed above their first-choice (cost-ceiling) tier.</p>
 
@@ -28,8 +28,9 @@ strictly by rank; no one is placed above their first-choice (cost-ceiling) tier.
 
   <div class="section" id="reupload-section">
     <h2 class="section-title">Source</h2>
-    <p class="muted small" id="cohort-source-note">No job loaded — re-upload a saved
-    <code>decisions.jsonl</code> to run a what-if without an active job.</p>
+    <p class="muted small" id="cohort-source-note">No results loaded — upload a saved
+    <code>decisions.jsonl</code> below to run an allocation without an active grading run.</p>
+    <h3 class="subhead">Use a different decisions.jsonl</h3>
     <form id="reupload-form" class="btn-row">
       <input class="form-input" type="file" id="decisions-file" accept=".jsonl,application/x-ndjson" style="max-width: 24rem;">
       <button type="submit" class="btn btn-secondary">Use this decisions.jsonl</button>

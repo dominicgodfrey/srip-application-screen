@@ -50,6 +50,7 @@ class Job:
     job_id: str
     state: JobState
     created_at: float
+    filename: str = ""  # uploaded CSV's name, so the UI can say which file results came from
     rows_total: int | None = None
     rows_done: int = 0
     finished_at: float | None = None
@@ -84,12 +85,13 @@ class JobRegistry:
     def ttl_seconds(self) -> float:
         return self._ttl_seconds
 
-    def create(self, *, now: float | None = None) -> Job:
+    def create(self, *, now: float | None = None, filename: str = "") -> Job:
         """Register a fresh ``QUEUED`` job with a new UUID and return it."""
         job = Job(
             job_id=str(uuid.uuid4()),
             state=JobState.QUEUED,
             created_at=time.monotonic() if now is None else now,
+            filename=filename,
         )
         self._jobs[job.job_id] = job
         return job
