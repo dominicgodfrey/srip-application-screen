@@ -41,6 +41,7 @@ from srip_filter.models import (
 from srip_filter.pipeline import (
     affirmation_ok,
     build_base_record,
+    demote_record,
     grade_batch,
     grade_one,
     promote_record,
@@ -844,6 +845,55 @@ async def test_promote_record_unknown_or_already_ranked() -> None:
         await promote_record(result, "nope", client, APP)
     with pytest.raises(ValueError):
         await promote_record(result, "s-good", client, APP)
+
+
+async def test_demote_record_removes_from_ranking_without_llm_spend() -> None:
+    rows = [_csv_row("s-good"), _csv_row("s-good-2")]
+    client = FakeLLMClient(APP, handler=_good_handler)
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    assert result.summary["counts"]["RANKED"] == 2
+    calls_before = len(client.calls)
+
+    new_result, demoted = demote_record(result, "s-good", APP)
+    assert demoted.outcome == "REJECTED"
+    assert demoted.manual_override is True
+    assert demoted.rank is None and demoted.final_score is None
+    assert demoted.decided_at_stage == "manual_override"
+    assert any(reason.startswith("OVERRIDE:") for reason in demoted.reasons)
+    # Deterministic: not a single LLM call was made for the demotion.
+    assert len(client.calls) == calls_before
+    # The original gate verdicts and subscores stay visible for the audit trail.
+    assert demoted.scores.gpa_points > 0
+    # Population re-ranked, artifacts rebuilt, original result untouched.
+    assert new_result.summary["counts"] == {
+        "total": 2,
+        "RANKED": 1,
+        "REJECTED": 1,
+        "NEEDS_REVIEW": 0,
+    }
+    survivor = next(r for r in new_result.records if r.submission_id == "s-good-2")
+    assert survivor.rank == 1
+    assert result.summary["counts"]["RANKED"] == 2
+
+
+async def test_demote_record_unknown_or_not_ranked() -> None:
+    rows = [_csv_row("s-good"), _csv_row("s-short", essay1="too short")]
+    client = FakeLLMClient(APP, handler=_good_handler)
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    with pytest.raises(KeyError):
+        demote_record(result, "nope", APP)
+    with pytest.raises(ValueError):
+        demote_record(result, "s-short", APP)  # already REJECTED — nothing to demote
+
+
+async def test_demote_then_promote_is_reversible() -> None:
+    rows = [_csv_row("s-good")]
+    client = FakeLLMClient(APP, handler=_good_handler)
+    result = await grade_batch(_csv_bytes(rows), client, APP)
+    after_demote, _ = demote_record(result, "s-good", APP)
+    after_promote, restored = await promote_record(after_demote, "s-good", client, APP)
+    assert restored.outcome == "RANKED"
+    assert after_promote.summary["counts"]["RANKED"] == 1
 
 
 async def test_records_carry_essay_text_for_audit_ui() -> None:

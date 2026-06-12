@@ -231,7 +231,10 @@
       ["Primary reason", S.esc(r.primary_reason)],
     ];
     if (r.manual_override) {
-      metaPairs.push(["Manual override", '<span class="flag-bad">yes — promoted by a reviewer</span>']);
+      const overrideNote = r.outcome === "REJECTED"
+        ? "yes — removed from the ranking by a reviewer"
+        : "yes — promoted by a reviewer";
+      metaPairs.push(["Manual override", '<span class="flag-bad">' + overrideNote + "</span>"]);
     }
     const metaHtml = '<h3 class="subhead">Application</h3>' + kv(metaPairs);
 
@@ -351,11 +354,18 @@
       '" title="' + S.esc(info) + '">?</span></div>';
   }
 
-  // ----- Promote a REJECTED / NEEDS_REVIEW applicant into the ranking ---------------------------
+  // ----- Manual overrides: promote into / demote out of the ranking -----------------------------
 
   function promoteHtml(r) {
-    if (r.outcome === "RANKED") return "";
-    return '<h3 class="subhead">Promote</h3>' +
+    if (r.outcome === "RANKED") {
+      return '<h3 class="subhead">Manual override</h3>' +
+        '<div class="btn-row"><button class="btn btn-danger btn-sm" id="demote-btn" data-id="' +
+        S.esc(r.submission_id) + '">Remove from ranking…</button>' +
+        '<span class="muted small">Marks this applicant rejected as a manual override (no LLM ' +
+        "cost), keeps every gate verdict and subscore visible for the audit trail, and " +
+        "re-ranks everyone else. Reversible — a removed applicant can be promoted back.</span></div>";
+    }
+    return '<h3 class="subhead">Manual override</h3>' +
       '<div class="btn-row"><button class="btn btn-primary btn-sm" id="promote-btn" data-id="' +
       S.esc(r.submission_id) + '">Promote into ranking…</button>' +
       '<span class="muted small">Re-runs every scoring stage on this applicant (spends LLM ' +
@@ -366,6 +376,30 @@
   els.detailBody.addEventListener("click", async (ev) => {
     const help = ev.target.closest(".chip-help");
     if (help) { S.toast(help.dataset.info, ""); return; }
+    const demoteBtn = ev.target.closest("#demote-btn");
+    if (demoteBtn) {
+      const sid = demoteBtn.dataset.id;
+      if (!window.confirm(
+        "Remove this applicant from the ranking?\n\nThey become REJECTED as a manual override " +
+        "and everyone below them moves up. You can promote them back later.")) return;
+      demoteBtn.disabled = true;
+      demoteBtn.textContent = "Removing…";
+      try {
+        const res = await S.api(
+          "/jobs/" + encodeURIComponent(jobId) + "/records/" + encodeURIComponent(sid) + "/demote",
+          { method: "POST" });
+        await res.json();
+        await load(jobId); // ranks shifted for everyone — refetch the whole set
+        const demoted = records.find((x) => x.submission_id === sid);
+        if (demoted) renderDetail(demoted);
+        S.toast("Removed from the ranking (manual override).", "success");
+      } catch (err) {
+        demoteBtn.disabled = false;
+        demoteBtn.textContent = "Remove from ranking…";
+        S.toast(err.detail || "Removal failed.", "danger");
+      }
+      return;
+    }
     const btn = ev.target.closest("#promote-btn");
     if (!btn) return;
     const sid = btn.dataset.id;

@@ -542,3 +542,42 @@ async def promote_record(
         _build_result(records, result.ingest_report, result.rows, result.resolution),
         promoted,
     )
+
+
+def demote_record(
+    result: BatchResult,
+    submission_id: str,
+    cfg: AppConfig,
+) -> tuple[BatchResult, AuditRecord]:
+    """Manually remove one RANKED applicant from the ranking (→ REJECTED) and rebuild artifacts.
+
+    The mirror of :func:`promote_record` for the opposite human call: a reviewer decides a
+    ranked applicant should not be in the pool. Entirely deterministic — no rescore, no LLM
+    spend: every gate verdict and subscore stays on the record for the audit trail; only the
+    outcome flips, with the override recorded (``manual_override=True``, ``OVERRIDE:`` reason).
+    The remaining ``RANKED`` records are re-ranked and the five Stage-9 artifacts rebuilt.
+    A demoted applicant can be re-promoted later via :func:`promote_record` (which accepts any
+    non-RANKED record), so the action is reversible.
+
+    Raises ``KeyError`` if the submission id is unknown, ``ValueError`` if the record is not
+    currently RANKED.
+    """
+    record = next((r for r in result.records if r.submission_id == submission_id), None)
+    if record is None:
+        raise KeyError(submission_id)
+    if record.outcome != "RANKED":
+        raise ValueError("Only a ranked applicant can be demoted.")
+
+    demoted = record.model_copy(deep=True)
+    demoted.manual_override = True
+    demoted.outcome = "REJECTED"
+    demoted.decided_at_stage = "manual_override"
+    demoted.primary_reason = "Manually removed from the ranking by a human reviewer"
+    demoted.reasons.append("OVERRIDE: manually removed from the ranking by a human reviewer")
+
+    records = [demoted if r.submission_id == submission_id else r for r in result.records]
+    rank_records(records, cfg)
+    return (
+        _build_result(records, result.ingest_report, result.rows, result.resolution),
+        demoted,
+    )

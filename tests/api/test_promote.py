@@ -116,3 +116,64 @@ def test_promote_unknown_job_404() -> None:
     with TestClient(_app()) as client:
         resp = client.post("/jobs/no-such-job/records/x/promote")
         assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------------------------
+# Demote — the mirror override: RANKED → REJECTED, no LLM spend
+# --------------------------------------------------------------------------------------------
+
+
+def test_demote_ranked_applicant_out_of_ranking() -> None:
+    rows = [_row("s-good"), _row("s-good-2")]
+    with TestClient(_app()) as client:
+        job_id = _run_to_completion(client, rows)
+        resp = client.post(f"/jobs/{job_id}/records/s-good/demote")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["record"]["outcome"] == "REJECTED"
+        assert body["record"]["manual_override"] is True
+        assert body["record"]["rank"] is None
+        assert body["record"]["final_score"] is None
+        assert "human reviewer" in body["record"]["primary_reason"]
+        assert body["summary"]["counts"] == {
+            "total": 2,
+            "RANKED": 1,
+            "REJECTED": 1,
+            "NEEDS_REVIEW": 0,
+        }
+        # The survivor moved up and the artifacts were rebuilt.
+        ranked = client.get(f"/jobs/{job_id}/results/ranked").text
+        assert "s-good-2" in ranked
+        assert "s-good," not in ranked
+        rejected = client.get(f"/jobs/{job_id}/results/rejected").text
+        assert "s-good" in rejected
+
+
+def test_demote_then_promote_back_is_reversible() -> None:
+    with TestClient(_app()) as client:
+        job_id = _run_to_completion(client, [_row("s-good")])
+        assert client.post(f"/jobs/{job_id}/records/s-good/demote").status_code == 200
+        resp = client.post(f"/jobs/{job_id}/records/s-good/promote")
+        assert resp.status_code == 200
+        assert resp.json()["record"]["outcome"] == "RANKED"
+
+
+def test_demote_not_ranked_409() -> None:
+    rows = [_row("s-good"), _row("s-short", essay1="too short")]  # second REJECTED at Stage 1
+    with TestClient(_app()) as client:
+        job_id = _run_to_completion(client, rows)
+        resp = client.post(f"/jobs/{job_id}/records/s-short/demote")
+        assert resp.status_code == 409
+
+
+def test_demote_unknown_submission_404() -> None:
+    with TestClient(_app()) as client:
+        job_id = _run_to_completion(client, [_row("s-good")])
+        resp = client.post(f"/jobs/{job_id}/records/nope/demote")
+        assert resp.status_code == 404
+
+
+def test_demote_unknown_job_404() -> None:
+    with TestClient(_app()) as client:
+        resp = client.post("/jobs/no-such-job/records/x/demote")
+        assert resp.status_code == 404
