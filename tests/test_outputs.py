@@ -194,3 +194,24 @@ def test_outputs_are_deterministic_across_calls() -> None:
     assert ranked_csv(records) == ranked_csv(records)
     assert rejected_csv(records) == rejected_csv(records)
     assert build_summary(records) == build_summary(records)
+
+
+# ------------------------------------------------------------------------------------------------
+# CSV formula-injection guard
+# ------------------------------------------------------------------------------------------------
+
+
+def test_csv_injection_in_name_is_neutralized() -> None:
+    # An applicant-controlled name beginning with a formula trigger must be rendered as literal
+    # text (prefixed with a single quote) so it can't execute when staff open the CSV in Excel.
+    evil = _rejected("x9", "=HYPERLINK(0)", "stage1", "Essay 1 below hard_min length gate")
+    rows = _parse_csv(rejected_csv([evil]))
+    assert rows[1][1] == "'=HYPERLINK(0)"
+
+
+def test_csv_numeric_cells_are_not_quoted() -> None:
+    # Numbers (rank, scores) are not strings, so they pass through untouched — a negative score
+    # stays a number, not a quoted formula.
+    rows = _parse_csv(ranked_csv([_ranked("r1", "Alice", rank=1, final_score=99.4)]))
+    assert rows[1][0] == "1"  # rank, unquoted
+    assert rows[1][3] == "99.4"  # final_score, unquoted

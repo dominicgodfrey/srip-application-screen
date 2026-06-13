@@ -28,6 +28,13 @@ from .models import AuditRecord
 # Histogram bucket width for the RANKED final_score distribution in summary.json.
 _HISTOGRAM_BUCKET = 10
 
+# Leading characters a spreadsheet (Excel / Google Sheets / LibreOffice) treats as the start of
+# a formula. Applicant-controlled free text (name, choices, reasons) lands in these CSVs and is
+# opened by staff in a spreadsheet, so a cell beginning with one of these is a CSV-injection
+# vector. We neutralize it by prefixing a single quote (the spreadsheet then renders it as
+# literal text). Tab and CR are included per the OWASP guidance.
+_FORMULA_TRIGGERS = frozenset("=+-@\t\r")
+
 # Output filenames (PRD §12).
 DECISIONS_FILE = "decisions.jsonl"
 RANKED_FILE = "ranked.csv"
@@ -40,12 +47,29 @@ def _by_outcome(records: list[AuditRecord], outcome: str) -> list[AuditRecord]:
     return [r for r in records if r.outcome == outcome]
 
 
+def _sanitize_cell(value: object) -> object:
+    """Neutralize spreadsheet formula injection in a string cell (CSV-injection guard).
+
+    A string whose first character is a formula trigger (``= + - @``, tab, CR) is prefixed with a
+    single quote so Excel/Sheets render it as literal text rather than evaluating it. Non-string
+    cells (ints, floats, ``None``) pass through unchanged — a numeric ``-3.0`` is a number, not a
+    formula. Pure function.
+    """
+    if isinstance(value, str) and value and value[0] in _FORMULA_TRIGGERS:
+        return "'" + value
+    return value
+
+
 def _write_csv(header: list[str], rows: list[list[object]]) -> str:
-    """Render a CSV string with a trailing newline per row (``\\r\\n`` disabled for portability)."""
+    """Render a CSV string with a trailing newline per row (``\\r\\n`` disabled for portability).
+
+    Every data cell is run through :func:`_sanitize_cell` so applicant-controlled text can't carry
+    a spreadsheet formula into a staff reviewer's Excel/Sheets. Headers are static and trusted.
+    """
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
     writer.writerow(header)
-    writer.writerows(rows)
+    writer.writerows([_sanitize_cell(cell) for cell in row] for row in rows)
     return buffer.getvalue()
 
 
