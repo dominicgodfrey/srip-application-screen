@@ -104,7 +104,7 @@ committed to the repo. See `CLAUDE.md` → Privacy & Security.
 ---
 
 ## Settled — no action needed (listed so they aren't re-litigated)
-- GPA threshold = **3.0** (PRD §1).
+- GPA threshold = **3.3** (PRD §1; owner raised it from 3.0 on 2026-06-12).
 - LLM provider = **OpenAI**, cloud for all tasks.
 - Resume parsing = **in scope as Phase 12** (owner decision, supersedes the earlier deferral;
   see PLAN.md Phase Map + Notes log). `bonus_max = 10` per PRD §10.1; extraction via `pypdf`;

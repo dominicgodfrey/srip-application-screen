@@ -75,7 +75,7 @@ From PRD §0. If an implementation choice conflicts with any of these, the princ
 - **Never silently reject.** The only path to `REJECTED` is an affirmative hard-gate failure.
   Anything unscoreable (unresolvable GPA scale, parse failure, unchecked affirmation) goes to
   `NEEDS_REVIEW`.
-- **GPA threshold is 3.0 (B average).** Both the deny line and the bottom of the gradient. Do
+- **GPA threshold is 3.3** (owner raised it from 3.0, 2026-06-12). Both the deny line and the bottom of the gradient. Do
   not raise or lower it for high schoolers (78% of applicants are high-schoolers).
   **Hard floor 2.0:** below it, no explanation can rescue — REJECTED with no Task B call.
   **A blank GPA with a blank explanation is a non-answer → REJECTED** (owner decision
@@ -205,7 +205,7 @@ Every PRD §12 invariant must have an explicit test (deterministic, no API spend
 1. No optional-signal absence (resume/school/coursework) ever reduces `final_score`.
 2. No bonus changes a `REJECTED` outcome.
 3. Every `REJECTED` record names the failing gate in `primary_reason`.
-4. Normalized GPA below 3.0 never produces points without an approved Task B explanation, and
+4. Normalized GPA below 3.3 never produces points without an approved Task B explanation, and
    never scores above the bottom of the gradient band.
 5. Ranking is stable across reruns (deterministic tiebreaker; in-run cache hits identical).
 6. Nothing unscoreable is rejected — unresolvable GPA / unchecked affirmation / parse failure
@@ -223,7 +223,7 @@ The LLM client is mocked with a fake in unit tests. A small live suite is gated 
 - Don't let any bonus manufacture or rescue a rejection. Rejections are gated before scoring.
 - Don't silently reject. Unscoreable → `NEEDS_REVIEW`.
 - Don't add an acceptance/waitlist threshold. This system only rejects and ranks (PRD §11).
-- Don't raise/lower the 3.0 GPA threshold for high-schoolers.
+- Don't change the GPA threshold (3.3) without an owner decision in PLAN.md.
 - Don't flag merely-awkward or ESL grammar as gibberish — that's a soft penalty in Task D, not a gate.
 - Don't persist applicant data to disk or a database. Stateless only.
 - Don't weaken the Stage 6 resume guardrails (built in Phase 12): the https-only exact-host

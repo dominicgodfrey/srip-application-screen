@@ -6,7 +6,7 @@
 
 **What this system does (v2 scope):** It does exactly two things — (1) **reject** applications that fail deterministic/hard-gate quality checks, and (2) **score and rank** every surviving application. It does **not** decide acceptances. Acceptance, waitlisting, and cohort assignment are a separate downstream step (§11) that consumes this system's ranked output. The job here is: remove the obviously-weak applications, and produce a defensible ranking of the rest.
 
-**Revision note (v2):** GPA threshold lowered from 3.3 → **3.0 (B average)**; the three-bucket model (deny/accept/waitlist) replaced by **REJECTED / RANKED / NEEDS_REVIEW**; no acceptance threshold; resume parsing explicitly deferred (not yet planned).
+**Revision note (v2):** GPA threshold set to **3.3** (v2 lowered it to 3.0; v3 restored it, owner 2026-06-12); the three-bucket model (deny/accept/waitlist) replaced by **REJECTED / RANKED / NEEDS_REVIEW**; no acceptance threshold; resume parsing explicitly deferred (not yet planned).
 
 ---
 
@@ -24,17 +24,17 @@
 
 ## 1. GPA threshold (settled)
 
-- **3.0 (a B average) is the threshold.** It is both the deny line and the bottom of the positive-signal range. Do **not** raise or lower it for high schoolers.
-- **GPA ≥ 3.0** passes the gate and earns points on a **gradient** — higher is strictly better. A 3.2 must score meaningfully lower than a 3.7 (see §8.1).
-- **GPA < 3.0** requires an extenuating-circumstances explanation, and **the explanation must scale with how far below 3.0 the GPA is.** A 2.9 needs a modest, realistic reason; a 2.4 needs a strong, concrete one. No explanation → `REJECTED`. Adequate explanation → `RANKED` (scored; the deficit is reflected in a low GPA subscore). Inadequate/unrealistic → `REJECTED`. Adjudicated by **LLM Task B** (§8.2).
+- **3.3 is the threshold.** It is both the deny line and the bottom of the positive-signal range. Owner raised it from 3.0 → 3.3 (2026-06-12); do not change it again without a new owner decision.
+- **GPA ≥ 3.3** passes the gate and earns points on a **gradient** — higher is strictly better. A 3.5 must score meaningfully lower than a 3.9 (see §8.1).
+- **GPA < 3.3** requires an extenuating-circumstances explanation, and **the explanation must scale with how far below 3.3 the GPA is.** A 3.2 needs a modest, realistic reason; a 2.4 needs a strong, concrete one. No explanation → `REJECTED`. Adequate explanation → `RANKED` (scored; the deficit is reflected in a low GPA subscore). Inadequate/unrealistic → `REJECTED`. Adjudicated by **LLM Task B** (§8.2).
 - **GPA < 2.0 is a hard floor (owner decision, 2026-06-12):** automatic `REJECTED` regardless of any explanation — Task B is never called below the floor.
 - **A blank GPA cell with a blank explanation is an affirmative non-answer → `REJECTED`** (owner decision, 2026-06-12). A blank GPA *with* an explanation present, or any non-blank unresolvable scale, still goes to `NEEDS_REVIEW` — never auto-rejected.
-- A B average corresponds to ~83% / 3.0 on the conversion table in §6.1, so "below a B regardless of scale" and "below 3.0" are the same line.
+- The 3.3 threshold corresponds to ~87% on the §6.1 conversion table; anyone below 3.3 (including a plain B average of 3.0 / ~83–86%) falls below the line and needs an explanation.
 
 | Normalized GPA (4.0 scale) | No explanation | Explanation present (severity-scaled) |
 |---|---|---|
-| ≥ 3.0 | Pass → gradient points, higher = better | n/a (already passing) |
-| 2.0 ≤ GPA < 3.0 | `REJECTED` | `RANKED` if reason is strong & realistic enough for the deficit; else `REJECTED` |
+| ≥ 3.3 | Pass → gradient points, higher = better | n/a (already passing) |
+| 2.0 ≤ GPA < 3.3 | `REJECTED` | `RANKED` if reason is strong & realistic enough for the deficit; else `REJECTED` |
 | < 2.0 (hard floor) | `REJECTED` | `REJECTED` — no explanation can rescue below the floor |
 | Unscalable (non-blank) | `NEEDS_REVIEW` (human resolves scale, then re-rank) | `NEEDS_REVIEW` |
 | Blank cell | `REJECTED` (non-answer) | `NEEDS_REVIEW` |
@@ -55,7 +55,7 @@ Use these column headers verbatim. Quirks discovered in the actual file are note
 | `What is your phone number?` | Cohort rosters | Optional contact field; carried through the audit record into the per-cohort roster CSVs (name/email/phone) for staff outreach. Not used in any gate or score. |
 | `First Choice`, `Second Choice (optional)`, `Third Choice (optional)` | Future cohort sizing | Values like `Summer 2026- HONORS / INTENSIVE / REGULAR`. Not used for reject/rank; carried into the audit record for the downstream cohort tool. |
 | `GPA` | GPA gate (§6) | **The messiest field.** 394 numeric, 81 of those > 4.5 (weighted / 10-pt / percentage), 43 blank, 19 unparseable free text (`N/A`, `92/100 (Ethiopian National Curriculum)`, `IGCSE grades: A*,A*,A,B...`, `5/5`, `"my school doesn't offer GPAs"`, achievements stuffed into the cell). |
-| `If your cumulative GPA is below 3.3, please briefly describe any extenuating circumstances...` | LLM Task B input | Explanation field. (Form copy still says 3.3; our logic uses 3.0 — applicants between 3.0–3.3 simply won't have filled it, which is fine since they pass.) Often blank. |
+| `If your cumulative GPA is below 3.3, please briefly describe any extenuating circumstances...` | LLM Task B input | Explanation field. (Form copy says 3.3 and our logic now uses 3.3 too, so the field is filled exactly when it is needed.) Often blank. |
 | `Relevant Coursework` | Coursework bonus (§5 / Task C) | 56 blank. Free text, comma-ish separated, grades in mixed scales. |
 | `Resume (optional)` | Resume bonus | S3 URL to a PDF. **148 blank.** Parsing is **not yet planned** — see §7.2. Disabled in current scope. |
 | `LinkedIn (optional)` | Optional metadata | 308 blank. Not scored. |
@@ -124,7 +124,7 @@ Relevance ranking (most → least): **CS > Math > Data > (everything else = igno
 Grade rules (revised per owner decision, 2026-06-12 — grades are exclusion-only):
 - A grade is considered **only when explicitly stated** for that course. A course with no stated
   grade counts at full weight — never guess or default a grade.
-- **A course explicitly graded below a B (< 85%) is excluded entirely** (weight 0).
+- **A course explicitly graded below 80% is excluded entirely** (weight 0).
 - Any counting course contributes a **flat** amount (`category_weight × COURSE_UNIT`); the grade
   never scales the bonus up or down.
 
@@ -144,14 +144,14 @@ Goal: convert as many GPAs to a 4.0-equivalent as possible *deterministically*; 
 - Clear **/5** (`5/5`, `4.5/5`) or **/10** (`8.5/10`, `7.16`) scales: corresponding linear/table conversion.
 - Strip trailing labels (`3.97 GPA`, `3.8/4.0 unweighted`) and parse the number.
 
-**Percentage → 4.0 conversion table (default; tunable). The 3.0 row is the threshold (B average):**
+**Percentage → 4.0 conversion table (default; tunable). The 87–89 → 3.3 row is the gate threshold:**
 
 | Percentage | 4.0 |
 |---|---|
 | 93–100 | 4.0 |
 | 90–92 | 3.7 |
-| 87–89 | 3.3 |
-| 83–86 | **3.0 ← threshold (B)** |
+| 87–89 | **3.3 ← threshold** |
+| 83–86 | 3.0 (B average) |
 | 80–82 | 2.7 |
 | 77–79 | 2.3 |
 | 73–76 | 2.0 |
@@ -163,7 +163,7 @@ Goal: convert as many GPAs to a 4.0-equivalent as possible *deterministically*; 
 
 **Route to `NEEDS_REVIEW`** when even Task A returns `requires_manual_review = true` or `confidence = low` and the value can't be safely placed — e.g. `N/A`, `"my school doesn't offer GPAs"`, blank. **Do not reject for a missing/unscalable scale** — that would false-reject the large legitimate international contingent.
 
-Normalization output: `{normalized_gpa: float|null, original_scale, conversion_method, confidence: high|med|low, below_threshold: bool, requires_manual_review: bool, source: "deterministic"|"llm"}`. (`below_threshold` ≡ `normalized_gpa < 3.0`.)
+Normalization output: `{normalized_gpa: float|null, original_scale, conversion_method, confidence: high|med|low, below_threshold: bool, requires_manual_review: bool, source: "deterministic"|"llm"}`. (`below_threshold` ≡ `normalized_gpa < 3.3`.)
 
 ### 6.2 GPA gate (Stage 3)
 
@@ -174,21 +174,21 @@ if normalized_gpa is null or requires_manual_review:
     → NEEDS_REVIEW (reason: "GPA scale could not be normalized")     # not a rejection
 elif normalized_gpa < 2.0:                # hard floor
     → REJECTED (reason: "GPA below the hard floor of 2.0")           # explanation cannot rescue
-elif normalized_gpa >= 3.0:
-    → PASS, compute GPA points (§8.1, gradient 3.0 → 4.0)
-else:                                   # below 3.0
+elif normalized_gpa >= 3.3:
+    → PASS, compute GPA points (§8.1, gradient 3.3 → 4.0)
+else:                                   # below 3.3
     explanation = <extenuating-circumstances field>
     if explanation is blank:
-        → REJECTED (reason: "GPA below 3.0, no explanation")
+        → REJECTED (reason: "GPA below 3.3, no explanation")
     else:
-        taskB = LLM Task B (normalized_gpa, gap = 3.0 - normalized_gpa, explanation)
+        taskB = LLM Task B (normalized_gpa, gap = 3.3 - normalized_gpa, explanation)
         if taskB.recommended_outcome == "rank":
             → PASS, compute GPA points (will be low; deficit is reflected, not erased)
         else:
             → REJECTED (reason: taskB.rationale)
 ```
 
-The further below 3.0, the higher the bar Task B applies (§8.2).
+The further below 3.3, the higher the bar Task B applies (§8.2).
 
 ---
 
@@ -215,22 +215,22 @@ General rules for all LLM tasks:
 - Temperature ≤ 0.2 for repeatability. Pass `submission_id` through; cache by `(submission_id, sha256(input_text))`.
 
 ### 8.1 GPA points (deterministic, no LLM — listed here for completeness)
-Linear gradient over `[3.0, 4.0]` → `[0, GPA_SCORE_MAX]` (default max 40), capped at 4.0:
+Linear gradient over `[3.3, 4.0]` → `[0, GPA_SCORE_MAX]` (default max 40), capped at 4.0:
 ```
-gpa_points = clamp((normalized_gpa - 3.0) / (4.0 - 3.0), 0, 1) * GPA_SCORE_MAX
+gpa_points = clamp((normalized_gpa - 3.3) / (4.0 - 3.3), 0, 1) * GPA_SCORE_MAX
 ```
-So 3.0 → 0, 3.2 → 8, 3.7 → 28, 4.0 → 40. This makes "a 3.2 less impactful than a 3.7" explicit. (Below 3.0 only reaches scoring via an approved Task B explanation, and lands near the bottom of the gradient — the deficit is reflected, never erased.)
+So 3.3 → 0, 3.65 → 20, 4.0 → 40. This makes "a 3.5 less impactful than a 3.9" explicit. (Below 3.3 only reaches scoring via an approved Task B explanation, and lands near the bottom of the gradient — the deficit is reflected, never erased.)
 
 ### 8.2 LLM Task B — Low-GPA explanation evaluation
-Fires only when normalized GPA < 3.0 **and** an explanation is present.
+Fires only when normalized GPA < 3.3 **and** an explanation is present.
 
 System prompt (essence):
-> You evaluate whether a stated extenuating circumstance justifies keeping (and ranking) an applicant whose GPA is below the 3.0 (B average) bar for a selective software-engineering program. The further the GPA falls below 3.0, the stronger, more specific, and more realistic the circumstance must be. Vague, generic, or implausible reasons are not adequate. You are strict but fair. Output only JSON.
+> You evaluate whether a stated extenuating circumstance justifies keeping (and ranking) an applicant whose GPA is below the 3.3 bar for a selective software-engineering program. The further the GPA falls below 3.3, the stronger, more specific, and more realistic the circumstance must be. Vague, generic, or implausible reasons are not adequate. You are strict but fair. Output only JSON.
 
 User template:
 ```
 NORMALIZED_GPA: {normalized_gpa}
-GAP_BELOW_THRESHOLD: {3.0 - normalized_gpa}
+GAP_BELOW_THRESHOLD: {3.3 - normalized_gpa}
 EXPLANATION: """{explanation_text}"""
 ```
 
@@ -310,7 +310,7 @@ Output schema:
 
 Coursework bonus (deterministic, from Task C output; flat per-course — grades exclude, never scale):
 ```
-counts     = category != "other" and (grade_pct is null or grade_pct >= 85)
+counts     = category != "other" and (grade_pct is null or grade_pct >= 80)
 per_course = category_weight * COURSE_UNIT                        # only if counts == true
 coursework_bonus = min(COURSEWORK_BONUS_MAX, sum(per_course))     # default cap 15
 ```
@@ -366,7 +366,7 @@ Persist as JSON (one record per applicant, JSONL). Source of truth for audits an
   "school_match": {"matched_name": null, "list": null, "fuzzy_score": 0},
 
   "reasons": [
-    "PASS gpa_gate: normalized 4.0 >= 3.0",
+    "PASS gpa_gate: normalized 4.0 >= 3.3",
     "essay1 on-topic, quality 18",
     "coursework: 3 counting courses (2 cs, 1 math)"
   ],
@@ -383,7 +383,7 @@ Persist as JSON (one record per applicant, JSONL). Source of truth for audits an
 
 ```
 final_score =
-      gpa_points            # 0–40  (required signal, gradient 3.0→4.0)
+      gpa_points            # 0–40  (required signal, gradient 3.3→4.0)
     + essay_total           # 0–40  (required signal)
     + coursework_bonus      # 0–15  (bonus)
     + school_bonus          # 0–15  (bonus)
@@ -416,7 +416,7 @@ hard_max: 500
 len_penalty_max: 5
 
 # GPA
-gpa_threshold: 3.0          # B average; deny line and bottom of the gradient
+gpa_threshold: 3.3          # deny line and bottom of the gradient (owner 2026-06-12)
 gpa_hard_floor: 2.0         # below this no explanation can rescue -> REJECTED
 gpa_score_max: 40
 
@@ -430,7 +430,7 @@ course_weight_cs: 1.0
 course_weight_math: 0.8
 course_weight_data: 0.6
 course_weight_other: 0.0
-course_min_grade_pct: 85    # B; an explicit grade below this excludes the course entirely
+course_min_grade_pct: 80    # an explicit grade below this excludes the course entirely
 course_unit: 3.0
 
 # School (bonus)
@@ -472,7 +472,7 @@ This filter **emits a ranked list and a rejection list; it does not accept anyon
   - No optional-signal absence ever reduces `final_score`.
   - No bonus changes a `REJECTED` outcome.
   - Every `REJECTED` record names the failing gate in `primary_reason`.
-  - Normalized GPA below 3.0 never produces points without an approved Task B explanation, and never scores above the bottom of the gradient band.
+  - Normalized GPA below 3.3 never produces points without an approved Task B explanation, and never scores above the bottom of the gradient band.
   - Ranking is stable across reruns (tiebreaker deterministic; cache hits identical).
 
 ---
@@ -482,4 +482,4 @@ This filter **emits a ranked list and a rejection list; it does not accept anyon
 1. **`schools.json`** — curated Top-20 US and Top-50 International lists, frozen per cycle, with a cited ranking source.
 2. **Profanity wordlist** with medical/anatomical exceptions.
 3. **Resume parsing is explicitly unplanned.** Leave the Stage 6 slot as an inert, clearly-labeled TODO stub (`resume_bonus = 0`) until it's designed.
-4. **GPA threshold is settled at 3.0** (§1) — no decision needed; flagged here only so it's not silently re-litigated.
+4. **GPA threshold is 3.3** (§1) — raised from 3.0 by owner decision (2026-06-12).

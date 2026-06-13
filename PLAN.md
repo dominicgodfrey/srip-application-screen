@@ -694,6 +694,24 @@ with the API. Build in order — fail-fast ordering means later stages depend on
 
 Structural facts only — never real applicant content.
 
+- **GPA gate threshold raised 3.0 → 3.3 (owner, 2026-06-12):** `gpa.threshold` is now 3.3 — the
+  deny line AND the bottom of the scoring gradient (so gradient outputs shifted: span is now
+  [3.3, 4.0], e.g. 3.65 → 20, 3.7 → ~22.86, 4.0 → 40). At/above 3.3 passes; 2.0–3.3 needs a
+  sufficient Task B explanation; below the 2.0 hard floor still auto-rejects with no Task B call.
+  The §6.1 percentage→GPA conversion table is unchanged (a reported 85% still normalizes to 3.0,
+  which now falls below the 3.3 line). Config + default + Task B prompt + gpa.py gradient
+  docstrings + tests updated; PRD §1/§6.1/§6.2/§8.1/§8.2/§10.3/§12 and CLAUDE.md aligned to 3.3.
+- **Coursework grade floor reverted 85 → 80 (owner, 2026-06-12):** `coursework.min_grade_pct`
+  is now 80 (was 85). An explicitly-stated grade below 80% excludes the course; ungraded courses
+  still count at full weight. Config + default + `CourseItem.counts` description + tests updated;
+  PRD §5/§8.4/§10.3 aligned to 80 (they were internally inconsistent — §8.4 already said 80).
+  GPA hard floor stays 2.0 (automatic REJECT, no Task B) — unchanged.
+- **CSV formula-injection guard (`outputs._sanitize_cell`):** every data cell in the emitted
+  CSVs (ranked/rejected/needs_review + the cohort CSVs, which share `_write_csv`) that begins
+  with `= + - @`, tab, or CR is prefixed with `'` so applicant-controlled free text (esp. `name`)
+  can't execute as a formula when staff open the file in Excel/Sheets. Numeric cells untouched.
+- **`openai` floor raised 1.40 → 1.50:** the client uses non-beta `chat.completions.parse`
+  (structured outputs), which left `.beta` in openai 1.50. Lock already resolved to 2.41.
 - **Phase 14 policy changes (owner, 2026-06-12), PRD §1/§5/§6.2/§8.4/§10.3 updated to match:**
   blank GPA + blank explanation = affirmative non-answer → REJECTED (narrow carve-out from
   "unscoreable → NEEDS_REVIEW"; blank-with-explanation and non-blank unresolvable scales are
