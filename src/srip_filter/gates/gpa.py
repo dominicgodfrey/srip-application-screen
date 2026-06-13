@@ -270,7 +270,7 @@ async def normalize_gpa(raw: str, client: BaseLLMClient, cfg: AppConfig) -> GpaN
 # ================================================================================================
 # 3.3 — GPA points gradient + deterministic gate paths (Stage 3, PRD §8.1 / §6.2)
 # ================================================================================================
-# gpa_points is the pure §8.1 gradient (3.0 -> 0, 3.7 -> 28, 4.0 -> 40). gpa_gate_deterministic
+# gpa_points is the pure §8.1 gradient (3.3 -> 0, 3.65 -> 20, 4.0 -> 40). gpa_gate_deterministic
 # decides the branches that need no LLM: an unresolved/manual-review scale -> NEEDS_REVIEW (never
 # REJECTED); >= threshold -> PASS + points; < threshold with a blank explanation -> REJECTED. The
 # remaining branch (< threshold WITH an explanation) needs LLM Task B and is wired in Phase 3.4;
@@ -296,7 +296,7 @@ class GpaGateResult:
 def gpa_points(normalized_gpa: float, cfg: GpaConfig) -> float:
     """PRD §8.1 linear gradient over ``[threshold, gpa_max]`` → ``[0, score_max]``, clamped.
 
-    3.0 → 0, 3.7 → 28, 4.0 → 40 with the defaults. Below the threshold clamps to 0; above
+    3.3 → 0, 3.65 → 20, 4.0 → 40 with the defaults. Below the threshold clamps to 0; above
     ``gpa_max`` clamps to ``score_max`` (the normalizer already caps GPA at ``gpa_max``). Pure.
     """
     span = cfg.normalization.gpa_max - cfg.threshold

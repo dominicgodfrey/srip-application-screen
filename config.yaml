@@ -23,7 +23,7 @@ gibberish:
 
 # GPA gate + gradient (Stages 2-3, §8.1)
 gpa:
-  threshold: 3.0        # B average; deny line AND bottom of the scoring gradient
+  threshold: 3.3        # deny line AND bottom of the scoring gradient (owner, 2026-06-12)
   hard_floor: 2.0       # below this no explanation can rescue -> REJECTED (no Task B call)
   score_max: 40         # points awarded at a normalized GPA of 4.0
   # Deterministic normalization (Stage 2, §6.1). A bare value above gpa_max is treated as
@@ -32,7 +32,7 @@ gpa:
   normalization:
     gpa_max: 4.0
     percentage_max: 100
-    percentage_table:   # percentage >= min_pct maps to gpa; the 83 row is the 3.0 (B) threshold
+    percentage_table:   # percentage >= min_pct maps to gpa; the 87 row is the 3.3 threshold
       - {min_pct: 93, gpa: 4.0}
       - {min_pct: 90, gpa: 3.7}
       - {min_pct: 87, gpa: 3.3}

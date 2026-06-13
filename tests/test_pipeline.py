@@ -222,7 +222,7 @@ async def test_survivor_is_ranked_with_full_scores() -> None:
     assert rec.decided_at_stage == "stage8"
     assert rec.final_score is None  # Stage 8 composes the score; grade_one leaves it None
     assert rec.rank is None
-    assert rec.scores.gpa_points == pytest.approx(20.0)  # (3.5 - 3.0)/1.0 * 40
+    assert rec.scores.gpa_points == pytest.approx(40 * (3.5 - 3.3) / (4.0 - 3.3), abs=1e-3)
     assert rec.scores.essay.total == pytest.approx(36.0)  # 18 + 18, no penalties
     assert rec.scores.coursework_bonus == pytest.approx(3.0)  # flat 1.0 * 3.0
     assert rec.scores.school_bonus == 0.0  # "High School" → no match
@@ -513,7 +513,7 @@ async def test_inv4_low_gpa_points_only_with_approval_and_at_gradient_bottom() -
     result = await grade_batch(_csv_bytes(rows), client, APP)
     by_id = {r.submission_id: r for r in result.records}
 
-    # Approved (Task B rank): RANKED, but the sub-3.0 deficit clamps GPA points to the bottom (0).
+    # Approved (Task B rank): RANKED, but the sub-3.3 deficit clamps GPA points to the bottom (0).
     assert by_id["s-low-ok"].outcome == "RANKED"
     assert by_id["s-low-ok"].scores.gpa_points == 0.0
     # No explanation: no points, and rejected rather than scored.
@@ -532,7 +532,7 @@ async def test_inv5_ranking_is_stable_across_reruns() -> None:
     rows = [
         _csv_row("s-hi", gpa="4.0"),
         _csv_row("s-mid", gpa="3.5"),
-        _csv_row("s-lo", gpa="3.1"),
+        _csv_row("s-lo", gpa="3.4"),
     ]
     blob = _csv_bytes(rows)
     first = await grade_batch(blob, FakeLLMClient(APP, handler=_good_handler), APP)
@@ -780,7 +780,7 @@ async def test_rescore_one_bypasses_stage1_gate_and_scores() -> None:
     assert any(reason.startswith("OVERRIDE:") for reason in rec.reasons)
     # Scoring still ran: GPA points and essay subscores are present. The hard-short essay 1
     # still carries the max soft length penalty (18 - 5), essay 2 is clean (18).
-    assert rec.scores.gpa_points == pytest.approx(20.0)
+    assert rec.scores.gpa_points == pytest.approx(40 * (3.5 - 3.3) / (4.0 - 3.3), abs=1e-3)
     assert rec.scores.essay.total == pytest.approx(31.0)
 
 

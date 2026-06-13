@@ -61,7 +61,7 @@ class GpaPercentageBand(_Strict):
     gpa: float
 
 
-# PRD §6.1 default table (the 83-86 → 3.0 row is the B-average threshold).
+# PRD §6.1 default table (the 87-89 → 3.3 row is the gate threshold; 83-86 → 3.0 is a B average).
 _DEFAULT_PERCENTAGE_TABLE: list[GpaPercentageBand] = [
     GpaPercentageBand(min_pct=93, gpa=4.0),
     GpaPercentageBand(min_pct=90, gpa=3.7),
@@ -90,7 +90,7 @@ class GpaNormalizationConfig(_Strict):
 
 
 class GpaConfig(_Strict):
-    threshold: float = 3.0
+    threshold: float = 3.3
     hard_floor: float = 2.0  # below this, no explanation can rescue -> REJECTED outright
     score_max: float = 40.0
     normalization: GpaNormalizationConfig = Field(default_factory=GpaNormalizationConfig)

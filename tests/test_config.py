@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def test_defaults_match_prd() -> None:
     """AppConfig() with no file must equal the PRD §10.3 defaults."""
     cfg = AppConfig()
-    assert cfg.gpa.threshold == 3.0
+    assert cfg.gpa.threshold == 3.3
     assert cfg.gpa.score_max == 40.0
     assert cfg.essay_length.target_min == 100
     assert cfg.essay_length.target_max == 350
@@ -52,7 +52,7 @@ def test_resume_config_defaults() -> None:
 def test_loads_shipped_config_yaml() -> None:
     cfg = load_config(PROJECT_ROOT / "config.yaml")
     assert isinstance(cfg, AppConfig)
-    assert cfg.gpa.threshold == 3.0
+    assert cfg.gpa.threshold == 3.3
     assert cfg.llm.models.task_a == "gpt-4.1-mini"
     assert cfg.llm.models.task_b == "gpt-4.1"
     assert cfg.llm.models.task_c == "gpt-4.1-mini"
@@ -69,7 +69,7 @@ def test_shipped_yaml_matches_defaults() -> None:
 def test_default_path_load() -> None:
     """load_config() with no arg resolves to the project-root config.yaml regardless of CWD."""
     cfg = load_config()
-    assert cfg.gpa.threshold == 3.0
+    assert cfg.gpa.threshold == 3.3
 
 
 def test_unknown_key_is_rejected() -> None:

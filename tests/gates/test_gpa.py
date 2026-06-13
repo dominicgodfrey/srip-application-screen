@@ -50,8 +50,8 @@ def test_clean_four_point_resolved(raw: str, expected: float) -> None:
 
 
 def test_below_threshold_flag() -> None:
-    assert _norm("2.9").below_threshold is True
-    assert _norm("3.0").below_threshold is False
+    assert _norm("3.2").below_threshold is True  # below the 3.3 bar
+    assert _norm("3.3").below_threshold is False
     assert _norm("3.5").below_threshold is False
 
 
@@ -296,7 +296,8 @@ async def test_identical_raw_dedups_within_run() -> None:
 
 @pytest.mark.parametrize(
     "g,expected",
-    [(3.0, 0.0), (3.2, 8.0), (3.5, 20.0), (3.7, 28.0), (4.0, 40.0)],
+    # gradient over [3.3, 4.0] -> [0, 40]: 3.0 clamps to 0, 3.3 -> 0, 3.65 (midpoint) -> 20.
+    [(3.0, 0.0), (3.3, 0.0), (3.65, 20.0), (4.0, 40.0)],
 )
 def test_gpa_points_gradient(g: float, expected: float) -> None:
     assert gpa_points(g, CFG) == pytest.approx(expected)
@@ -315,13 +316,13 @@ def test_gate_pass_at_or_above_threshold() -> None:
     res = gpa_gate_deterministic("3.7", _resolved_norm(3.7), "", CFG)
     assert res is not None
     assert res.verdict == "pass"
-    assert res.gpa_points == pytest.approx(28.0)
+    assert res.gpa_points == pytest.approx(40 * (3.7 - 3.3) / (4.0 - 3.3), abs=1e-3)
     assert res.gate.passed is True
     assert res.assessment.normalized_gpa == pytest.approx(3.7)
 
 
 def test_gate_exactly_threshold_passes_with_zero_points() -> None:
-    res = gpa_gate_deterministic("3.0", _resolved_norm(3.0), "", CFG)
+    res = gpa_gate_deterministic("3.3", _resolved_norm(3.3), "", CFG)
     assert res is not None
     assert res.verdict == "pass"
     assert res.gpa_points == 0.0
@@ -415,7 +416,7 @@ async def test_assess_deterministic_pass_makes_no_llm_call() -> None:
     client = _client(_dispatch())
     res = await assess_gpa(_row("3.7"), client, APP)
     assert res.verdict == "pass"
-    assert res.gpa_points == pytest.approx(28.0)
+    assert res.gpa_points == pytest.approx(40 * (3.7 - 3.3) / (4.0 - 3.3), abs=1e-3)
     assert client.calls == []
 
 
@@ -476,7 +477,7 @@ async def test_assess_task_b_parse_failure_needs_review_never_rejects() -> None:
 
 
 async def test_invariant_below_threshold_never_scores_above_gradient_bottom() -> None:
-    # Even an approved sub-3.0 applicant never earns points above the bottom (0) of the band.
+    # Even an approved sub-3.3 applicant never earns points above the bottom (0) of the band.
     client = _client(_dispatch(task_b=_task_b("rank")))
     for gpa in ("2.9", "2.5", "2.0"):  # >= hard_floor; below it Task B never fires
         res = await assess_gpa(_row(gpa, "documented hardship"), client, APP)

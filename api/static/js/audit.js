@@ -182,7 +182,7 @@
       ["Scale", S.esc(gpa.original_scale)],
       ["Method", S.esc(gpa.conversion_method)],
       ["Confidence", S.esc(gpa.confidence)],
-      ["Below 3.0", gpa.below_threshold === null ? "—" : S.bool(gpa.below_threshold, false)],
+      ["Below 3.3", gpa.below_threshold === null ? "—" : S.bool(gpa.below_threshold, false)],
       ["Source", S.esc(gpa.source)],
     ];
     if (gpa.explanation_text) {
@@ -330,8 +330,8 @@
       "percentage, foreign scale) into a 4.0-scale equivalent. Runs only when the deterministic " +
       "parser could not resolve the value.",
     task_b: "Task B — low-GPA explanation review. Judges whether the applicant's extenuating-" +
-      "circumstances explanation justifies ranking them despite a GPA below 3.0. The further " +
-      "below 3.0, the stronger the reason must be.",
+      "circumstances explanation justifies ranking them despite a GPA below 3.3. The further " +
+      "below 3.3, the stronger the reason must be.",
     task_c: "Task C — coursework extraction. Splits the free-text coursework list into individual " +
       "courses, classifies each as CS / math / data / other, and normalizes the grades. Feeds the " +
       "coursework bonus (additive only).",

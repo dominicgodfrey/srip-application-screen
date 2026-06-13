@@ -196,12 +196,12 @@ def test_ranking_stable_across_reruns() -> None:
 # A single synthetic population spanning all three outcomes, asserting the five §12 invariants
 # end-to-end at the aggregate/output level. (The full pipeline pass over a CSV is Phase 8.)
 # Note GPA points are an input to this stage (computed in gpa.py); §12 #4 is pinned here at the
-# composition level — a sub-3.0/approved applicant arrives with gpa_points at the gradient bottom
+# composition level — an approved sub-threshold applicant arrives at the gradient bottom (0)
 # and the aggregate must carry, never inflate, it.
 
 
 def _population() -> list[AuditRecord]:
-    """Mixed cohort: two clean RANKED, one approved sub-3.0 RANKED, one REJECTED, one
+    """Mixed cohort: two clean RANKED, one approved sub-threshold RANKED, one REJECTED, one
     NEEDS_REVIEW — REJECTED/NEEDS_REVIEW carry maxed bonuses to prove they stay unscored."""
     rejected = _rec("rej", outcome="REJECTED", gpa_points=40.0, essay_total=40.0, school_bonus=15.0)
     rejected.decided_at_stage = "stage1"
@@ -211,7 +211,7 @@ def _population() -> list[AuditRecord]:
     return [
         _rec("top", gpa_points=40.0, essay_total=38.0, coursework_bonus=9.0, school_bonus=15.0),
         _rec("mid", gpa_points=28.0, essay_total=30.0),
-        # Approved sub-3.0: gpa_points floored to the gradient bottom (0); essays + bonuses only.
+        # Approved sub-threshold: gpa_points at the gradient bottom (0); essays + bonuses only.
         _rec("low", gpa_points=0.0, essay_total=25.0, coursework_bonus=5.0),
         rejected,
         review,
@@ -247,7 +247,7 @@ def test_invariant_3_every_rejected_names_the_gate() -> None:
 
 
 def test_invariant_4_sub_threshold_gpa_lands_at_gradient_bottom() -> None:
-    """§12 #4: an approved sub-3.0 applicant scores no GPA points (gradient bottom) and ranks
+    """§12 #4: an approved sub-threshold applicant scores no GPA points (gradient bottom) and ranks
     strictly below an otherwise-identical applicant with positive GPA points."""
     pop = _population()
     rank_records(pop, CFG)
@@ -257,7 +257,7 @@ def test_invariant_4_sub_threshold_gpa_lands_at_gradient_bottom() -> None:
     assert low.final_score == 30.0  # 0 + 25 essays + 5 coursework
     top = next(r for r in pop if r.submission_id == "top")
     mid = next(r for r in pop if r.submission_id == "mid")
-    assert top.rank < mid.rank < low.rank  # the sub-3.0 applicant sorts to the bottom
+    assert top.rank < mid.rank < low.rank  # the sub-threshold applicant sorts to the bottom
 
 
 def test_invariant_5_ranking_stable_across_reruns_population() -> None:
