@@ -23,7 +23,7 @@ def test_defaults_match_prd() -> None:
     assert cfg.essay_scoring.quality_max_each == 20
     assert cfg.essay_scoring.grammar_penalty_max == 3
     assert cfg.coursework.bonus_max == 15.0
-    assert cfg.coursework.min_grade_pct == 85.0  # B; explicit grade below this excludes
+    assert cfg.coursework.min_grade_pct == 80.0  # explicit grade below this excludes
     assert cfg.school.bonus_us_top20 == 15.0
     assert cfg.school.bonus_intl_top50 == 12.0
     assert cfg.school.fuzzy_match_threshold == 88

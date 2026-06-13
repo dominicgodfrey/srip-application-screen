@@ -107,16 +107,16 @@ def test_other_category_contributes_zero() -> None:
     assert r.courses[0].category_weight == pytest.approx(CFG.weight_other)
 
 
-def test_explicit_grade_below_b_excludes_course() -> None:
-    # 82 (B-) < 85 (B) floor -> the course is excluded entirely, even for CS.
-    r = coursework_bonus(_task_c(_course(category="cs", grade_pct=82)), CFG)
+def test_explicit_grade_below_floor_excludes_course() -> None:
+    # 78 (C+) < 80 floor -> the course is excluded entirely, even for CS.
+    r = coursework_bonus(_task_c(_course(category="cs", grade_pct=78)), CFG)
     assert r.bonus == 0.0
     assert r.courses[0].counts is False
 
 
 def test_grade_at_floor_counts() -> None:
-    # exactly a B (85) counts at the flat contribution: 1.0 * 3.0 = 3.0
-    r = coursework_bonus(_task_c(_course(category="cs", grade_pct=85)), CFG)
+    # exactly the floor (80) counts at the flat contribution: 1.0 * 3.0 = 3.0
+    r = coursework_bonus(_task_c(_course(category="cs", grade_pct=80)), CFG)
     assert r.bonus == pytest.approx(3.0)
     assert r.courses[0].counts is True
 

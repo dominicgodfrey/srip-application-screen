@@ -107,7 +107,7 @@ class CourseworkConfig(_Strict):
     weight_math: float = 0.8
     weight_data: float = 0.6
     weight_other: float = 0.0
-    min_grade_pct: float = 85.0  # B; an explicit grade below this excludes the course
+    min_grade_pct: float = 80.0  # an explicit grade below this excludes the course
     unit: float = 3.0
 
 

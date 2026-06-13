@@ -82,7 +82,7 @@ class CourseItem(_Model):
     )
     category: CourseCategory
     counts: bool = Field(
-        description="False if category == 'other' or an explicit grade falls below a B."
+        description="False if category == 'other' or an explicit grade falls below the floor."
     )
     category_weight: float = Field(
         ge=0.0,
