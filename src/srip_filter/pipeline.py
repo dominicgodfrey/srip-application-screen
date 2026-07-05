@@ -636,19 +636,27 @@ async def grade_webhook_applicant(
     client: BaseLLMClient,
     cfg: AppConfig,
     fetcher: ResumeFetcher | None = None,
+    *,
+    bypass_gates: bool = False,
 ) -> AuditRecord:
     """Grade one webhook application through the v3 fail-fast pipeline (PRD v3 §4).
 
     Returns a terminal record: ``REJECTED``/``NEEDS_REVIEW`` unscored, or ``RANKED`` with
     ``final_score`` composed (rank stays None — computed at read time per cohort, §7).
     Per-row isolation: any unexpected error → ``NEEDS_REVIEW`` with an ``errors[]`` note.
+
+    ``bypass_gates`` is the manual-promote path (PRD v3 §6, the v2 ``rescore_one``
+    semantics): every gate verdict is still computed and recorded in the audit blocks,
+    but none is terminal — unscoreable signals contribute 0 and the record leaves as
+    ``RANKED`` with ``manual_override=True``. Never used by the worker.
     """
     record = _build_webhook_base_record(applicant)
     row = applicant.row
     try:
         # A payload that did not deliver two required essays is unscoreable — NEEDS_REVIEW
         # before any gate could misread the blanks as an applicant failure (§0.7).
-        if applicant.missing_required_essays:
+        essays_scoreable = not applicant.missing_required_essays
+        if applicant.missing_required_essays and not bypass_gates:
             return _terminal(
                 record,
                 "NEEDS_REVIEW",
@@ -662,7 +670,9 @@ async def grade_webhook_applicant(
         record.gates.profanity = stage1.profanity
         record.gates.gibberish = stage1.gibberish
         if stage1.rejected:
-            return _terminal(record, "REJECTED", _STAGE_1, stage1.primary_reason)
+            if not bypass_gates:
+                return _terminal(record, "REJECTED", _STAGE_1, stage1.primary_reason)
+            record.reasons.append(f"OVERRIDE: stage1 gate bypassed ({stage1.primary_reason})")
 
         # Stage 2-3 — GPA (structured input; weighted-only forces Task A).
         gpa = await assess_gpa(row, client, cfg, force_task_a=applicant.force_task_a)
@@ -672,35 +682,50 @@ async def grade_webhook_applicant(
             record.llm_calls.append("task_a")
         if gpa.assessment.explanation_eval is not None:
             record.llm_calls.append("task_b")
-        if gpa.verdict == "reject":
+        if gpa.verdict == "reject" and not bypass_gates:
             return _terminal(record, "REJECTED", _STAGE_3, gpa.reason)
-        if gpa.verdict == "needs_review":
+        if gpa.verdict == "needs_review" and not bypass_gates:
             return _terminal(record, "NEEDS_REVIEW", _STAGE_3, gpa.reason)
-        record.scores.gpa_points = gpa.gpa_points
-        record.reasons.append(f"PASS gpa_gate: {gpa.gate.reason}")
+        if gpa.verdict == "pass":
+            record.scores.gpa_points = gpa.gpa_points
+            record.reasons.append(f"PASS gpa_gate: {gpa.gate.reason}")
+        else:  # bypassed reject/needs_review: unscoreable GPA contributes 0, never blocks
+            record.scores.gpa_points = 0.0
+            record.reasons.append(f"OVERRIDE: gpa gate bypassed ({gpa.reason}); 0 points")
 
         # Stage 4 — required essays (Task D ×2), 0-15 each; prompts + target ranges come
         # from the payload itself, so they can never drift from the live form.
-        stage4 = await grade_essays(
-            row,
-            stage1.length_penalty_e1,  # always 0.0 in v3 (soft ramp retired)
-            stage1.length_penalty_e2,
-            applicant.e1.question or "(essay question not delivered in payload)",
-            applicant.e2.question or "(essay question not delivered in payload)",
-            client,
-            cfg,
-            target_range_e1=applicant.e1.target_range,
-            target_range_e2=applicant.e2.target_range,
-        )
-        record.llm_calls.extend(("task_d_e1", "task_d_e2"))
-        record.gates.essay_relevance = stage4.essay_relevance
-        record.gates.gibberish = _reconcile_gibberish(stage1, stage4)
-        if stage4.verdict == "reject":
-            return _terminal(record, "REJECTED", _STAGE_4, stage4.primary_reason)
-        if stage4.verdict == "needs_review":
-            return _terminal(record, "NEEDS_REVIEW", _STAGE_4, stage4.primary_reason)
-        record.scores.essay = stage4.subscores
-        record.reasons.append(f"essays on-topic; quality total {stage4.subscores.total}")
+        if essays_scoreable:
+            stage4 = await grade_essays(
+                row,
+                stage1.length_penalty_e1,  # always 0.0 in v3 (soft ramp retired)
+                stage1.length_penalty_e2,
+                applicant.e1.question or "(essay question not delivered in payload)",
+                applicant.e2.question or "(essay question not delivered in payload)",
+                client,
+                cfg,
+                target_range_e1=applicant.e1.target_range,
+                target_range_e2=applicant.e2.target_range,
+            )
+            record.llm_calls.extend(("task_d_e1", "task_d_e2"))
+            record.gates.essay_relevance = stage4.essay_relevance
+            record.gates.gibberish = _reconcile_gibberish(stage1, stage4)
+            if stage4.verdict == "reject" and not bypass_gates:
+                return _terminal(record, "REJECTED", _STAGE_4, stage4.primary_reason)
+            if stage4.verdict == "needs_review" and not bypass_gates:
+                return _terminal(record, "NEEDS_REVIEW", _STAGE_4, stage4.primary_reason)
+            record.scores.essay = stage4.subscores
+            if stage4.verdict == "pass":
+                record.reasons.append(
+                    f"essays on-topic; quality total {stage4.subscores.total}"
+                )
+            else:
+                record.reasons.append(
+                    f"OVERRIDE: essay gate bypassed ({stage4.primary_reason}); "
+                    "gated essays score 0"
+                )
+        else:  # bypass with missing essays: nothing to grade, contributes 0
+            record.reasons.append("OVERRIDE: required essays missing from payload; essays 0")
 
         # Stage 4b — technical-essay bonus (Task F; bonus-only, absent → free no-op).
         stage4b = await score_technical_essay(
@@ -750,8 +775,13 @@ async def grade_webhook_applicant(
 
         # Survivor — compose the score now (Stage 8); rank is read-time, per cohort (§7).
         record.outcome = "RANKED"
-        record.decided_at_stage = _STAGE_8
-        record.primary_reason = "Survived all gates"
+        if bypass_gates:
+            record.manual_override = True
+            record.decided_at_stage = "manual_override"
+            record.primary_reason = "Manually promoted into the ranking"
+        else:
+            record.decided_at_stage = _STAGE_8
+            record.primary_reason = "Survived all gates"
         finalize_score(record, cfg)
         return record
     except Exception as exc:  # per-row isolation (invariant #9)

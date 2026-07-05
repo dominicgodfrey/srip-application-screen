@@ -36,6 +36,7 @@ from srip_filter.models import CohortCapacities, CohortResult
 from srip_filter.pipeline import demote_record, make_grade_fn, promote_record
 from srip_filter.worker import run_worker
 
+from .admin_api import register_admin_api
 from .auth import (
     SESSION_COOKIE,
     LoginThrottle,
@@ -186,6 +187,7 @@ def create_app(
             s for s in (env.ats_webhook_secret, env.ats_webhook_secret_previous) if s
         )
     register_webhooks(app)
+    register_admin_api(app)  # v3 (P6): DB-backed review endpoints, session-gated by P5
 
     # -- Server-rendered UI shell (Phase 10; created before auth so /login can render) -----------
     # Same-origin Jinja2 templates + static assets; the browser drives everything via fetch

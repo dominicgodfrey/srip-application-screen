@@ -163,6 +163,37 @@ def artifact_response(result: BatchResult, artifact: ArtifactName) -> Response:
     )
 
 
+def artifact_response_from_records(records: list, artifact: ArtifactName) -> Response:
+    """v3 (P6): the same five artifacts, generated on demand from live DB records.
+
+    The DB is the source of truth in v3, so an export serializes whatever the caller just
+    read (already ranked at read time) instead of a stored :class:`BatchResult`.
+    """
+    from srip_filter.outputs import (
+        build_summary,
+        decisions_jsonl,
+        needs_review_csv,
+        ranked_csv,
+        rejected_csv,
+    )
+
+    builders = {
+        ArtifactName.DECISIONS: decisions_jsonl,
+        ArtifactName.RANKED: ranked_csv,
+        ArtifactName.REJECTED: rejected_csv,
+        ArtifactName.NEEDS_REVIEW: needs_review_csv,
+        ArtifactName.SUMMARY: build_summary,
+    }
+    payload = builders[artifact](records)
+    _, filename, media_type = _ARTIFACTS[artifact]
+    content = json.dumps(payload, indent=2) if artifact is ArtifactName.SUMMARY else payload
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 async def sweeper_loop(registry: JobRegistry, interval_seconds: float) -> None:
     """Periodically evict expired jobs so PII-bearing results aren't held past their TTL.
 

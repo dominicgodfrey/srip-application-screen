@@ -118,3 +118,31 @@ def rank_records(records: list[AuditRecord], cfg: AppConfig) -> list[AuditRecord
         record.rank = position
 
     return records
+
+
+# ================================================================================================
+# v3 (P6) — read-time, per-cohort ranking (PRD v3 §7)
+# ================================================================================================
+# Rank is NEVER stored in the DB: it is assigned here on every read, scoped per cohort_name,
+# so the ranking is always live as new applications arrive. Same deterministic tiebreaker as
+# rank_records; already-graded records keep their stored final_score (no recomposition — the
+# score was composed at grade time; changing config between grades must not silently reshuffle
+# stored scores).
+
+
+def assign_read_time_ranks(records: list[AuditRecord]) -> list[AuditRecord]:
+    """Assign ``rank`` 1..N per ``cohort_name`` to RANKED records. Mutates + returns the list.
+
+    Non-RANKED records get ``rank=None``. Deterministic and idempotent (§10 invariant #5):
+    the same records always produce the same ranks, regardless of input order.
+    """
+    by_cohort: dict[str, list[AuditRecord]] = {}
+    for record in records:
+        if record.outcome == "RANKED" and record.final_score is not None:
+            by_cohort.setdefault(record.cohort_name, []).append(record)
+        else:
+            record.rank = None
+    for cohort_records in by_cohort.values():
+        for position, record in enumerate(sorted(cohort_records, key=_rank_sort_key), start=1):
+            record.rank = position
+    return records

@@ -147,9 +147,23 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
       barrier via an autouse conftest fixture (`real_auth` marker opts into the real
       thing); 14 new auth tests.
 
+- [x] P6a — DB-backed admin API: `assign_read_time_ranks` (per-cohort, never stored;
+      scoring/aggregate.py), `bypass_gates` mode on `grade_webhook_applicant` (the v2
+      rescore_one semantics: gates recorded-but-bypassed, unscoreable → 0,
+      manual_override=True), `api/admin_api.py` under `/api/*`: applications list
+      (+counts+cohorts), detail (rank read-time), promote (full re-score, 409 for
+      ranked/ungraded/resume-only), demote (deterministic, reversible), delete (204/404,
+      tombstoned), exports (five artifacts from live DB via
+      `artifact_response_from_records`, `?cohort=` scoping), live cohort what-if,
+      `/api/summary`. Manual overrides append events with `decided_by="admin"`.
+      12 endpoint tests over a fake store.
+
 ## In Progress
-- [ ] P6 — review UI re-point (live dashboard over DB, audit detail, promote/demote,
-      needs-review queue, exports, per-submission delete, close-cycle stub).
+- [ ] P6b — UI re-point: new live dashboard page (replaces the CSV upload screen as `/`),
+      audit browser + cohort screen fetch from `/api/*` instead of job artifacts,
+      logout button in the navbar, retire the v2 upload/job screens + `/jobs` routes +
+      registry (and their tests) once the new screens cover the workflows. Close-cycle
+      action stub pending WEBSITE_ASKS #13.
 
 ## Owner inputs needed (v3)
 - [ ] **Create the Neon project/database** (separate from the website's) + a dev branch;
@@ -167,6 +181,7 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
 - P4: `uv run pytest tests/test_pipeline_v3.py tests/test_ingest_webhook.py
   tests/scoring/test_technical_essay.py -q` — 32 passed; full suite 521 passed.
 - P5: `uv run pytest tests/api/test_auth.py -q` — 14 passed; full suite 536 passed.
+- P6a: `uv run pytest tests/api/test_admin_api.py -q` — 12 passed; full suite 547 passed.
 
 ---
 
