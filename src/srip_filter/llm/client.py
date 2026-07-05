@@ -22,7 +22,7 @@ import inspect
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from typing import Literal, TypeVar, cast
+from typing import Literal, Protocol, TypeVar, cast
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel
@@ -35,6 +35,20 @@ FakeHandler = Callable[[str, str, type[BaseModel]], "BaseModel | Awaitable[BaseM
 T = TypeVar("T", bound=BaseModel)
 
 logger = logging.getLogger(__name__)
+
+
+class CacheBackend(Protocol):
+    """Durable second-level cache behind the in-run dict (P3, PRD v3 §5).
+
+    The Postgres implementation is :class:`srip_filter.db.PgCacheBackend`; tests use a
+    dict-backed fake. ``get`` returns the previously stored ``model_dump`` payload (or
+    None); the client re-validates it into the task schema, so a corrupt row degrades to
+    a cache miss, never a crash.
+    """
+
+    async def get(self, task: str, input_sha256: str) -> dict | None: ...
+
+    async def put(self, task: str, input_sha256: str, output: dict, model: str) -> None: ...
 
 
 class LLMParseFailure(Exception):
@@ -60,6 +74,9 @@ class BaseLLMClient(ABC):
         self._config = config
         self._cache: dict[tuple[str, str], BaseModel] = {}
         self._semaphore = asyncio.Semaphore(config.llm.max_concurrency)
+        # Optional durable cache (P3). Settable, not a constructor arg, so the many
+        # existing FakeLLMClient call sites stay untouched; None preserves v2 behavior.
+        self.cache_backend: CacheBackend | None = None
 
     def model_for(self, task: TaskName) -> str:
         """Resolve the pinned model id for a task from config."""
@@ -80,17 +97,34 @@ class BaseLLMClient(ABC):
     ) -> T:
         """Run a structured task and return the parsed model.
 
-        Cached for this client's lifetime by ``(task, sha256(cache_text))``, defaulting to the
-        user prompt, so identical inputs and retries do not re-bill within a run.
+        Two cache levels, same key ``(task, sha256(cache_text or user))``: the in-run dict
+        (free retries within a process lifetime), then the optional durable backend —
+        Postgres ``llm_cache`` in production — so re-grades re-bill only changed fields
+        (PRD v3 §2.3). A backend row that fails schema validation degrades to a miss.
         """
         key = self._cache_key(task, cache_text if cache_text is not None else user)
         cached = self._cache.get(key)
         if cached is not None:
             logger.debug("LLM cache hit task=%s", task)
             return cast(T, cached)
+        if self.cache_backend is not None:
+            stored = await self.cache_backend.get(key[0], key[1])
+            if stored is not None:
+                try:
+                    result = schema.model_validate(stored)
+                except Exception:  # corrupt/stale row: treat as a miss, re-bill honestly
+                    logger.warning("durable LLM cache row invalid task=%s; ignoring", task)
+                else:
+                    logger.debug("durable LLM cache hit task=%s", task)
+                    self._cache[key] = result
+                    return result
         async with self._semaphore:
             result = await self._complete_with_retry(task, system, user, schema)
         self._cache[key] = result
+        if self.cache_backend is not None:
+            await self.cache_backend.put(
+                key[0], key[1], result.model_dump(mode="json"), self.model_for(task)
+            )
         return result
 
     async def _complete_with_retry(

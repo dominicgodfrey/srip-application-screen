@@ -196,6 +196,12 @@ class DbConfig(_Strict):
     pool_max_size: int = 5
 
 
+class WorkerConfig(_Strict):
+    """Grading-worker loop knobs (P3)."""
+
+    poll_seconds: float = 2.0  # idle sleep between queue polls (stop wakes it immediately)
+
+
 class WebhookConfig(_Strict):
     """Webhook edge knobs (P2, PRD v3 §2.1).
 
@@ -222,6 +228,7 @@ class AppConfig(_Strict):
     api: ApiConfig = Field(default_factory=ApiConfig)
     db: DbConfig = Field(default_factory=DbConfig)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
+    worker: WorkerConfig = Field(default_factory=WorkerConfig)
 
 
 class Secrets(BaseSettings):

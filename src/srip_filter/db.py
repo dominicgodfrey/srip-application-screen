@@ -304,6 +304,23 @@ async def cache_put(
     )
 
 
+class PgCacheBackend:
+    """Adapter satisfying :class:`srip_filter.llm.client.CacheBackend` over ``llm_cache``.
+
+    Handed to the LLM client at startup (``client.cache_backend = PgCacheBackend(pool)``)
+    so every structured call is durably memoized (PRD v3 §5).
+    """
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def get(self, task: str, input_sha256: str) -> dict[str, Any] | None:
+        return await cache_get(self._pool, task, input_sha256)
+
+    async def put(self, task: str, input_sha256: str, output: dict[str, Any], model: str) -> None:
+        await cache_put(self._pool, task, input_sha256, output, model)
+
+
 async def add_event(
     pool: asyncpg.Pool,
     kind: str,

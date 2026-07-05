@@ -110,8 +110,20 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
       (migrations at startup). 19 tests incl. the full auth-failure matrix proving
       invariant #7 (no row/event on any 4xx) and #8 groundwork (202 "unchanged").
 
+- [x] P3 — grading worker: `src/srip_filter/worker.py` (`process_one` claim → grade →
+      persist; `run_worker` loop with prompt stop + iteration-failure backoff; pluggable
+      `GradeFn` — P4 supplies the real pipeline mapping; error notes = exception class
+      name only, never messages), durable LLM cache (`CacheBackend` protocol on
+      `BaseLLMClient` — in-run dict first, then backend, corrupt row ⇒ honest miss;
+      `PgCacheBackend` adapter in db.py over `llm_cache`), `worker:` config
+      (poll_seconds). 7 tests: drain/persist, crash isolation (invariant #9), prompt
+      stop, claim-failure survival, cache-across-restart zero re-bill (invariant #8),
+      corrupt-row degradation, no-backend v2 behavior.
+
 ## In Progress
-- [ ] P3 — grading worker (queue loop → per-row isolation → persistent LLM cache).
+- [ ] P4 — pipeline deltas (webhook mapping, strict bounds, 15-pt essays, Task F,
+      school 20/16, new composition + per-cohort ranking; wire worker grade_fn +
+      lifespan startup).
 
 ## Owner inputs needed (v3)
 - [ ] **Create the Neon project/database** (separate from the website's) + a dev branch;
@@ -125,6 +137,7 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
 - P1: `uv run pytest tests/test_db.py -q` — 11 skipped without `DATABASE_URL_TEST`,
   11 passed with it. `uv run ruff check .` clean.
 - P2: `uv run pytest tests/api/test_webhook.py -q` — 19 passed, no DB needed.
+- P3: `uv run pytest tests/test_worker.py -q` — 7 passed, no DB needed.
 
 ---
 

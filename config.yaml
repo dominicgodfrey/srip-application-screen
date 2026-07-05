@@ -116,6 +116,10 @@ webhook:
   max_body_bytes: 1048576   # 1 MiB cap on a single application payload -> 413 above
   max_skew_seconds: 300.0   # HMAC replay window: |now - X-ATS-Timestamp| must be <= this
 
+# Grading worker (P3, PRD v3 §3) — drains the applications status queue.
+worker:
+  poll_seconds: 2.0         # idle sleep between queue polls; stop wakes it immediately
+
 # API edge caps (Phase 9) — the stateless FastAPI shell. Magic numbers, not in the handlers.
 api:
   max_upload_bytes: 26214400  # 25 MiB cap on the uploaded CSV body -> 413 above this
