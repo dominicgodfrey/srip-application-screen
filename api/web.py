@@ -5,9 +5,12 @@ browser** via ``fetch`` against the existing JSON API (so these templates never 
 PII). Registered onto the app by :func:`register_pages` from ``api.main``, keeping ``main.py`` a
 clean JSON-API surface.
 
-* ``GET /``         → upload dashboard (screen 1)
-* ``GET /audit``    → per-applicant audit-record browser (screen 2), reads ``?job=<id>``
-* ``GET /cohorts``  → cohort what-if tool (screen 3), reads ``?job=<id>``
+* ``GET /``         → live cohort dashboard over the database (v3 screen 1)
+* ``GET /audit``    → per-applicant audit-record browser (live DB by default; ``?job=<id>``
+  keeps the legacy job-scoped view during the transition)
+* ``GET /cohorts``  → cohort what-if tool (live DB by default; ``?job=`` legacy)
+* ``GET /upload``   → the retired v2 CSV upload screen (kept unlinked for the dev/demo
+  flow until the replay tool fully replaces it — PLAN P6b)
 
 ``tags=["pages"]`` keeps them out of the JSON OpenAPI groupings. The ``job`` query param is echoed
 into the template purely so the page's JS knows which in-memory job to fetch; it is not validated
@@ -35,7 +38,13 @@ def register_pages(app: FastAPI, templates: Jinja2Templates) -> None:
 
     @app.get("/", response_class=HTMLResponse, tags=["pages"])
     async def index(request: Request) -> HTMLResponse:
-        """Screen 1 — upload a CSV, watch progress, see the summary, download artifacts."""
+        """Screen 1 (v3) — live cohort dashboard over the database."""
+        return templates.TemplateResponse(request, "dashboard.html", _ctx())
+
+    @app.get("/upload", response_class=HTMLResponse, tags=["pages"])
+    async def upload_page(request: Request) -> HTMLResponse:
+        """Legacy v2 CSV upload screen — unlinked; dev/demo only until the replay tool
+        replaces it entirely (then this route and its templates are deleted)."""
         return templates.TemplateResponse(request, "upload.html", _ctx())
 
     @app.get("/audit", response_class=HTMLResponse, tags=["pages"])

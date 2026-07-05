@@ -68,7 +68,7 @@
   // ----- Highlight the active nav link ---------------------------------------
   function markActiveNav() {
     const path = window.location.pathname;
-    const map = { "/": "upload", "/audit": "audit", "/cohorts": "cohorts" };
+    const map = { "/": "dashboard", "/upload": "upload", "/audit": "audit", "/cohorts": "cohorts" };
     const key = map[path];
     if (!key) return;
     const link = document.querySelector('.nav-links a[data-nav="' + key + '"]');

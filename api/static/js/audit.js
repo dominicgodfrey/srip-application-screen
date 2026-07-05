@@ -29,12 +29,18 @@
   function hide(el) { el.classList.add("hidden"); }
 
   // ----- Load -----------------------------------------------------------------
+  // v3: with no ?job= param this screen browses the LIVE database (the continuous
+  // service's normal mode) via /api/exports/decisions; a job id keeps the legacy
+  // job-scoped behavior for the transition period.
   const jobId = (app.dataset.job || "").trim() || S.getJobId();
-  if (jobId) load(jobId);
+  const LIVE = !jobId;
+  refresh();
 
-  async function load(id) {
+  function refresh() { return LIVE ? loadFrom("/api/exports/decisions") : loadFrom("/jobs/" + encodeURIComponent(jobId) + "/results/decisions"); }
+
+  async function loadFrom(url) {
     try {
-      const res = await S.api("/jobs/" + encodeURIComponent(id) + "/results/decisions");
+      const res = await S.api(url);
       const text = await res.text();
       records = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
       hide(els.empty);
@@ -47,6 +53,12 @@
       els.empty.querySelector("p").textContent = msg;
       S.toast(msg, "danger");
     }
+  }
+
+  function actionUrl(sid, action) {
+    return LIVE
+      ? "/api/applications/" + encodeURIComponent(sid) + "/" + action
+      : "/jobs/" + encodeURIComponent(jobId) + "/records/" + encodeURIComponent(sid) + "/" + action;
   }
 
   // ----- Filter + sort + render -----------------------------------------------
@@ -385,11 +397,9 @@
       demoteBtn.disabled = true;
       demoteBtn.textContent = "Removing…";
       try {
-        const res = await S.api(
-          "/jobs/" + encodeURIComponent(jobId) + "/records/" + encodeURIComponent(sid) + "/demote",
-          { method: "POST" });
+        const res = await S.api(actionUrl(sid, "demote"), { method: "POST" });
         await res.json();
-        await load(jobId); // ranks shifted for everyone — refetch the whole set
+        await refresh(); // ranks shifted for everyone — refetch the whole set
         const demoted = records.find((x) => x.submission_id === sid);
         if (demoted) renderDetail(demoted);
         S.toast("Removed from the ranking (manual override).", "success");
@@ -409,14 +419,12 @@
     btn.disabled = true;
     btn.textContent = "Scoring…";
     try {
-      const res = await S.api(
-        "/jobs/" + encodeURIComponent(jobId) + "/records/" + encodeURIComponent(sid) + "/promote",
-        { method: "POST" });
+      const res = await S.api(actionUrl(sid, "promote"), { method: "POST" });
       const body = await res.json();
-      await load(jobId); // ranks shifted for everyone — refetch the whole set
+      await refresh(); // ranks shifted for everyone — refetch the whole set
       const promoted = records.find((x) => x.submission_id === sid);
       if (promoted) renderDetail(promoted);
-      const rec = body.record || {};
+      const rec = (records.find((x) => x.submission_id === sid)) || body.record || {};
       S.toast("Promoted — rank " + rec.rank + ", score " + S.fmtNum(rec.final_score), "success");
     } catch (err) {
       btn.disabled = false;

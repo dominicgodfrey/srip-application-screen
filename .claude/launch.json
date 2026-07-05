@@ -4,7 +4,10 @@
     {
       "name": "srip-api-demo",
       "runtimeExecutable": "cmd",
-      "runtimeArgs": ["/c", "set SRIP_DEV_FAKE_LLM=1&&C:\\Users\\dsolg\\.local\\bin\\uv.exe run uvicorn api.main:app --port 8321"],
+      "runtimeArgs": [
+        "/c",
+        "set SRIP_DEV_FAKE_LLM=1&&set ADMIN_PASSWORD_HASH=pbkdf2_sha256$600000$27c708f9c46e96471b1614abe28a7255$8a963cf3e5d278d08ee48c8d74ff9ce6d727dd5ef7dfde357d2070ae23e80be3&&C:\\Users\\dsolg\\.local\\bin\\uv.exe run uvicorn api.main:app --port 8321"
+      ],
       "port": 8321,
       "autoPort": false
     }

@@ -25,13 +25,28 @@ def client() -> TestClient:
 # --------------------------------------------------------------------------------------------
 
 
-def test_index_renders_upload_page(client: TestClient) -> None:
+def test_index_renders_live_dashboard(client: TestClient) -> None:
     resp = client.get("/")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
-    assert "SRIP Track 2" in resp.text
-    assert 'type="file"' in resp.text
+    assert 'id="dash-app"' in resp.text
+    assert 'id="dash-table"' in resp.text
+    assert "/static/js/dashboard.js" in resp.text
     assert "/static/css/app.css" in resp.text
+
+
+def test_legacy_upload_page_still_reachable_unlinked(client: TestClient) -> None:
+    # Kept for the dev/demo flow until the replay tool replaces it (PLAN P6b).
+    resp = client.get("/upload")
+    assert resp.status_code == 200
+    assert 'type="file"' in resp.text
+    # The navbar no longer links to it.
+    assert 'data-nav="upload">' not in client.get("/").text
+
+
+def test_navbar_has_logout(client: TestClient) -> None:
+    resp = client.get("/")
+    assert 'action="/logout"' in resp.text
 
 
 def test_audit_page_renders(client: TestClient) -> None:
@@ -82,7 +97,13 @@ def test_static_css_serves(client: TestClient) -> None:
 
 @pytest.mark.parametrize(
     "path",
-    ["/static/js/common.js", "/static/js/upload.js", "/static/js/audit.js", "/static/js/cohort.js"],
+    [
+        "/static/js/common.js",
+        "/static/js/upload.js",
+        "/static/js/audit.js",
+        "/static/js/cohort.js",
+        "/static/js/dashboard.js",
+    ],
 )
 def test_static_js_serves(client: TestClient, path: str) -> None:
     resp = client.get(path)

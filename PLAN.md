@@ -158,12 +158,28 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
       `/api/summary`. Manual overrides append events with `decided_by="admin"`.
       12 endpoint tests over a fake store.
 
+- [x] P6b — UI re-point: `/` = new live dashboard (`dashboard.html`/`dashboard.js` —
+      cohort filter, counts chips, sortable table, on-demand export links over
+      `/api/*`); audit browser + cohort what-if default to LIVE DB mode (`?job=` keeps
+      the legacy job-scoped view during transition; promote/demote hit
+      `/api/applications/{sid}/…` in live mode); navbar: Dashboard + Sign out; legacy
+      upload screen kept unlinked at `/upload` (dev/demo) until the replay tool replaces
+      it. Dev-mode (`SRIP_DEV_FAKE_LLM=1`) drops the Secure cookie flag so the local
+      http:// demo can hold a session. **Verified live in the preview browser:**
+      login redirect → sign-in → session → dashboard renders; audit/cohorts/upload
+      pages 200; `/api/exports` degrades to a clean 503 without a DB; zero console
+      errors.
+
 ## In Progress
-- [ ] P6b — UI re-point: new live dashboard page (replaces the CSV upload screen as `/`),
-      audit browser + cohort screen fetch from `/api/*` instead of job artifacts,
-      logout button in the navbar, retire the v2 upload/job screens + `/jobs` routes +
-      registry (and their tests) once the new screens cover the workflows. Close-cycle
-      action stub pending WEBSITE_ASKS #13.
+- [ ] (none — P7 next)
+
+## P6 leftovers (do during/after P7)
+- [ ] Retire the v2 `/jobs` routes + registry + upload screen + their tests once the
+      replay tool covers the dev/demo flow end-to-end.
+- [ ] Close-cycle action (export → typed confirmation → purge + tombstone) once
+      WEBSITE_ASKS #13 settles the retention policy.
+- [ ] Audit browser: surface the new v3 blocks (technical_essay, international,
+      cohort_name) in the detail panel — currently rendered fields are the v2 set.
 
 ## Owner inputs needed (v3)
 - [ ] **Create the Neon project/database** (separate from the website's) + a dev branch;
@@ -182,6 +198,8 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
   tests/scoring/test_technical_essay.py -q` — 32 passed; full suite 521 passed.
 - P5: `uv run pytest tests/api/test_auth.py -q` — 14 passed; full suite 536 passed.
 - P6a: `uv run pytest tests/api/test_admin_api.py -q` — 12 passed; full suite 547 passed.
+- P6b: full suite 550 passed; live preview walkthrough (login → dashboard → pages →
+  graceful no-DB 503s) done in-session 2026-07-04.
 
 ---
 

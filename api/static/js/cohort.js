@@ -63,7 +63,8 @@
       return S.api("/jobs/" + encodeURIComponent(jobId) + "/cohorts?" + params.toString(),
         { method: "POST" });
     }
-    throw Object.assign(new Error("No source"), { status: 0, detail: "No job or file loaded." });
+    // v3 default: the LIVE ranking straight from the database (recomputed per call).
+    return S.api("/api/cohorts?" + params.toString(), { method: "POST" });
   }
 
   async function recompute() {
@@ -232,6 +233,10 @@
           "Source: results from the current grading run of “" + job.filename + "”.";
       }
     }).catch(() => {});
+    recompute();
+  } else {
+    // v3 default: live database ranking (always current as applications arrive).
+    els.sourceNote.textContent = "Source: the live ranking from the database.";
     recompute();
   }
 })();

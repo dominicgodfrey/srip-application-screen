@@ -268,13 +268,16 @@ def create_app(
         app.state.login_throttle.reset()
         token = app.state.sessions.create()
         response = RedirectResponse(url=next_path, status_code=303)
+        # The dev/demo flag (never set in production — see its declaration) also drops the
+        # Secure cookie flag so the local http:// demo can hold a session.
+        dev_mode = os.getenv(_DEV_FAKE_LLM_ENV) == "1"
         response.set_cookie(
             SESSION_COOKIE,
             token,
             max_age=int(cfg.auth.session_ttl_seconds),
             httponly=True,
             samesite="lax",
-            secure=cfg.auth.cookie_secure,
+            secure=cfg.auth.cookie_secure and not dev_mode,
         )
         return response
 

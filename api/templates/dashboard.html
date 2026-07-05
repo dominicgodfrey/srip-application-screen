@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — {{ app_title }}{% endblock %}
+{% block content %}
+<div id="dash-app">
+  <section class="card">
+    <div class="card-head">
+      <h1>Live cohort dashboard</h1>
+      <div class="row-actions">
+        <label for="dash-cohort" class="muted small">Cohort</label>
+        <select id="dash-cohort"><option value="">All cohorts</option></select>
+        <button id="dash-refresh" class="btn">Refresh</button>
+      </div>
+    </div>
+    <p class="muted">
+      Applications arrive continuously from the application website and are graded in the
+      background. Rank is computed live, per cohort — it can shift until the cycle closes.
+    </p>
+    <div id="dash-counts" class="chips"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Applications</h2>
+      <input id="dash-search" type="search" placeholder="Search name / email / id…">
+    </div>
+    <div class="table-wrap">
+      <table id="dash-table">
+        <thead>
+          <tr>
+            <th data-key="rank">Rank</th>
+            <th data-key="name">Name</th>
+            <th data-key="cohort_name">Cohort</th>
+            <th data-key="status">Status</th>
+            <th data-key="outcome">Outcome</th>
+            <th data-key="final_score">Score</th>
+            <th data-key="submitted_at">Submitted</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="dash-empty" class="muted">No applications yet — deliveries will appear here.</p>
+  </section>
+
+  <section class="card">
+    <h2>Exports</h2>
+    <p class="muted">Generated on demand from the live database (scoped to the selected cohort).</p>
+    <div id="dash-exports" class="row-actions">
+      <a class="btn" data-artifact="decisions" href="#">decisions.jsonl</a>
+      <a class="btn" data-artifact="ranked" href="#">ranked.csv</a>
+      <a class="btn" data-artifact="rejected" href="#">rejected.csv</a>
+      <a class="btn" data-artifact="needs_review" href="#">needs_review.csv</a>
+      <a class="btn" data-artifact="summary" href="#">summary.json</a>
+    </div>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/dashboard.js"></script>{% endblock %}
