@@ -99,8 +99,19 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
       `DATABASE_URL_TEST` (dev Neon branch); no local Postgres/Docker on this machine.
       Run them first thing once Neon exists.**
 
+- [x] P2 — webhook receiver: `api/webhook_auth.py` (pure HMAC sign/verify, constant-time,
+      ±skew window, multi-secret rotation, log-only reasons), PROPOSED-contract payload
+      models in `models.py` (EssaysModePayload/ResumeModePayload/GpaPayload/EssayEntry,
+      tolerant-edge + strict essentials, gpa accepts structured or legacy string,
+      finaid → UnsupportedModeError), `api/webhooks.py` `POST /webhooks/applications`
+      (verify → validate → upsert → 202; `_test` signed ⇒ 200 no-row; 401/413/422 never
+      500; validation errors carry field locs only — no echoed PII), `webhook:` config +
+      HMAC secrets in Secrets, pool + secrets wired into `create_app`/lifespan
+      (migrations at startup). 19 tests incl. the full auth-failure matrix proving
+      invariant #7 (no row/event on any 4xx) and #8 groundwork (202 "unchanged").
+
 ## In Progress
-- [ ] P2 — webhook receiver (HMAC middleware → payload contracts → endpoint).
+- [ ] P3 — grading worker (queue loop → per-row isolation → persistent LLM cache).
 
 ## Owner inputs needed (v3)
 - [ ] **Create the Neon project/database** (separate from the website's) + a dev branch;
@@ -113,6 +124,7 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
 - P0: `git show v2-fillout-batch --stat`; docs present; `uv run pytest -q` green.
 - P1: `uv run pytest tests/test_db.py -q` — 11 skipped without `DATABASE_URL_TEST`,
   11 passed with it. `uv run ruff check .` clean.
+- P2: `uv run pytest tests/api/test_webhook.py -q` — 19 passed, no DB needed.
 
 ---
 

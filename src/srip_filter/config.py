@@ -196,6 +196,17 @@ class DbConfig(_Strict):
     pool_max_size: int = 5
 
 
+class WebhookConfig(_Strict):
+    """Webhook edge knobs (P2, PRD v3 §2.1).
+
+    ``max_body_bytes`` bounds a single application payload (a few KB in practice — 1 MiB is
+    generous); ``max_skew_seconds`` is the HMAC replay window (|now − X-ATS-Timestamp|).
+    """
+
+    max_body_bytes: int = 1_048_576  # 1 MiB
+    max_skew_seconds: float = 300.0  # ±5 min
+
+
 class AppConfig(_Strict):
     """All tunable knobs. Defaults mirror PRD §10.3 exactly."""
 
@@ -210,6 +221,7 @@ class AppConfig(_Strict):
     llm: LlmConfig = Field(default_factory=LlmConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     db: DbConfig = Field(default_factory=DbConfig)
+    webhook: WebhookConfig = Field(default_factory=WebhookConfig)
 
 
 class Secrets(BaseSettings):
@@ -229,6 +241,10 @@ class Secrets(BaseSettings):
     openai_api_key: str | None = None
     database_url: str | None = None
     database_url_test: str | None = None
+    # Webhook HMAC secrets (PRD v3 §2.1). "previous" enables zero-downtime rotation:
+    # both are accepted while the website flips to a new value, then previous is cleared.
+    ats_webhook_secret: str | None = None
+    ats_webhook_secret_previous: str | None = None
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:

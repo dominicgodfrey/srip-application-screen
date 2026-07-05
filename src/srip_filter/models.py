@@ -15,7 +15,9 @@ detection was moved into the LLM as a Task-D backstop (see PLAN.md decisions log
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -390,3 +392,107 @@ class CohortResult(_Model):
     waitlist: list[CohortAssignment] = Field(default_factory=list)
     unassignable: list[CohortAssignment] = Field(default_factory=list)
     summary: CohortSummary = Field(default_factory=CohortSummary)
+
+
+# ============================================================================================
+# Webhook payload contracts (P2, PRD v3 §2.2) — PROPOSED contract v1
+# ============================================================================================
+# Pinned against the PROPOSED contract until WEBSITE_ASKS 2/3/5/6 are answered (freeze at
+# P2 completion). Edge philosophy: *required essentials strict, everything else tolerant* —
+# a payload missing `submission_id` is unprocessable (422), but a missing optional field
+# must not bounce a real applicant while the contract is still settling. Unknown keys are
+# ignored (the site may add fields before we consume them).
+
+
+class _Payload(BaseModel):
+    """Webhook edge base: tolerate unknown keys, allow field population by alias."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+
+class GpaPayload(_Payload):
+    """Structured GPA per WEBSITE_ASKS #3. ``unweighted`` is primary (deterministic path);
+    a weighted-only submission routes through Task A (PRD v3 §4 Stage 2)."""
+
+    unweighted: str | None = None
+    weighted: str | None = None
+
+
+class EssayEntry(_Payload):
+    """One essay as delivered: the question label, the answer, and (WEBSITE_ASKS #5) the
+    per-essay word bounds that drive the strict Stage-1 length check."""
+
+    question: str = ""
+    answer: str = ""
+    field_key: str = ""
+    min_words: int | None = None
+    max_words: int | None = None
+
+
+class EssaysModePayload(_Payload):
+    """`ats_mode="essays"` — the primary application record (PRD v3 §2.2).
+
+    ``gpa`` accepts the structured shape (ask #3) or the site's current joined string, so
+    the receiver works before and after the website-side change lands.
+    """
+
+    ats_mode: Literal["essays"] = "essays"
+    submission_id: UUID
+    user_email: str = Field(min_length=1)
+    student_name: str | None = None
+    cohort_name: str = ""
+    cohort_display_name: str = ""
+    submitted_at: datetime | None = None
+    ed: bool = False
+    is_finaid: bool = False
+    gpa: GpaPayload | str | None = None
+    gpa_explanation: str = ""
+    relevant_coursework: str = ""
+    programming_languages: str = ""
+    institution: str = ""
+    state_of_residence: str = ""
+    github_profile: str = ""
+    sub_track: str = ""
+    resume_url: str | None = None
+    first_choice: str = ""
+    second_choice: str = ""
+    third_choice: str = ""
+    required_essays: list[EssayEntry] = Field(default_factory=list)
+    optional_essays: list[EssayEntry] = Field(default_factory=list)
+
+
+class ResumeModePayload(_Payload):
+    """`ats_mode="resume"` — thin payload; may legally arrive before the essays row."""
+
+    ats_mode: Literal["resume"]
+    submission_id: UUID
+    user_email: str = ""
+    student_name: str | None = None
+    cohort_name: str = ""
+    submitted_at: datetime | None = None
+    is_finaid: bool = False
+    resume_url: str | None = None
+    gpa: GpaPayload | str | None = None
+
+
+WebhookPayload = EssaysModePayload | ResumeModePayload
+
+
+class UnsupportedModeError(ValueError):
+    """A syntactically valid payload whose ``ats_mode`` this service does not accept."""
+
+
+def parse_webhook_payload(data: dict) -> WebhookPayload:
+    """Dispatch a decoded JSON body to its mode contract.
+
+    ``finaid`` (and anything else unknown) raises :class:`UnsupportedModeError` — the
+    caller turns that into a 422 telling the website the mode is not configured here
+    (finaid is out of scope in v3, PRD v3 §11). Pydantic ``ValidationError`` propagates
+    for malformed payloads of a supported mode.
+    """
+    mode = data.get("ats_mode")
+    if mode == "essays":
+        return EssaysModePayload.model_validate(data)
+    if mode == "resume":
+        return ResumeModePayload.model_validate(data)
+    raise UnsupportedModeError(f"unsupported ats_mode: {mode!r}")

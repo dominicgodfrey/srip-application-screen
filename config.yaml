@@ -111,6 +111,11 @@ db:
   pool_min_size: 1
   pool_max_size: 5
 
+# Webhook edge (P2, PRD v3 §2.1). Secrets (ATS_WEBHOOK_SECRET[_PREVIOUS]) come from env.
+webhook:
+  max_body_bytes: 1048576   # 1 MiB cap on a single application payload -> 413 above
+  max_skew_seconds: 300.0   # HMAC replay window: |now - X-ATS-Timestamp| must be <= this
+
 # API edge caps (Phase 9) — the stateless FastAPI shell. Magic numbers, not in the handlers.
 api:
   max_upload_bytes: 26214400  # 25 MiB cap on the uploaded CSV body -> 413 above this

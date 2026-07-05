@@ -28,8 +28,9 @@ from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile, s
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from srip_filter import db as dbmod
 from srip_filter.cohort import assign_cohorts
-from srip_filter.config import AppConfig, get_config
+from srip_filter.config import AppConfig, get_config, get_secrets
 from srip_filter.llm.client import BaseLLMClient, FakeLLMClient, OpenAILLMClient
 from srip_filter.models import CohortCapacities, CohortResult
 from srip_filter.pipeline import demote_record, promote_record
@@ -46,6 +47,7 @@ from .jobs import (
 from .registry import JobRegistry, JobState
 from .schemas import ErrorResponse, HealthResponse, JobCreated, JobStatus
 from .web import register_pages
+from .webhooks import register_webhooks
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,8 @@ def create_app(
     *,
     config: AppConfig | None = None,
     client: BaseLLMClient | None = None,
+    db_pool: object | None = None,
+    webhook_secrets: tuple[str, ...] | None = None,
 ) -> FastAPI:
     """Build the FastAPI app with its registry and (optional) injected LLM client.
 
@@ -92,6 +96,19 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # v3 (P2): build the Postgres pool once, only if a test hasn't injected one and a
+        # DSN is configured. Migrations apply at startup — single instance, tiny schema.
+        owns_pool = False
+        if app.state.db_pool is None:
+            dsn = get_secrets().database_url
+            if dsn:
+                app.state.db_pool = await dbmod.create_pool(
+                    dsn,
+                    min_size=app.state.config.db.pool_min_size,
+                    max_size=app.state.config.db.pool_max_size,
+                )
+                await dbmod.apply_migrations(app.state.db_pool)
+                owns_pool = True
         # Build the client once, only if a test hasn't injected one. Done in the lifespan (not at
         # import) so importing this module never needs an API key. The dev/demo flag swaps in a
         # zero-spend FakeLLMClient; the default path is the real OpenAI client.
@@ -116,11 +133,14 @@ def create_app(
             sweeper.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sweeper
+            if owns_pool and app.state.db_pool is not None:
+                await app.state.db_pool.close()
+                app.state.db_pool = None
 
     app = FastAPI(
-        title="SRIP Track 2 Application Filter",
-        version="0.1.0",
-        summary="Stateless reject-and-rank filtering for SRIP Track 2 applications.",
+        title="SRIP ATS",
+        version="3.0.0",
+        summary="Continuous reject-and-rank ATS for SRIP CS-track applications.",
         lifespan=lifespan,
     )
     app.state.config = cfg
@@ -128,6 +148,17 @@ def create_app(
     app.state.registry = JobRegistry(ttl_seconds=cfg.api.job_ttl_seconds)
     # Hold strong refs to in-flight background tasks so they're not garbage-collected mid-run.
     app.state.background_tasks = set()
+    # v3 (P2): DB pool + webhook HMAC secrets. Tests inject both; production fills the pool
+    # in the lifespan and reads secrets from the environment here (no secret ever in config).
+    app.state.db_pool = db_pool
+    if webhook_secrets is not None:
+        app.state.webhook_secrets = webhook_secrets
+    else:
+        env = get_secrets()
+        app.state.webhook_secrets = tuple(
+            s for s in (env.ats_webhook_secret, env.ats_webhook_secret_previous) if s
+        )
+    register_webhooks(app)
 
     # -- Server-rendered UI (Phase 10) -----------------------------------------------------------
     # Same-origin Jinja2 templates + static assets; the browser drives everything via fetch against
