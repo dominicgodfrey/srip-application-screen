@@ -165,7 +165,7 @@ def _task_d(user: str) -> TaskDOutput:
         is_gibberish=gibberish,
         on_topic=not off_topic,
         relevance_confidence=0.3 if off_topic else 0.9,
-        quality_score=0 if (off_topic or gibberish) else 16,
+        quality_score=0 if (off_topic or gibberish) else 12,
         grammar_spelling_penalty=1,
         saliency_notes="Demo handler: optimistic grading for illustration.",
         rationale="Demo handler output — not a real assessment.",

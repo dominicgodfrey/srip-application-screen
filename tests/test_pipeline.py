@@ -160,7 +160,7 @@ def _task_d(*, on_topic: bool = True, is_gibberish: bool = False) -> TaskDOutput
         is_gibberish=is_gibberish,
         on_topic=on_topic,
         relevance_confidence=0.9,
-        quality_score=18,
+        quality_score=13,
         grammar_spelling_penalty=0,
         saliency_notes="",
         rationale="",
@@ -223,7 +223,7 @@ async def test_survivor_is_ranked_with_full_scores() -> None:
     assert rec.final_score is None  # Stage 8 composes the score; grade_one leaves it None
     assert rec.rank is None
     assert rec.scores.gpa_points == pytest.approx(40 * (3.5 - 3.3) / (4.0 - 3.3), abs=1e-3)
-    assert rec.scores.essay.total == pytest.approx(36.0)  # 18 + 18, no penalties
+    assert rec.scores.essay.total == pytest.approx(26.0)  # 13 + 13, no penalties
     assert rec.scores.coursework_bonus == pytest.approx(3.0)  # flat 1.0 * 3.0
     assert rec.scores.school_bonus == 0.0  # "High School" → no match
     assert rec.scores.resume_bonus == 0.0
@@ -779,9 +779,9 @@ async def test_rescore_one_bypasses_stage1_gate_and_scores() -> None:
     assert rec.gates.essay_length.hard_fail is True
     assert any(reason.startswith("OVERRIDE:") for reason in rec.reasons)
     # Scoring still ran: GPA points and essay subscores are present. The hard-short essay 1
-    # still carries the max soft length penalty (18 - 5), essay 2 is clean (18).
+    # still carries the max soft length penalty (13 - 5), essay 2 is clean (13).
     assert rec.scores.gpa_points == pytest.approx(40 * (3.5 - 3.3) / (4.0 - 3.3), abs=1e-3)
-    assert rec.scores.essay.total == pytest.approx(31.0)
+    assert rec.scores.essay.total == pytest.approx(21.0)
 
 
 async def test_rescore_one_unresolvable_gpa_scores_zero_points() -> None:
@@ -808,7 +808,7 @@ async def test_rescore_one_unresolvable_gpa_scores_zero_points() -> None:
     assert rec.scores.gpa_points == 0.0
     assert any("gpa gate bypassed" in reason for reason in rec.reasons)
     # Essays still scored: the applicant ranks on what is scoreable.
-    assert rec.scores.essay.total == pytest.approx(36.0)
+    assert rec.scores.essay.total == pytest.approx(26.0)
 
 
 async def test_promote_record_folds_into_ranking_and_rebuilds_artifacts() -> None:

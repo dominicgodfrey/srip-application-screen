@@ -111,13 +111,43 @@ class TaskDOutput(_Model):
     )
     on_topic: bool = Field(description="False => REJECTED as off-topic for the given prompt.")
     relevance_confidence: float = Field(ge=0.0, le=1.0)
-    quality_score: int = Field(ge=0, le=20, description="Specificity, coherence, saliency.")
+    quality_score: int = Field(ge=0, le=15, description="Specificity, coherence, saliency.")
     grammar_spelling_penalty: int = Field(
         ge=0,
         le=3,
         description="Slight penalty for genuine errors only; never for ESL writing.",
     )
     saliency_notes: str = Field(description="What made the essay strong or weak.")
+    rationale: str = Field(description="1-2 sentences for the audit log.")
+
+
+class TaskFOutput(_Model):
+    """Task F — optional technical-essay bonus (v3, PRD v3 §4 Stage 4b).
+
+    Judgment tier, **bonus-only**: nothing here can reject (profanity was already a
+    Stage-1 reject). ``on_topic=False`` or ``gibberish=True`` ⇒ 0 bonus. The three 0–10
+    signals are judged by the model and priced deterministically by
+    ``TechnicalEssayConfig`` (the Task C "model judges, config prices" pattern).
+    Calibration (owner, 2026-07-04): generic interest / surface-level online reading ⇒
+    low; sustained exploration ⇒ mid; interest → side project → real impact ⇒ high.
+    """
+
+    on_topic: bool = Field(
+        description="False if the essay does not address the technical prompt => 0 bonus."
+    )
+    gibberish: bool = Field(description="True for keyboard-mashing/nonsense => 0 bonus.")
+    technical_depth_0_10: int = Field(
+        ge=0, le=10, description="Difficulty/depth of the technical subject and treatment."
+    )
+    exploration_level_0_10: int = Field(
+        ge=0,
+        le=10,
+        description="How far beyond the classroom the exploration went (reading=low, "
+        "building=mid, sustained project work=high).",
+    )
+    impact_0_10: int = Field(
+        ge=0, le=10, description="Real-world impact of what the applicant actually did."
+    )
     rationale: str = Field(description="1-2 sentences for the audit log.")
 
 
@@ -235,6 +265,7 @@ class EssaySubscores(_Model):
 class Scores(_Model):
     gpa_points: float = 0.0
     essay: EssaySubscores = Field(default_factory=EssaySubscores)
+    technical_essay_bonus: float = 0.0  # Stage 4b Task F (v3); absent essay -> 0, neutral
     coursework_bonus: float = 0.0
     school_bonus: float = 0.0
     resume_bonus: float = 0.0  # 0 unless Stage 6 extracts signals (Phase 12); kill switch -> 0
@@ -264,17 +295,32 @@ class ResumeAssessment(_Model):
     failure: str = ""  # "" = no failure; otherwise a typed reason for the audit log
 
 
-class EssayTexts(_Model):
-    """The applicant's two essays, verbatim, carried on the audit record for the audit UI.
+class TechnicalEssayAssessment(_Model):
+    """Stage-4b technical-essay result for the audit record (v3).
 
-    Returned to the user inside ``decisions.jsonl`` (their own uploaded data) and held only in
-    the transient in-memory job — never persisted server-side. Needed so a human auditor can
-    read the essays (and see the highlighted profanity/gibberish section) without re-opening
-    the source CSV.
+    ``skipped_reason`` explains a 0 bonus without a Task F call ("absent", "over_max",
+    "stage1_reject"); ``signals`` is populated only when Task F actually ran.
+    """
+
+    present: bool = False
+    word_count: int = 0
+    over_max: bool = False
+    skipped_reason: str = ""
+    signals: TaskFOutput | None = None
+    bonus: float = 0.0
+
+
+class EssayTexts(_Model):
+    """The applicant's essays, verbatim, carried on the audit record for the audit UI.
+
+    v3: persisted in ``applications.audit_record`` (JSONB) under the §9 retention policy —
+    a reviewer must be able to read the essays (with highlight-on-reject) in the audit
+    detail without the original payload. ``e3`` is the optional technical essay.
     """
 
     e1: str = ""
     e2: str = ""
+    e3: str = ""
 
 
 class AuditRecord(_Model):
@@ -284,6 +330,12 @@ class AuditRecord(_Model):
     name: str = ""
     email: str = ""
     phone: str = ""
+    cohort_name: str = ""  # v3: ranking is scoped per cohort (PRD v3 §7)
+    state_of_residence: str = ""  # v3 metadata; full state name or "Non-U.S. Territory"
+    international: bool = False  # v3: derived from state_of_residence (not scored)
+    programming_languages: str = ""  # v3 metadata (not scored; future resume-eval input)
+    github_profile: str = ""  # v3 metadata (not scored; GitHub fetching is out of scope)
+    sub_track: str = ""
     program_choices: ProgramChoices = Field(default_factory=ProgramChoices)
     dedup: DedupInfo = Field(default_factory=DedupInfo)
 
@@ -306,6 +358,7 @@ class AuditRecord(_Model):
     coursework_breakdown: list[CourseItem] = Field(default_factory=list)
     school_match: SchoolMatch = Field(default_factory=SchoolMatch)
     resume: ResumeAssessment = Field(default_factory=ResumeAssessment)
+    technical_essay: TechnicalEssayAssessment = Field(default_factory=TechnicalEssayAssessment)
 
     reasons: list[str] = Field(default_factory=list)
     llm_calls: list[str] = Field(default_factory=list)

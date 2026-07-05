@@ -41,10 +41,20 @@ gpa:
       - {min_pct: 77, gpa: 2.3}
       - {min_pct: 73, gpa: 2.0}
 
-# Essay quality scoring (Stage 4, Task D)
+# Essay quality scoring (Stage 4, Task D) — v3: 15 each (SCORING.md, owner 2026-07-04)
 essay_scoring:
-  quality_max_each: 20  # per essay; 40 total
+  quality_max_each: 15  # per required essay; 30 total
   grammar_penalty_max: 3
+
+# Technical-essay bonus (Stage 4b, Task F — NEW in v3, SCORING.md). Bonus-only: absent,
+# gibberish, off-topic, or over-max essay => 0, never a rejection (profanity is a Stage-1
+# reject like any essay). The model judges three 0-10 signals; this config prices them:
+# bonus = bonus_max * (w_depth*d + w_expl*e + w_impact*i) / (10 * (w_depth+w_expl+w_impact)).
+technical_essay:
+  bonus_max: 20
+  weight_depth: 1.0        # technical depth / difficulty
+  weight_exploration: 1.0  # sustained exploration beyond the classroom
+  weight_impact: 1.0       # real-world impact (interest -> side project -> impact = high)
 
 # Coursework bonus (Stage 5, Task C) — additive only, never subtracts. Grades are ignored
 # unless explicitly stated below the grade floor (min_grade_pct): such a course is excluded
@@ -58,10 +68,10 @@ coursework:
   min_grade_pct: 80     # an explicit grade below this excludes the course entirely
   unit: 3.0
 
-# School bonus (Stage 7) — additive only, never subtracts
+# School bonus (Stage 7) — additive only, never subtracts. v3: 20/16 (SCORING.md).
 school:
-  bonus_us_top20: 15
-  bonus_intl_top50: 12
+  bonus_us_top20: 20
+  bonus_intl_top50: 16
   fuzzy_match_threshold: 88
 
 # Resume bonus (Stage 6, Phase 12) — additive only, never subtracts. bonus_max is the kill
@@ -72,7 +82,11 @@ school:
 # The weight_* knobs price the Task E signal counts deterministically (model counts, config
 # prices); the sum is capped at bonus_max.
 resume:
-  bonus_max: 10
+  # v3: the engine decision is pending (WEBSITE_ASKS #11) — 0 is the kill switch and the
+  # shipping default (zero fetches, zero tokens). 25 is the value once an engine is chosen
+  # (SCORING.md). The allowlist must be re-pinned to the website's R2 host (ask #4) before
+  # enabling — the Fillout S3 entry below is the frozen v2 value.
+  bonus_max: 0
   max_download_bytes: 10485760   # 10 MiB streaming cap per resume; abort above this
   download_timeout_s: 20.0
   download_concurrency: 4        # download semaphore, separate from the LLM one
@@ -100,6 +114,7 @@ llm:
     task_c: gpt-4.1-mini   # C: coursework decomposition (mechanical extraction)
     task_d: gpt-4.1        # D: essay grading / gibberish / relevance (judgment, can reject)
     task_e: gpt-4.1-mini   # E: resume signal extraction (mechanical extraction, Phase 12)
+    task_f: gpt-4.1        # F: technical-essay bonus (judgment, bonus-only — NEW in v3)
   temperature: 0.2         # <= 0.2 for repeatability
   max_concurrency: 8       # bound for the asyncio.Semaphore around LLM calls
   max_retries: 2

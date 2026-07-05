@@ -20,14 +20,14 @@ def test_defaults_match_prd() -> None:
     assert cfg.essay_length.hard_min == 60
     assert cfg.essay_length.hard_max == 500
     assert cfg.essay_length.len_penalty_max == 5
-    assert cfg.essay_scoring.quality_max_each == 20
+    assert cfg.essay_scoring.quality_max_each == 15  # v3 (SCORING.md)
     assert cfg.essay_scoring.grammar_penalty_max == 3
     assert cfg.coursework.bonus_max == 15.0
     assert cfg.coursework.min_grade_pct == 80.0  # explicit grade below this excludes
-    assert cfg.school.bonus_us_top20 == 15.0
-    assert cfg.school.bonus_intl_top50 == 12.0
+    assert cfg.school.bonus_us_top20 == 20.0
+    assert cfg.school.bonus_intl_top50 == 16.0
     assert cfg.school.fuzzy_match_threshold == 88
-    assert cfg.resume.bonus_max == 10.0  # PRD §10.1; 0 is the Stage 6 kill switch
+    assert cfg.resume.bonus_max == 0.0  # v3: disabled until the engine decision (WEBSITE_ASKS #11)
 
 
 def test_resume_config_defaults() -> None:

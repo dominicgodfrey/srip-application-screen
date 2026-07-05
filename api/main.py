@@ -33,7 +33,8 @@ from srip_filter.cohort import assign_cohorts
 from srip_filter.config import AppConfig, get_config, get_secrets
 from srip_filter.llm.client import BaseLLMClient, FakeLLMClient, OpenAILLMClient
 from srip_filter.models import CohortCapacities, CohortResult
-from srip_filter.pipeline import demote_record, promote_record
+from srip_filter.pipeline import demote_record, make_grade_fn, promote_record
+from srip_filter.worker import run_worker
 
 from .cohorts import CohortFormat, cohort_response, parse_decisions_jsonl
 from .jobs import (
@@ -127,12 +128,29 @@ def create_app(
         sweeper = asyncio.create_task(
             sweeper_loop(app.state.registry, app.state.config.api.job_sweep_seconds)
         )
+        # v3 (P4): with a real pool, wire the durable LLM cache and start the grading
+        # worker. `hasattr acquire` guards against test sentinels injected as db_pool.
+        worker_stop = asyncio.Event()
+        worker_task: asyncio.Task | None = None
+        if app.state.db_pool is not None and hasattr(app.state.db_pool, "acquire"):
+            app.state.llm_client.cache_backend = dbmod.PgCacheBackend(app.state.db_pool)
+            worker_task = asyncio.create_task(
+                run_worker(
+                    app.state.db_pool,
+                    make_grade_fn(app.state.llm_client, app.state.config),
+                    poll_seconds=app.state.config.worker.poll_seconds,
+                    stop=worker_stop,
+                )
+            )
         try:
             yield
         finally:
             sweeper.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sweeper
+            if worker_task is not None:
+                worker_stop.set()  # graceful: finish the in-flight row, then exit
+                await worker_task
             if owns_pool and app.state.db_pool is not None:
                 await app.state.db_pool.close()
                 app.state.db_pool = None

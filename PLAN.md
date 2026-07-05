@@ -120,10 +120,25 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
       stop, claim-failure survival, cache-across-restart zero re-bill (invariant #8),
       corrupt-row degradation, no-backend v2 behavior.
 
+- [x] P4 — pipeline deltas: `ingest_webhook.py` (payload→ApplicantRow mapping, essay
+      metadata w/ exact bounds, structured GPA w/ weighted-only→`force_task_a`,
+      international derivation from a US-names set, contract-drift notes),
+      `run_essay_gates_v3` (strict exact bounds — required violation = REJECTED
+      "tampering or contract drift"; profanity across ALL essays incl. optional;
+      gibberish on required only; soft ramp + affirmation gate retired), Task D at 15
+      (schema+prompt+config), **NEW Task F** (`llm/prompts/task_f.py`,
+      `scoring/technical_essay.py` — absent→0 free, over-max→voided free,
+      parse-failure→0+note, config-priced 0–20), school 20/16, resume `bonus_max: 0`
+      (kill switch until WEBSITE_ASKS #11), composition + `Scores.technical_essay_bonus`
+      (150 ceiling), `grade_webhook_applicant` + `make_grade_fn` (worker seam; resume-only
+      row → NEEDS_REVIEW "essays not yet received"), worker + durable-cache wiring in the
+      API lifespan. v2 test pins rescaled; 32 new tests (mapping, Task F ladder, bounds
+      matrix incl. inclusive boundaries, optional-essay gate semantics, weighted-GPA
+      routing, grade_fn seam). Per-cohort read-time ranking helper moved to P6 (it's a
+      read/UI concern).
+
 ## In Progress
-- [ ] P4 — pipeline deltas (webhook mapping, strict bounds, 15-pt essays, Task F,
-      school 20/16, new composition + per-cohort ranking; wire worker grade_fn +
-      lifespan startup).
+- [ ] P5 — admin auth (login page, session store, throttling, require_admin).
 
 ## Owner inputs needed (v3)
 - [ ] **Create the Neon project/database** (separate from the website's) + a dev branch;
@@ -138,6 +153,8 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
   11 passed with it. `uv run ruff check .` clean.
 - P2: `uv run pytest tests/api/test_webhook.py -q` — 19 passed, no DB needed.
 - P3: `uv run pytest tests/test_worker.py -q` — 7 passed, no DB needed.
+- P4: `uv run pytest tests/test_pipeline_v3.py tests/test_ingest_webhook.py
+  tests/scoring/test_technical_essay.py -q` — 32 passed; full suite 521 passed.
 
 ---
 

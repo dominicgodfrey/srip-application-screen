@@ -64,14 +64,14 @@ def test_user_prompt_renders_template() -> None:
 
 
 def test_clean_essay_scores_quality_minus_penalties() -> None:
-    r = score_one_essay(_task_d(quality_score=18, grammar_spelling_penalty=2), 1.0, CFG)
+    r = score_one_essay(_task_d(quality_score=13, grammar_spelling_penalty=2), 1.0, CFG)
     assert not r.gated
-    assert r.score == pytest.approx(15.0)  # 18 - 2 - 1
+    assert r.score == pytest.approx(10.0)  # 13 - 2 - 1
 
 
 def test_no_penalties_scores_full_quality() -> None:
-    r = score_one_essay(_task_d(quality_score=20), 0.0, CFG)
-    assert r.score == pytest.approx(20.0)
+    r = score_one_essay(_task_d(quality_score=15), 0.0, CFG)
+    assert r.score == pytest.approx(15.0)
 
 
 def test_length_penalty_never_drives_score_negative() -> None:
@@ -83,19 +83,19 @@ def test_length_penalty_never_drives_score_negative() -> None:
 
 def test_score_capped_at_quality_max_each() -> None:
     # Defensive: even if a future model over-returns, the cap holds.
-    out = _task_d(quality_score=20)
+    out = _task_d(quality_score=15)
     r = score_one_essay(out, -5.0, CFG)  # a negative "penalty" would otherwise inflate
     assert r.score == pytest.approx(float(CFG.quality_max_each))
 
 
 def test_gibberish_essay_is_gated_and_scores_zero() -> None:
-    r = score_one_essay(_task_d(is_gibberish=True, quality_score=18), 0.0, CFG)
+    r = score_one_essay(_task_d(is_gibberish=True, quality_score=13), 0.0, CFG)
     assert r.gated and r.is_gibberish
     assert r.score == 0.0
 
 
 def test_off_topic_essay_is_gated_and_scores_zero() -> None:
-    r = score_one_essay(_task_d(on_topic=False, quality_score=18), 0.0, CFG)
+    r = score_one_essay(_task_d(on_topic=False, quality_score=13), 0.0, CFG)
     assert r.gated and not r.on_topic
     assert r.score == 0.0
 
@@ -118,13 +118,13 @@ async def _grade(client: FakeLLMClient) -> object:
 
 
 async def test_both_essays_pass_composes_total() -> None:
-    client = _client(lambda t, u, s: _task_d(quality_score=18, grammar_spelling_penalty=1))
+    client = _client(lambda t, u, s: _task_d(quality_score=13, grammar_spelling_penalty=1))
     r = await grade_essays(_row(), 1.0, 2.0, "P1", "P2", client, APP)
     assert r.verdict == "pass"
     assert r.primary_reason == ""
-    assert r.subscores.e1 == pytest.approx(16.0)  # 18 - 1 - 1
-    assert r.subscores.e2 == pytest.approx(15.0)  # 18 - 1 - 2
-    assert r.subscores.total == pytest.approx(31.0)
+    assert r.subscores.e1 == pytest.approx(11.0)  # 13 - 1 - 1
+    assert r.subscores.e2 == pytest.approx(10.0)  # 13 - 1 - 2
+    assert r.subscores.total == pytest.approx(21.0)
     assert r.essay_relevance.e1_on_topic is True and r.essay_relevance.e2_on_topic is True
     assert r.gibberish.hit is False
 
@@ -132,7 +132,7 @@ async def test_both_essays_pass_composes_total() -> None:
 async def test_off_topic_either_essay_rejects_with_no_score() -> None:
     # essay2 (the second call) is off-topic.
     def handler(t, u, s):  # type: ignore[no-untyped-def]
-        return _task_d(on_topic="essay two text" not in u, quality_score=18)
+        return _task_d(on_topic="essay two text" not in u, quality_score=13)
 
     client = _client(handler)
     r = await _grade(client)

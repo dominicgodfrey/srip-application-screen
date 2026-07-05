@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import IO
 
 from .config import AppConfig
-from .gates.essays import Stage1Result, run_essay_gates
+from .gates.essays import Stage1Result, run_essay_gates, run_essay_gates_v3
 from .gates.gpa import assess_gpa
 from .ingest import (
     AFFIRMATION,
@@ -46,8 +46,16 @@ from .ingest import (
     IngestReport,
     ingest_csv,
 )
+from .ingest_webhook import WebhookApplicant, map_essays_payload
 from .llm.client import BaseLLMClient
-from .models import AuditRecord, EssayTexts, HitGate, ProgramChoices
+from .models import (
+    AuditRecord,
+    EssaysModePayload,
+    EssayTexts,
+    HitGate,
+    ProgramChoices,
+    ResumeModePayload,
+)
 from .outputs import (
     build_summary,
     decisions_jsonl,
@@ -56,11 +64,13 @@ from .outputs import (
     rejected_csv,
 )
 from .resume_fetch import ResumeFetcher
-from .scoring.aggregate import rank_records
+from .scoring.aggregate import finalize_score, rank_records
 from .scoring.coursework import score_coursework
 from .scoring.essays import Stage4Result, grade_essays
 from .scoring.resume import score_resume
 from .scoring.school import score_school
+from .scoring.technical_essay import score_technical_essay
+from .worker import GradeResult
 
 # A gate-survivor leaves grade_one marked RANKED with final_score=None; Stage 8 rank_records
 # (which treats any non-terminal outcome as a survivor) fills score + rank. The AuditRecord
@@ -581,3 +591,215 @@ def demote_record(
         _build_result(records, result.ingest_report, result.rows, result.resolution),
         demoted,
     )
+
+
+# ================================================================================================
+# v3 (P4) — webhook per-application runner (PRD v3 §4)
+# ================================================================================================
+# The continuous-service twin of grade_one: same fail-fast order and audit discipline, driven by
+# a WebhookApplicant instead of a CSV row. Deltas: strict per-essay bounds (run_essay_gates_v3),
+# no affirmation gate (retired — the form enforces required checkboxes at submit), structured GPA
+# with the weighted-only Task A route, the NEW Stage 4b technical-essay bonus (Task F), and the
+# final score composed immediately (rank is computed at read time per cohort — never stored).
+
+_STAGE_4B = "stage4b"
+
+
+def _build_webhook_base_record(applicant: WebhookApplicant) -> AuditRecord:
+    """Assemble the identity/metadata half of the audit record from the mapped payload."""
+    row = applicant.row
+    name = " ".join(part for part in (row.first_name, row.last_name) if part)
+    record = AuditRecord(
+        submission_id=row.submission_id,
+        name=name,
+        email=row.email,
+        cohort_name=applicant.cohort_name,
+        state_of_residence=applicant.state_of_residence,
+        international=applicant.international,
+        programming_languages=row.programming_languages,
+        github_profile=row.github_profile,
+        sub_track=row.sub_track,
+        program_choices=ProgramChoices(
+            first=row.first_choice or None,
+            second=row.second_choice or None,
+            third=row.third_choice or None,
+        ),
+        outcome=_PLACEHOLDER_OUTCOME,
+    )
+    record.essays = EssayTexts(e1=row.essay1, e2=row.essay2, e3=row.essay3)
+    record.errors.extend(applicant.mapping_notes)
+    return record
+
+
+async def grade_webhook_applicant(
+    applicant: WebhookApplicant,
+    client: BaseLLMClient,
+    cfg: AppConfig,
+    fetcher: ResumeFetcher | None = None,
+) -> AuditRecord:
+    """Grade one webhook application through the v3 fail-fast pipeline (PRD v3 §4).
+
+    Returns a terminal record: ``REJECTED``/``NEEDS_REVIEW`` unscored, or ``RANKED`` with
+    ``final_score`` composed (rank stays None — computed at read time per cohort, §7).
+    Per-row isolation: any unexpected error → ``NEEDS_REVIEW`` with an ``errors[]`` note.
+    """
+    record = _build_webhook_base_record(applicant)
+    row = applicant.row
+    try:
+        # A payload that did not deliver two required essays is unscoreable — NEEDS_REVIEW
+        # before any gate could misread the blanks as an applicant failure (§0.7).
+        if applicant.missing_required_essays:
+            return _terminal(
+                record,
+                "NEEDS_REVIEW",
+                _STAGE_1,
+                "Payload delivered fewer than two required essays (contract drift)",
+            )
+
+        # Stage 1 — strict bounds + profanity (ALL essays) + gibberish (required essays).
+        stage1 = run_essay_gates_v3(applicant, cfg)
+        record.gates.essay_length = stage1.length_gate
+        record.gates.profanity = stage1.profanity
+        record.gates.gibberish = stage1.gibberish
+        if stage1.rejected:
+            return _terminal(record, "REJECTED", _STAGE_1, stage1.primary_reason)
+
+        # Stage 2-3 — GPA (structured input; weighted-only forces Task A).
+        gpa = await assess_gpa(row, client, cfg, force_task_a=applicant.force_task_a)
+        record.gpa = gpa.assessment
+        record.gates.gpa_gate = gpa.gate
+        if gpa.assessment.source == "llm":
+            record.llm_calls.append("task_a")
+        if gpa.assessment.explanation_eval is not None:
+            record.llm_calls.append("task_b")
+        if gpa.verdict == "reject":
+            return _terminal(record, "REJECTED", _STAGE_3, gpa.reason)
+        if gpa.verdict == "needs_review":
+            return _terminal(record, "NEEDS_REVIEW", _STAGE_3, gpa.reason)
+        record.scores.gpa_points = gpa.gpa_points
+        record.reasons.append(f"PASS gpa_gate: {gpa.gate.reason}")
+
+        # Stage 4 — required essays (Task D ×2), 0-15 each; prompts + target ranges come
+        # from the payload itself, so they can never drift from the live form.
+        stage4 = await grade_essays(
+            row,
+            stage1.length_penalty_e1,  # always 0.0 in v3 (soft ramp retired)
+            stage1.length_penalty_e2,
+            applicant.e1.question or "(essay question not delivered in payload)",
+            applicant.e2.question or "(essay question not delivered in payload)",
+            client,
+            cfg,
+            target_range_e1=applicant.e1.target_range,
+            target_range_e2=applicant.e2.target_range,
+        )
+        record.llm_calls.extend(("task_d_e1", "task_d_e2"))
+        record.gates.essay_relevance = stage4.essay_relevance
+        record.gates.gibberish = _reconcile_gibberish(stage1, stage4)
+        if stage4.verdict == "reject":
+            return _terminal(record, "REJECTED", _STAGE_4, stage4.primary_reason)
+        if stage4.verdict == "needs_review":
+            return _terminal(record, "NEEDS_REVIEW", _STAGE_4, stage4.primary_reason)
+        record.scores.essay = stage4.subscores
+        record.reasons.append(f"essays on-topic; quality total {stage4.subscores.total}")
+
+        # Stage 4b — technical-essay bonus (Task F; bonus-only, absent → free no-op).
+        stage4b = await score_technical_essay(
+            row.essay3,
+            applicant.e3.question or "(technical essay prompt not delivered in payload)",
+            applicant.e3.max_words,
+            client,
+            cfg,
+        )
+        record.scores.technical_essay_bonus = stage4b.bonus
+        record.technical_essay = stage4b.assessment
+        if stage4b.llm_called:
+            record.llm_calls.append("task_f")
+        record.errors.extend(stage4b.errors)
+        if stage4b.bonus > 0:
+            record.reasons.append(f"technical essay bonus {stage4b.bonus}")
+
+        # Stage 5 — coursework bonus (Task C; empty cell → free no-op).
+        coursework = await score_coursework(row, client, cfg)
+        record.scores.coursework_bonus = coursework.bonus
+        record.coursework_breakdown = coursework.courses
+        if row.coursework.strip():
+            record.llm_calls.append("task_c")
+        if coursework.error:
+            record.errors.append(coursework.error)
+        counting = sum(1 for c in coursework.courses if c.counts)
+        if counting:
+            record.reasons.append(f"coursework: {counting} counting course(s)")
+
+        # Stage 6 — resume bonus (behind the pluggable seam; bonus_max=0 → free no-op).
+        stage6 = await score_resume(row, fetcher, client, cfg)
+        record.scores.resume_bonus = stage6.bonus
+        record.resume = stage6.assessment
+        if stage6.task_e_called:
+            record.llm_calls.append("task_e")
+        if stage6.error:
+            record.errors.append(stage6.error)
+
+        # Stage 7 — school bonus.
+        school = score_school(row, cfg)
+        record.scores.school_bonus = school.bonus
+        record.school_match = school.match
+        if school.match.matched_name:
+            record.reasons.append(
+                f"school match: {school.match.matched_name} ({school.match.list})"
+            )
+
+        # Survivor — compose the score now (Stage 8); rank is read-time, per cohort (§7).
+        record.outcome = "RANKED"
+        record.decided_at_stage = _STAGE_8
+        record.primary_reason = "Survived all gates"
+        finalize_score(record, cfg)
+        return record
+    except Exception as exc:  # per-row isolation (invariant #9)
+        record.errors.append(f"{type(exc).__name__}: {exc}")
+        return _terminal(record, "NEEDS_REVIEW", _STAGE_ERROR, "Unexpected error during grading")
+
+
+def make_grade_fn(
+    client: BaseLLMClient, cfg: AppConfig, fetcher: ResumeFetcher | None = None
+):
+    """Bind the v3 runner into the worker's ``GradeFn`` shape (P3 seam).
+
+    The claimed DB row carries the raw stored payloads; they are re-validated here (they
+    were validated at the edge, but the DB is not trusted blindly) and mapped through
+    :func:`~srip_filter.ingest_webhook.map_essays_payload`. A resume-only row (essays not
+    yet delivered — legal, PRD v3 §1.1) grades to ``NEEDS_REVIEW`` with an explanatory
+    reason; the essays-mode delivery later resets it to ``received`` and re-grades fully.
+    """
+
+    async def grade_fn(db_row: dict) -> GradeResult:
+        essays_raw = db_row.get("essays_payload")
+        if not essays_raw:
+            record = AuditRecord(
+                submission_id=str(db_row["submission_id"]),
+                name=db_row.get("student_name") or "",
+                email=db_row.get("user_email") or "",
+                cohort_name=db_row.get("cohort_name") or "",
+                outcome="NEEDS_REVIEW",
+                decided_at_stage="ingest",
+                primary_reason="Resume delivered but essays not yet received",
+            )
+            return GradeResult(
+                audit_record=record.model_dump(mode="json"),
+                outcome=record.outcome,
+                final_score=None,
+            )
+
+        payload = EssaysModePayload.model_validate(essays_raw)
+        resume_raw = db_row.get("resume_payload")
+        resume_payload = (
+            ResumeModePayload.model_validate(resume_raw) if resume_raw else None
+        )
+        applicant = map_essays_payload(payload, resume_payload=resume_payload)
+        record = await grade_webhook_applicant(applicant, client, cfg, fetcher)
+        return GradeResult(
+            audit_record=record.model_dump(mode="json"),
+            outcome=record.outcome,
+            final_score=record.final_score,
+        )
+
+    return grade_fn

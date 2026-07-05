@@ -97,8 +97,18 @@ class GpaConfig(_Strict):
 
 
 class EssayScoringConfig(_Strict):
-    quality_max_each: int = 20
+    quality_max_each: int = 15  # v3 (SCORING.md): 15 per required essay, 30 total
     grammar_penalty_max: int = 3
+
+
+class TechnicalEssayConfig(_Strict):
+    """Stage 4b Task F bonus pricing (v3, SCORING.md). Model judges 0-10 signals; this
+    prices them: ``bonus_max * Σ(w·signal) / (10·Σw)``. Bonus-only — never rejects."""
+
+    bonus_max: float = 20.0
+    weight_depth: float = 1.0
+    weight_exploration: float = 1.0
+    weight_impact: float = 1.0
 
 
 class CourseworkConfig(_Strict):
@@ -112,8 +122,8 @@ class CourseworkConfig(_Strict):
 
 
 class SchoolConfig(_Strict):
-    bonus_us_top20: float = 15.0
-    bonus_intl_top50: float = 12.0
+    bonus_us_top20: float = 20.0  # v3 (SCORING.md)
+    bonus_intl_top50: float = 16.0
     fuzzy_match_threshold: int = 88
 
 
@@ -129,7 +139,9 @@ class ResumeConfig(_Strict):
     classifies, config prices (the Task C pattern).
     """
 
-    bonus_max: float = 10.0  # PRD §10.1 ("120 once resume is built"); set 0 to kill the stage
+    # v3: 0 = shipping default until the engine decision (WEBSITE_ASKS #11); 25 once
+    # decided (SCORING.md). At 0 the stage performs zero fetches and zero LLM calls.
+    bonus_max: float = 0.0
     max_download_bytes: int = 10_485_760  # 10 MiB streaming cap per resume; abort above this
     download_timeout_s: float = 20.0
     download_concurrency: int = 4  # own semaphore, separate from the LLM one
@@ -164,6 +176,7 @@ class TaskModels(_Strict):
     task_c: str = "gpt-4.1-mini"
     task_d: str = "gpt-4.1"
     task_e: str = "gpt-4.1-mini"  # E: resume signal extraction (mechanical, Phase 12)
+    task_f: str = "gpt-4.1"  # F: technical-essay bonus (judgment, bonus-only — v3)
 
 
 class LlmConfig(_Strict):
@@ -220,6 +233,7 @@ class AppConfig(_Strict):
     gibberish: GibberishConfig = Field(default_factory=GibberishConfig)
     gpa: GpaConfig = Field(default_factory=GpaConfig)
     essay_scoring: EssayScoringConfig = Field(default_factory=EssayScoringConfig)
+    technical_essay: TechnicalEssayConfig = Field(default_factory=TechnicalEssayConfig)
     coursework: CourseworkConfig = Field(default_factory=CourseworkConfig)
     school: SchoolConfig = Field(default_factory=SchoolConfig)
     resume: ResumeConfig = Field(default_factory=ResumeConfig)

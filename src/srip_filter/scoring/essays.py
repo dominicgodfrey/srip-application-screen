@@ -140,6 +140,9 @@ async def grade_essays(
     prompt_e2: str,
     client: BaseLLMClient,
     cfg: AppConfig,
+    *,
+    target_range_e1: str | None = None,
+    target_range_e2: str | None = None,
 ) -> Stage4Result:
     """Stage 4 end to end: grade both essays with Task D and reduce to a verdict (PRD §8.3).
 
@@ -150,18 +153,26 @@ async def grade_essays(
     on either essay → ``reject``; an :class:`LLMParseFailure` after the client's retry →
     ``needs_review``. Otherwise ``pass`` with the composed subscores.
     """
+    # v3: per-essay target ranges come from the webhook payload metadata; None keeps the
+    # v2 fixed band (the replay/calibration path).
+    range_kw1 = {"target_range": target_range_e1} if target_range_e1 else {}
+    range_kw2 = {"target_range": target_range_e2} if target_range_e2 else {}
     try:
         out1, out2 = await asyncio.gather(
             client.complete(
                 "task_d",
                 system=task_d_prompt.SYSTEM,
-                user=task_d_prompt.user_prompt(prompt_e1, word_count(row.essay1), row.essay1),
+                user=task_d_prompt.user_prompt(
+                    prompt_e1, word_count(row.essay1), row.essay1, **range_kw1
+                ),
                 schema=TaskDOutput,
             ),
             client.complete(
                 "task_d",
                 system=task_d_prompt.SYSTEM,
-                user=task_d_prompt.user_prompt(prompt_e2, word_count(row.essay2), row.essay2),
+                user=task_d_prompt.user_prompt(
+                    prompt_e2, word_count(row.essay2), row.essay2, **range_kw2
+                ),
                 schema=TaskDOutput,
             ),
         )

@@ -241,7 +241,9 @@ def _from_task_a(out: TaskAOutput, cfg: GpaConfig) -> GpaNormalization:
     )
 
 
-async def normalize_gpa(raw: str, client: BaseLLMClient, cfg: AppConfig) -> GpaNormalization:
+async def normalize_gpa(
+    raw: str, client: BaseLLMClient, cfg: AppConfig, *, force_task_a: bool = False
+) -> GpaNormalization:
     """Stage 2: normalize a raw GPA, deterministic-first, with LLM Task A as the fallback.
 
     Resolves and returns immediately for any value the deterministic parser handled or sent to
@@ -249,9 +251,14 @@ async def normalize_gpa(raw: str, client: BaseLLMClient, cfg: AppConfig) -> GpaN
     ``gpa_max`` and an unplaceable result (or an :class:`LLMParseFailure` after the client's
     retry) becomes ``requires_manual_review`` — i.e. ``NEEDS_REVIEW``, never a rejection. The raw
     string is used as ``cache_text`` so identical GPAs dedup within a run.
+
+    ``force_task_a`` (v3): a weighted-only submission must NOT take the deterministic
+    fraction path — "4.4 / 5.0" *weighted* is not an unweighted /5 scale, so the parser's
+    linear conversion would be wrong. The caller flags it and Task A judges instead
+    (PRD v3 §4 Stage 2). A blank value still short-circuits to manual review.
     """
     det = normalize_gpa_deterministic(raw, cfg.gpa)
-    if not det.needs_llm:
+    if not det.needs_llm and not (force_task_a and det.normalized_gpa is not None):
         return det
     try:
         out = await client.complete(
@@ -441,7 +448,13 @@ def _task_b_result(
     )
 
 
-async def assess_gpa(row: ApplicantRow, client: BaseLLMClient, cfg: AppConfig) -> GpaGateResult:
+async def assess_gpa(
+    row: ApplicantRow,
+    client: BaseLLMClient,
+    cfg: AppConfig,
+    *,
+    force_task_a: bool = False,
+) -> GpaGateResult:
     """Stages 2-3 end to end: normalize the GPA, then gate it (PRD §6).
 
     Deterministic and Task-A paths resolve most applicants without reaching Task B. The single
@@ -450,7 +463,7 @@ async def assess_gpa(row: ApplicantRow, client: BaseLLMClient, cfg: AppConfig) -
     ``reject`` fails. Any LLM parse failure routes to ``needs_review``. Never rejects an
     unscoreable applicant.
     """
-    norm = await normalize_gpa(row.gpa, client, cfg)
+    norm = await normalize_gpa(row.gpa, client, cfg, force_task_a=force_task_a)
     det = gpa_gate_deterministic(row.gpa, norm, row.gpa_explanation, cfg.gpa)
     if det is not None:
         return det

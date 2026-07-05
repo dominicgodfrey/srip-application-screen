@@ -32,17 +32,19 @@ from ..models import AuditRecord, Scores
 
 
 def compose_final_score(scores: Scores, cfg: AppConfig) -> float:
-    """Sum the five §10.1 score components into the additive ``final_score``. Pure.
+    """Sum the score components into the additive ``final_score``. Pure.
 
-    ``gpa_points + essay.total + coursework_bonus + school_bonus + resume_bonus`` — required
-    signals (GPA + essays) plus the three additive-only bonuses. Each term is non-negative and
-    none is subtracted, so a missing optional signal (coursework / school / resume left at 0)
-    never lowers the total (§12 #1). ``cfg`` is accepted for signature parity with the other
-    scoring entry points and future composition tuning; the current sum needs no knobs.
+    v3 (SCORING.md): ``gpa_points + essay.total + technical_essay_bonus + coursework_bonus
+    + school_bonus + resume_bonus`` — required signals (GPA 40 + essays 30) plus the four
+    additive-only bonuses (20 + 15 + 20 + 25 = 150 max). Each term is non-negative and
+    none is subtracted, so a missing optional signal left at 0 never lowers the total
+    (invariant #1). ``cfg`` is accepted for signature parity with the other scoring entry
+    points and future composition tuning; the current sum needs no knobs.
     """
     return round(
         scores.gpa_points
         + scores.essay.total
+        + scores.technical_essay_bonus
         + scores.coursework_bonus
         + scores.school_bonus
         + scores.resume_bonus,

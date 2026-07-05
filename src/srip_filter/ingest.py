@@ -248,6 +248,12 @@ class ApplicantRow(BaseModel):
     essay1: str = ""
     essay2: str = ""
     affirmation: str = ""
+    # v3 webhook-only fields (blank on the CSV path): the optional technical essay and the
+    # carried-not-scored metadata (PRD v3 §2.2). Populated by ingest_webhook.
+    essay3: str = ""
+    programming_languages: str = ""
+    github_profile: str = ""
+    sub_track: str = ""
 
     @classmethod
     def from_record(cls, record: dict[str, object], resolution: HeaderResolution) -> ApplicantRow:

@@ -62,7 +62,7 @@ def test_task_d_score_bounds() -> None:
             is_gibberish=False,
             on_topic=True,
             relevance_confidence=0.9,
-            quality_score=21,  # > 20
+            quality_score=16,  # > 15 (v3 cap)
             grammar_spelling_penalty=0,
             saliency_notes="ok",
             rationale="ok",
@@ -178,7 +178,7 @@ def test_extra_key_forbidden() -> None:
         "is_gibberish": False,
         "on_topic": True,
         "relevance_confidence": 0.9,
-        "quality_score": 18,
+        "quality_score": 13,
         "grammar_spelling_penalty": 1,
         "saliency_notes": "n",
         "rationale": "r",

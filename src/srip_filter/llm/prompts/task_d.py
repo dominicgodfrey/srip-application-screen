@@ -25,7 +25,7 @@ SYSTEM = (
     "2. RELEVANCE: decide if the essay actually responds to the given PROMPT. An off-topic "
     "essay (answers a different question, or is generic boilerplate that ignores the prompt) is "
     "disqualifying — set on_topic false.\n"
-    "3. QUALITY: if it is on-topic and genuine, score 0-20 on clarity, specificity, coherence, "
+    "3. QUALITY: if it is on-topic and genuine, score 0-15 on clarity, specificity, coherence, "
     "and overall saliency (does it make a compelling, concrete case?). Reward concrete detail "
     "and genuine motivation over generic filler.\n\n"
     "Grammar/spelling: apply only a SLIGHT penalty (0-3) for genuine errors. Never penalize "
@@ -38,15 +38,19 @@ SYSTEM = (
 TARGET_RANGE = "100-350"
 
 
-def user_prompt(prompt_text: str, word_count: int, essay_text: str) -> str:
+def user_prompt(
+    prompt_text: str, word_count: int, essay_text: str, target_range: str = TARGET_RANGE
+) -> str:
     """Build the Task D user message for one essay (PRD §8.3 template).
 
-    ``prompt_text`` is the resolved CSV essay-question header (the prompt the applicant
-    answered); ``word_count`` is the Stage 1 tokenizer count; ``essay_text`` is the raw essay.
+    ``prompt_text`` is the essay question exactly as the applicant saw it; ``word_count``
+    is the Stage 1 tokenizer count; ``essay_text`` is the raw essay. v3 passes the
+    per-essay ``target_range`` from the webhook payload's min/max metadata; the default
+    keeps the v2 form's fixed band for the replay/calibration path.
     """
     return (
         f'PROMPT: """{prompt_text}"""\n'
         f"WORD_COUNT: {word_count}\n"
-        f"TARGET_RANGE: {TARGET_RANGE}\n"
+        f"TARGET_RANGE: {target_range}\n"
         f'ESSAY: """{essay_text}"""'
     )
