@@ -135,6 +135,13 @@ webhook:
 worker:
   poll_seconds: 2.0         # idle sleep between queue polls; stop wakes it immediately
 
+# Admin sessions (P5, PRD v3 §6). ADMIN_PASSWORD_HASH lives in env, never here.
+auth:
+  session_ttl_seconds: 43200.0  # 12 h
+  max_attempts: 5               # failed logins within the window before global lockout
+  lockout_seconds: 300.0
+  cookie_secure: true           # false only for local http:// development
+
 # API edge caps (Phase 9) — the stateless FastAPI shell. Magic numbers, not in the handlers.
 api:
   max_upload_bytes: 26214400  # 25 MiB cap on the uploaded CSV body -> 413 above this

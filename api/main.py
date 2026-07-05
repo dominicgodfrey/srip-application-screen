@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -36,6 +36,14 @@ from srip_filter.models import CohortCapacities, CohortResult
 from srip_filter.pipeline import demote_record, make_grade_fn, promote_record
 from srip_filter.worker import run_worker
 
+from .auth import (
+    SESSION_COOKIE,
+    LoginThrottle,
+    SessionStore,
+    is_open_path,
+    verify_password,
+    wants_html,
+)
 from .cohorts import CohortFormat, cohort_response, parse_decisions_jsonl
 from .jobs import (
     ArtifactName,
@@ -84,6 +92,7 @@ def create_app(
     client: BaseLLMClient | None = None,
     db_pool: object | None = None,
     webhook_secrets: tuple[str, ...] | None = None,
+    admin_password_hash: str | None = None,
 ) -> FastAPI:
     """Build the FastAPI app with its registry and (optional) injected LLM client.
 
@@ -178,13 +187,103 @@ def create_app(
         )
     register_webhooks(app)
 
-    # -- Server-rendered UI (Phase 10) -----------------------------------------------------------
-    # Same-origin Jinja2 templates + static assets; the browser drives everything via fetch against
-    # the JSON API above, so no CORS. Paths are resolved off this file so CWD doesn't matter.
+    # -- Server-rendered UI shell (Phase 10; created before auth so /login can render) -----------
+    # Same-origin Jinja2 templates + static assets; the browser drives everything via fetch
+    # against the JSON API, so no CORS. Paths are resolved off this file so CWD doesn't matter.
     templates = Jinja2Templates(directory=str(_HERE / "templates"))
     app.state.templates = templates
     app.mount("/static", _RevalidatedStaticFiles(directory=str(_HERE / "static")), name="static")
     register_pages(app, templates)
+
+    # -- Admin auth (P5, PRD v3 §6) --------------------------------------------------------------
+    # Default-deny: every route needs a session except auth.OPEN_PREFIXES (health, the
+    # HMAC-verified webhook, the login page, static assets). Shared-password login → opaque
+    # server-side session token in an HttpOnly cookie; global sliding lockout on failures.
+    app.state.admin_password_hash = (
+        admin_password_hash
+        if admin_password_hash is not None
+        else get_secrets().admin_password_hash
+    )
+    app.state.sessions = SessionStore(ttl_seconds=cfg.auth.session_ttl_seconds)
+    app.state.login_throttle = LoginThrottle(
+        max_attempts=cfg.auth.max_attempts, lockout_seconds=cfg.auth.lockout_seconds
+    )
+
+    @app.middleware("http")
+    async def require_admin(request, call_next):  # type: ignore[no-untyped-def]
+        path = request.url.path
+        if is_open_path(path):
+            return await call_next(request)
+        if app.state.sessions.is_valid(request.cookies.get(SESSION_COOKIE)):
+            return await call_next(request)
+        if wants_html(request.headers.get("accept")):
+            from fastapi.responses import RedirectResponse
+
+            return RedirectResponse(url=f"/login?next={path}", status_code=303)
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+
+    @app.get("/login", tags=["auth"])
+    async def login_page(request: Request, next: str = "/"):  # type: ignore[no-untyped-def]
+        from .web import APP_TITLE, BRAND
+
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"brand": BRAND, "app_title": APP_TITLE, "error": "", "next_path": next},
+        )
+
+    @app.post("/login", tags=["auth"])
+    async def login_submit(request: Request):  # type: ignore[no-untyped-def]
+        from fastapi.responses import RedirectResponse
+
+        from .web import APP_TITLE, BRAND
+
+        def _page(error: str, status_code: int):
+            return templates.TemplateResponse(
+                request,
+                "login.html",
+                {"brand": BRAND, "app_title": APP_TITLE, "error": error, "next_path": "/"},
+                status_code=status_code,
+            )
+
+        stored = app.state.admin_password_hash
+        if not stored:
+            return _page("Login is not configured on this server.", 503)
+        if app.state.login_throttle.locked_out():
+            return _page("Too many failed attempts. Try again in a few minutes.", 429)
+
+        form = await request.form()
+        password = str(form.get("password") or "")
+        next_path = str(form.get("next") or "/")
+        if not next_path.startswith("/") or next_path.startswith("//"):
+            next_path = "/"  # open-redirect guard: same-origin paths only
+        if not verify_password(password, stored):
+            app.state.login_throttle.record_failure()
+            return _page("Incorrect password.", 401)
+
+        app.state.login_throttle.reset()
+        token = app.state.sessions.create()
+        response = RedirectResponse(url=next_path, status_code=303)
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            max_age=int(cfg.auth.session_ttl_seconds),
+            httponly=True,
+            samesite="lax",
+            secure=cfg.auth.cookie_secure,
+        )
+        return response
+
+    @app.post("/logout", tags=["auth"])
+    async def logout(request: Request):  # type: ignore[no-untyped-def]
+        from fastapi.responses import RedirectResponse
+
+        app.state.sessions.revoke(request.cookies.get(SESSION_COOKIE))
+        response = RedirectResponse(url="/login", status_code=303)
+        response.delete_cookie(SESSION_COOKIE)
+        return response
 
     @app.get("/health", response_model=HealthResponse, tags=["meta"])
     async def health() -> HealthResponse:

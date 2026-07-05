@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Sign in — {{ app_title }}{% endblock %}
+{% block content %}
+<section class="card" style="max-width: 420px; margin: 8vh auto;">
+  <h1>Staff sign-in</h1>
+  <p class="muted">This system holds applicant data. Authorized staff only.</p>
+  {% if error %}
+  <div class="alert alert-error" role="alert">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="/login" autocomplete="off">
+    <label for="password">Admin password</label>
+    <input type="password" id="password" name="password" required autofocus
+           autocomplete="current-password">
+    <input type="hidden" name="next" value="{{ next_path }}">
+    <button type="submit" class="btn btn-primary" style="margin-top: 1rem;">Sign in</button>
+  </form>
+</section>
+{% endblock %}

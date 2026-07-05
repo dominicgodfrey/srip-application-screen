@@ -209,6 +209,15 @@ class DbConfig(_Strict):
     pool_max_size: int = 5
 
 
+class AuthConfig(_Strict):
+    """Admin-session knobs (P5, PRD v3 §6). The password hash itself is a secret (env)."""
+
+    session_ttl_seconds: float = 43_200.0  # 12 h — one working day, then re-login
+    max_attempts: int = 5  # failed logins within the window before lockout
+    lockout_seconds: float = 300.0  # sliding lockout window
+    cookie_secure: bool = True  # set False only for local http:// development
+
+
 class WorkerConfig(_Strict):
     """Grading-worker loop knobs (P3)."""
 
@@ -243,6 +252,7 @@ class AppConfig(_Strict):
     db: DbConfig = Field(default_factory=DbConfig)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
 
 
 class Secrets(BaseSettings):
@@ -266,6 +276,9 @@ class Secrets(BaseSettings):
     # both are accepted while the website flips to a new value, then previous is cleared.
     ats_webhook_secret: str | None = None
     ats_webhook_secret_previous: str | None = None
+    # Admin login (P5): PBKDF2 hash only, never plaintext. Generate:
+    #   uv run python -m api.auth '<password>'
+    admin_password_hash: str | None = None
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:

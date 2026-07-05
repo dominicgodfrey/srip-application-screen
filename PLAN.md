@@ -137,8 +137,19 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
       routing, grade_fn seam). Per-cohort read-time ranking helper moved to P6 (it's a
       read/UI concern).
 
+- [x] P5 — admin auth: `api/auth.py` (PBKDF2-SHA256 password hashing — generate via
+      `uv run python -m api.auth '<password>'`; opaque-token `SessionStore` w/ TTL +
+      sweep; global sliding `LoginThrottle`; `OPEN_PREFIXES` allowlist), default-deny
+      middleware in `create_app` (browsers → 303 /login, API callers → 401 JSON; webhook
+      stays HMAC-governed, never redirected), `/login` + `/logout` routes + `login.html`
+      (open-redirect guard on `next`; unconfigured hash fails closed 503/401),
+      `auth:` config + `ADMIN_PASSWORD_HASH` secret. Existing API tests bypass the
+      barrier via an autouse conftest fixture (`real_auth` marker opts into the real
+      thing); 14 new auth tests.
+
 ## In Progress
-- [ ] P5 — admin auth (login page, session store, throttling, require_admin).
+- [ ] P6 — review UI re-point (live dashboard over DB, audit detail, promote/demote,
+      needs-review queue, exports, per-submission delete, close-cycle stub).
 
 ## Owner inputs needed (v3)
 - [ ] **Create the Neon project/database** (separate from the website's) + a dev branch;
@@ -155,6 +166,7 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
 - P3: `uv run pytest tests/test_worker.py -q` — 7 passed, no DB needed.
 - P4: `uv run pytest tests/test_pipeline_v3.py tests/test_ingest_webhook.py
   tests/scoring/test_technical_essay.py -q` — 32 passed; full suite 521 passed.
+- P5: `uv run pytest tests/api/test_auth.py -q` — 14 passed; full suite 536 passed.
 
 ---
 

@@ -51,3 +51,6 @@ select = ["E", "F", "I", "B", "UP", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "real_auth: exercise the real admin-auth barrier (others bypass it via conftest)",
+]
