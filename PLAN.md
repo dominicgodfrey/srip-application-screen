@@ -88,15 +88,31 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
 ## Completed
 - [x] P0.1 — README housekeeping committed (08e05f2); `v2-fillout-batch` branch created
       and pushed (freeze point).
+- [x] P0.2 — v3 doc suite: PRD v3, SCORING.md, WEBSITE_ASKS.md, CLAUDE.md + PLAN.md
+      rewrites, v2-PRD superseded banner (1121e55).
+- [x] P1 — persistence layer: `db/migrations/001_init.sql` (applications + llm_cache +
+      events, status CHECK, indexes), `src/srip_filter/db.py` (asyncpg pool, migration
+      applier w/ schema_migrations ledger, per-mode hash upsert, SKIP LOCKED claim,
+      finish/error, cache, events, list/get/delete), `DbConfig` + `db:` yaml section,
+      `database_url`/`database_url_test` Secrets; `tests/test_db.py` (throwaway-schema
+      isolation, 11 tests). **Caveat: db tests are skip-until-provisioned — they need
+      `DATABASE_URL_TEST` (dev Neon branch); no local Postgres/Docker on this machine.
+      Run them first thing once Neon exists.**
 
 ## In Progress
-- [ ] P0.2 — v3 doc suite (PRD v3, SCORING.md, WEBSITE_ASKS.md, CLAUDE.md, PLAN.md,
-      v2-PRD banner) — written, committing now.
+- [ ] P2 — webhook receiver (HMAC middleware → payload contracts → endpoint).
+
+## Owner inputs needed (v3)
+- [ ] **Create the Neon project/database** (separate from the website's) + a dev branch;
+      put `DATABASE_URL` and `DATABASE_URL_TEST` in `.env`. Unblocks executing the P1 db
+      suite and P3 worker integration tests.
+- [ ] Generate `ATS_WEBHOOK_SECRET` (share with website team per WEBSITE_ASKS #1).
+- [ ] (carried from v2) `OPENAI_API_KEY`; curated BLOCK slur list.
 
 ## How to Verify Completed Work
-- P0: `git show v2-fillout-batch --stat` (freeze exists);
-  docs present: `SRIP_ATS_PRD_v3.md`, `SCORING.md`, `WEBSITE_ASKS.md`;
-  `uv run pytest -q` still green on main (no code touched in P0).
+- P0: `git show v2-fillout-batch --stat`; docs present; `uv run pytest -q` green.
+- P1: `uv run pytest tests/test_db.py -q` — 11 skipped without `DATABASE_URL_TEST`,
+  11 passed with it. `uv run ruff check .` clean.
 
 ---
 

@@ -105,6 +105,12 @@ llm:
   max_retries: 2
   request_timeout_s: 60.0
 
+# Persistence (P1, PRD v3 §1.1) — asyncpg pool sizing only. The DATABASE_URL DSN is a
+# secret (credentials inside) and comes from .env / the host's env store, never this file.
+db:
+  pool_min_size: 1
+  pool_max_size: 5
+
 # API edge caps (Phase 9) — the stateless FastAPI shell. Magic numbers, not in the handlers.
 api:
   max_upload_bytes: 26214400  # 25 MiB cap on the uploaded CSV body -> 413 above this

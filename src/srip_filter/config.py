@@ -189,6 +189,13 @@ class ApiConfig(_Strict):
     job_sweep_seconds: float = 300.0  # how often the background sweeper evicts expired jobs
 
 
+class DbConfig(_Strict):
+    """asyncpg pool sizing (P1). The DSN itself is a secret and lives in the env, not here."""
+
+    pool_min_size: int = 1
+    pool_max_size: int = 5
+
+
 class AppConfig(_Strict):
     """All tunable knobs. Defaults mirror PRD §10.3 exactly."""
 
@@ -202,10 +209,16 @@ class AppConfig(_Strict):
     cohort: CohortConfig = Field(default_factory=CohortConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    db: DbConfig = Field(default_factory=DbConfig)
 
 
 class Secrets(BaseSettings):
-    """Secrets from environment / .env. Never written to outputs or logs."""
+    """Secrets from environment / .env. Never written to outputs or logs.
+
+    v3 additions: ``database_url`` (the ATS's own Neon Postgres — credentials inside, so
+    env-only), ``database_url_test`` (dev Neon branch for the P1 test suite; tests skip
+    cleanly when unset).
+    """
 
     model_config = SettingsConfigDict(
         env_file=str(DEFAULT_ENV_PATH),
@@ -214,6 +227,8 @@ class Secrets(BaseSettings):
     )
 
     openai_api_key: str | None = None
+    database_url: str | None = None
+    database_url_test: str | None = None
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
