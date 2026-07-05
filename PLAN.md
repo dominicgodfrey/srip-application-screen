@@ -170,8 +170,27 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
       pages 200; `/api/exports` degrades to a clean 503 without a DB; zero console
       errors.
 
+- [x] P7 (tool half) — `scripts/replay.py`: CSV export or deterministic synthetic
+      fixtures → signed webhook POSTs (same `api/webhook_auth.sign`, so replays are
+      indistinguishable from the website once ask #1 lands); Fillout non-UUID ids map
+      via uuid5 (stable across replays ⇒ idempotency exercised end to end); optional
+      `_test` ping; `--dry-run`. Fixtures span high/low-with-explanation/below-floor
+      GPAs + every 4th row carries a technical essay (Task F). 3 conversion tests
+      (contract round-trip through the real edge models, id determinism, fixture
+      variety) + CLI dry-run smoke.
+
 ## In Progress
-- [ ] (none — P7 next)
+- [ ] (none — everything remaining is blocked on owner inputs / website-team answers)
+
+## Blocked (owner / external)
+- [ ] P7 (E2E half): local end-to-end + idempotent re-replay + 466-row v2-vs-v3
+      calibration — **needs the Neon DB** (owner input: create project + dev branch,
+      set DATABASE_URL / DATABASE_URL_TEST; then run `uv run pytest tests/test_db.py`
+      first). Run: server with secrets set → `scripts/replay.py --fixtures 20` →
+      dashboard shows graded rows → re-replay changes nothing.
+- [ ] P8: hosting (WEBSITE_ASKS #12) → deploy → their Test button → pilot slice →
+      reconciliation → live (resume stage stays off until #11).
+- [ ] Contract freeze at P2-level: pending WEBSITE_ASKS 2/3/5/6 answers.
 
 ## P6 leftovers (do during/after P7)
 - [ ] Retire the v2 `/jobs` routes + registry + upload screen + their tests once the
@@ -200,6 +219,9 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
 - P6a: `uv run pytest tests/api/test_admin_api.py -q` — 12 passed; full suite 547 passed.
 - P6b: full suite 550 passed; live preview walkthrough (login → dashboard → pages →
   graceful no-DB 503s) done in-session 2026-07-04.
+- P7 tool: `uv run pytest tests/test_replay.py -q` — 3 passed;
+  `uv run python scripts/replay.py --fixtures 3 --dry-run` prints 3 payloads.
+  Full suite 553 passed.
 
 ---
 
