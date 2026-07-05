@@ -1,3 +1,9 @@
+> **SUPERSEDED (2026-07-04).** This is the **v2** spec for the Fillout-CSV batch system,
+> frozen on the `v2-fillout-batch` branch. The current spec is
+> **`SRIP_ATS_PRD_v3.md`** (continuous webhook receiver for thinkNeuroWebsite). Where v3
+> is silent, the semantics below still apply; where they conflict, v3 wins. Kept on main
+> as the reference for carried-over logic (GPA §6, Task contracts §8, audit record §9).
+
 # PRD — SRIP Track 2 (Software Engineering) Application Filtering System
 
 **Owner:** Dominic

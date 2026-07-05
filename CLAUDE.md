@@ -1,19 +1,21 @@
-# SRIP Track 2 — Application Filtering System
+# SRIP ATS v3 — Continuous Application Filtering Service (CS Track)
 
-A stateless service that filters and ranks applications to the SRIP Track 2 (Software
-Engineering) program. It does exactly two things: (1) **reject** applications that fail
-deterministic hard-gate quality checks, and (2) **score and rank** every survivor. It does
-**not** decide acceptances — that is a deferred downstream step that consumes this system's
-ranked output.
+A **continuous, persistent, secured** webhook-receiver ATS. The partner-owned
+thinkNeuroWebsite POSTs one signed JSON payload per application; this service validates,
+stores, grades asynchronously, and gives staff a session-gated review UI over the live
+cohort. It does exactly two things per application: **reject** on deterministic hard-gate
+failures, and **score + rank** every survivor within its cohort. It does **not** decide
+acceptances.
 
-Input is a CSV export from Fillout (466 rows / 29 columns in the reference dataset; design
-for up to ~2000). Output is a set of downloadable result files. **Nothing is persisted
-between sessions** — all input comes from the uploaded CSV, and results are returned to the
-user to save manually.
+**Full functional spec: @SRIP_ATS_PRD_v3.md** — read the relevant section before any logic
+decision not covered here. `SRIP_Application_Filter_PRD.md` is the superseded v2 spec,
+still authoritative where v3 says semantics carry over (GPA §6, task contracts §8, audit
+record §9). **Scoring model: @SCORING.md** (mirrors `config.yaml`, the machine source of
+truth). External dependencies on the website team: **@WEBSITE_ASKS.md**.
 
-**Full functional spec: @SRIP_Application_Filter_PRD.md** — read the relevant section
-before making any logic decision not covered here. The PRD governs *what* the system
-decides; this file governs *how* it is built.
+**History:** the v2 stateless Fillout-CSV batch system is frozen on the
+`v2-fillout-batch` branch. v3 (this) is `main`. The stateless→persistent reversal was an
+explicit owner decision (2026-07-04) — see PLAN.md Notes log.
 
 **Repository:** https://github.com/dominicgodfrey/srip-application-screen.git
 
@@ -24,90 +26,83 @@ decides; this file governs *how* it is built.
 Settled (do not re-litigate without a decision in PLAN.md's Notes log):
 
 - **Python 3.11+**, managed with **`uv`**.
-- **`pandas`** — CSV ingest and dedup.
-- **`pydantic` v2** + **`pydantic-settings`** — all schemas (LLM contracts, audit record), config, and env.
-- **`openai`** SDK (`AsyncOpenAI`) — all LLM tasks, cloud-only. **OpenAI Structured Outputs**
-  (strict `json_schema` parsed directly into pydantic models) is the primary JSON mechanism.
-- **`asyncio`** + bounded `Semaphore` — concurrency for LLM calls.
-- **`rapidfuzz`** — school name fuzzy matching.
-- **`better-profanity`** — profanity gate. Default list for now; curated slur list +
-  medical/anatomical allowlist tracked in `openissue.md`.
-- **`PyYAML`** — load `config.yaml` (validated by pydantic).
-- **`pytest`** + **`pytest-asyncio`**, **`ruff`** — tests and lint/format.
-- **FastAPI** + **`uvicorn`** — thin stateless API layer (backend deployment).
-- **Jinja2** (server-rendered templates) + one static CSS + vanilla JS — the web UI (Phase 10;
-  supersedes the earlier React + Vite idea — see PLAN.md Notes log).
-- **`httpx`** (direct dep) + **`pypdf`** — resume download + text extraction (Phase 12;
-  supersedes the PRD's `pdfplumber` mention — lighter dependency tree, see PLAN.md Notes log).
+- **`pydantic` v2** + **`pydantic-settings`** — all schemas (webhook contracts, LLM
+  contracts, audit record), config, env.
+- **Neon Postgres** (separate DB, ATS-only credentials) via **`asyncpg`** — thin
+  plain-SQL layer, **no ORM**. Migrations are numbered `.sql` files in `db/migrations/`.
+- **`openai`** SDK (`AsyncOpenAI`), Structured Outputs into pydantic models.
+- **`asyncio`** + bounded semaphores — LLM + download concurrency; in-process grading
+  worker (no external queue — the queue is a Postgres status column).
+- **FastAPI** + **`uvicorn`** — webhook endpoint + admin UI shell.
+- **Jinja2** server-rendered templates + one static CSS + vanilla JS — the review UI.
+- **`rapidfuzz`** (school match), **`better-profanity`** (profanity gate),
+  **`httpx`** + **`pypdf`** (resume fetch/extract), **`PyYAML`** (config).
+- **`pytest`** + **`pytest-asyncio`**, **`ruff`**.
+- `pandas` remains only for the replay tool's CSV conversion.
 
-Do not introduce additional frameworks (LangChain, orchestration tools, a database, a task
-queue, an ORM) without recording the reason in PLAN.md first. This is a small batch system,
-not a platform.
+Do not introduce LangChain/orchestration frameworks, an ORM, an external task queue, or a
+second datastore. The DB exception to v2's no-database rule is scoped: one Postgres, plain
+SQL, three tables (`applications`, `llm_cache`, `events`).
 
 ### Model selection (pinned in `config.yaml`, swappable)
 
-| Task | Job | Default model |
+| Task | Job | Tier |
 |---|---|---|
-| A — GPA normalization | mechanical extraction | `gpt-4.1-mini` |
-| C — Coursework decomposition | mechanical extraction | `gpt-4.1-mini` |
-| E — Resume signal extraction (Phase 12) | mechanical extraction | `gpt-4.1-mini` |
-| B — Low-GPA explanation adequacy | judgment (can reject) | `gpt-4.1` |
-| D — Essay grading / gibberish / relevance | judgment (can reject) | `gpt-4.1` |
+| A — GPA normalization fallback | mechanical | mini |
+| C — Coursework decomposition | mechanical | mini |
+| E — Resume signal extraction | mechanical | mini |
+| B — Low-GPA explanation adequacy | judgment (can reject) | full |
+| D — Required-essay grading | judgment (can reject) | full |
+| F — Technical-essay bonus (NEW) | judgment (bonus-only) | full |
 
-- Mechanical tasks (A, C, E) use the mini tier; judgment tasks that can reject an applicant
-  (B, D) use the full tier. **Do not use o-series reasoning models** — overkill and costly here.
-- Verify exact model IDs against OpenAI's current catalog when building; swap in CONFIG only.
+No o-series reasoning models. Verify exact IDs against OpenAI's catalog; swap in config only.
 
 ---
 
 ## Non-Negotiable Principles
 
-From PRD §0. If an implementation choice conflicts with any of these, the principle wins.
+- **Deterministic-first, fail-fast.** Cheap gates before any LLM call; first hard-gate hit
+  stops the row with zero further token spend.
+- **Hard rules decide rejections; the score only ranks survivors.** No score threshold
+  accepts or rejects anyone.
+- **Bonuses only add.** Essay 3, coursework, school, resume: absence is neutral; no code
+  path deducts for a missing optional signal; no bonus rescues or manufactures a rejection.
+- **Never silently reject.** Only an affirmative hard-gate failure produces `REJECTED`.
+  Unscoreable → `NEEDS_REVIEW`. LLM parse failure on a required signal → `NEEDS_REVIEW`;
+  on a bonus signal → 0 bonus + audit note.
+- **Three outcomes only:** `REJECTED`, `RANKED`, `NEEDS_REVIEW`.
+- **GPA rules (owner-settled):** threshold 3.3; hard floor 2.0 (no Task B below it); blank
+  GPA + blank explanation ⇒ REJECTED (non-answer); unresolvable scale ⇒ NEEDS_REVIEW.
+- **Profanity in ANY essay rejects** (incl. the optional technical essay). Gibberish/
+  off-topic in the optional essay only zeroes its bonus.
+- **Auditability is a feature.** Every applicant has a structured audit record explaining
+  every gate and subscore; manual overrides carry `decided_by`.
+- **Idempotent ingest.** Same `submission_id` + same content hash ⇒ no-op; changed content
+  ⇒ re-grade (re-submissions are legal on the website).
+- **Scoring model is owner-owned** (@SCORING.md, 150 max). Don't change weights, the 3.3
+  threshold, or gate semantics without an owner decision recorded in PLAN.md.
 
-- **Deterministic-first, fail-fast.** Cheap deterministic gates run before any LLM call. The
-  moment an application hits a hard-reject gate, stop and spend zero LLM tokens on it.
-- **Hard rules decide rejections; the score only ranks survivors.** Rejection is rule-based
-  and binary. The additive score is computed *only* for gate-survivors and used solely to rank.
-  No score threshold accepts or rejects anyone.
-- **Non-required signals can only add, never subtract.** Resume, top-school, relevant
-  coursework are bonuses. Their absence is neutral. No code path may deduct points for a
-  missing optional signal.
-- **Never silently reject.** The only path to `REJECTED` is an affirmative hard-gate failure.
-  Anything unscoreable (unresolvable GPA scale, parse failure, unchecked affirmation) goes to
-  `NEEDS_REVIEW`.
-- **GPA threshold is 3.3** (owner raised it from 3.0, 2026-06-12). Both the deny line and the bottom of the gradient. Do
-  not raise or lower it for high schoolers (78% of applicants are high-schoolers).
-  **Hard floor 2.0:** below it, no explanation can rescue — REJECTED with no Task B call.
-  **A blank GPA with a blank explanation is a non-answer → REJECTED** (owner decision
-  2026-06-12); blank-with-explanation or any non-blank unresolvable scale stays NEEDS_REVIEW.
-- **Three outcomes only: `REJECTED`, `RANKED`, `NEEDS_REVIEW`.** No accept/waitlist here.
-- **Auditability is a feature.** Every applicant produces a structured decision record (§9)
-  explaining every gate and subscore. It is returned to the user, never stored server-side.
+## Security (this service holds minors' PII — treat every change accordingly)
 
----
-
-## Privacy & Security
-
-This system processes **minors' PII** (names, emails, GPAs, personal-essay content). Treat it
-accordingly.
-
-- **Stateless by design.** Uploaded CSVs are processed in memory and discarded after the
-  response. No applicant data is written to disk or a database. A new session starts clean.
-  In-memory job/results registries are transient (TTL or discard-after-download); if the host
-  restarts or the page refreshes mid-run, the job is lost — that is the intended behavior.
-- **Secrets.** `OPENAI_API_KEY` comes from env / a gitignored `.env`. Never hard-code it,
-  never write it into outputs, never log it.
-- **OpenAI data retention.** Confirm the account is set to zero/minimal retention so essays
-  and GPAs are not held by the provider. API inputs are not used for training by default.
-- **Logging.** LLM-call logging (inputs/outputs/model) is for **local/dev debugging only**.
-  In any hosted deployment do not persist PII-bearing logs — log `submission_id`, never essay
-  or explanation text.
-- **Input validation.** Cap upload size and row count (~2000). Validate CSV headers against
-  the §2 data contract. Reject malformed uploads gracefully (not a 500).
-- **No auth required initially** — nothing is stored, so there is little at risk from the
-  system itself. Serve over HTTPS regardless (results contain PII in transit).
-- **Version control.** `data/` and `.env` are gitignored. Never commit a real CSV, a results
-  file, `.env`, or anything containing applicant content. Test fixtures use synthetic data only.
+- **Webhook:** HMAC-SHA256 (`X-ATS-Timestamp` + `X-ATS-Signature` over
+  `ts + "." + raw_body`), constant-time compare, ±300 s replay window, current+previous
+  secret rotation. Unsigned/stale/tampered ⇒ 401 and **touches nothing**. Body cap ⇒ 413;
+  malformed ⇒ 422; never a 500 on bad input. No rate limiting (single authenticated source).
+- **Fast ACK:** webhook handlers do verify → validate → upsert → 202 only. Grading is the
+  worker's job (the website aborts at 15 s).
+- **Admin UI:** shared-password login → server session, secure/HTTP-only cookie, throttled
+  attempts; `require_admin` on everything except `/health` and the webhook.
+- **Secrets** (env / gitignored `.env` only): `OPENAI_API_KEY`, `DATABASE_URL`,
+  `ATS_WEBHOOK_SECRET[_PREVIOUS]`, `ADMIN_PASSWORD_HASH`, session key. Never in code,
+  outputs, or logs.
+- **Resume guardrails (unchanged law):** https-only exact-host allowlist (the website's R2
+  host), no redirects, streaming size cap, fetch → extract → score → **discard** — resume
+  bytes/text never reach the DB, an artifact, or a log. `resume.bonus_max: 0` is the kill
+  switch and current default (engine decision pending, WEBSITE_ASKS #11).
+- **Logging & events:** `submission_id` only — never essay/explanation/resume text.
+- **Retention:** per-submission delete + close-cycle export-then-purge exist by design;
+  policy finalization pending WEBSITE_ASKS #13. Never commit real applicant data;
+  `data/` and `.env` stay gitignored; test fixtures are synthetic only.
 
 ---
 
@@ -115,154 +110,94 @@ accordingly.
 
 ```
 SRIP Application Filter/
-├── CLAUDE.md                       # this file
-├── SRIP_Application_Filter_PRD.md  # functional spec
-├── PLAN.md                         # phase progress tracker
-├── openissue.md                    # owner inputs still needed (API key, curated profanity list, etc.)
-├── pyproject.toml                  # uv-managed deps
-├── config.yaml                     # tunable CONFIG (PRD §10.3) + model IDs
-├── .env                            # OPENAI_API_KEY (gitignored)
-├── .gitignore
-├── resources/                      # committed, non-PII
-│   ├── schools.json                # curated Top-20 US / Top-50 Intl (PRD §13)
-│   └── profanity.txt               # slur/profanity list + medical allowlist
-├── src/srip_filter/                # transport-agnostic core (all logic lives here)
-│   ├── config.py                   # pydantic-settings + yaml load
-│   ├── models.py                   # pydantic: LLM contracts (A/B/C/D) + AuditRecord
-│   ├── ingest.py                   # Stage 0 — load + dedup
-│   ├── gates/
-│   │   ├── essays.py               # Stage 1 — length, profanity, cheap gibberish heuristics
-│   │   └── gpa.py                  # Stages 2–3 — normalize + gate
-│   ├── scoring/
-│   │   ├── essays.py               # Stage 4 — Task D (relevance gate + quality + gibberish)
-│   │   ├── coursework.py           # Stage 5 — Task C
-│   │   ├── school.py               # Stage 7 — rapidfuzz match
-│   │   ├── resume.py               # Stage 6 — stub (returns 0) until Phase 12 lands
-│   │   └── aggregate.py            # Stage 8 — compose score + rank
-│   ├── llm/
-│   │   ├── client.py               # AsyncOpenAI wrapper: structured outputs, in-run cache, retry
-│   │   └── prompts/                # one template per task (A/B/C/D)
-│   ├── pipeline.py                 # orchestration: ordered fail-fast batch runner
-│   └── outputs.py                  # Stage 9 — decisions.jsonl + ranked/rejected/needs_review.csv + summary.json
-├── api/                            # thin FastAPI shell over the core
-│   └── main.py
-└── tests/                          # mirrors src/ ; synthetic fixtures only
+├── CLAUDE.md                    # this file
+├── SRIP_ATS_PRD_v3.md           # v3 functional spec (authoritative)
+├── SRIP_Application_Filter_PRD.md  # v2 spec (superseded; carried-over sections)
+├── SCORING.md                   # scoring model one-pager (mirrors config.yaml)
+├── WEBSITE_ASKS.md              # asks/discussions for the website team + status
+├── PLAN.md                      # phase tracker + decisions log (session memory)
+├── config.yaml                  # all tunables + model IDs (PRD v3 / SCORING.md)
+├── db/migrations/*.sql          # numbered plain-SQL migrations
+├── src/srip_filter/             # transport-agnostic core
+│   ├── config.py · models.py    # + webhook payload contracts (versioned)
+│   ├── db.py                    # asyncpg pool, plain-SQL store, content hashes
+│   ├── ingest_webhook.py        # payload → ApplicantRow mapping
+│   ├── gates/ · scoring/ · llm/ # pipeline stages (v2 lineage, v3 deltas)
+│   ├── worker.py                # DB-queue grading worker
+│   ├── pipeline.py              # per-row fail-fast runner
+│   └── outputs.py               # exports built from DB records
+├── api/                         # FastAPI shell: webhook, auth, admin UI
+├── scripts/replay.py            # CSV/fixtures → signed POSTs (dev/integration/migration)
+└── tests/                       # mirrors src/; synthetic fixtures only
 ```
 
-Keep the core (`src/srip_filter/`) free of FastAPI/HTTP concerns. The API and the future UI
-are thin shells that call `pipeline.grade_batch(...)`.
+Keep the core free of FastAPI/HTTP concerns. The webhook handler and UI are thin shells.
 
 ---
 
 ## Workflow
 
-- Read `PLAN.md` at session start to find the active phase/sub-task.
-- One phase at a time, in pipeline order. Do not build Stage 4 grading while Stage 1 gates are
-  incomplete — fail-fast ordering depends on earlier stages existing.
-- Tests alongside code, not after.
-- When a logic question is ambiguous, re-read the relevant PRD section rather than guessing.
-- Confirm the active sub-task with the user if PLAN.md is ambiguous.
-
----
+- Read `PLAN.md` at session start; confirm the active phase (P0–P8); one phase at a time.
+- Tests alongside code, never after. Ambiguous logic → re-read the PRD section.
+- Contract-affected work (payload fields) builds against the PRD v3 §2.2 proposed contract
+  with fixtures until WEBSITE_ASKS 2/3/5/6 are answered; the contract freezes at P2.
+- Update PLAN.md before ending any session with meaningful work (completed items + commit
+  SHAs, verification commands, active sub-task, decisions log).
 
 ## Code Style
 
-- Type hints on all public functions and class signatures.
-- **pydantic v2 models** for every node: the four LLM contracts (Task A/B/C/D outputs) and the
-  `AuditRecord`. Fields match the PRD schemas (§8, §9) exactly.
-- Pure functions for all scoring/normalization math; side effects (LLM I/O, file writes) only
-  at clearly marked boundaries.
-- Prompt templates live in `src/srip_filter/llm/prompts/`, never inline in business logic.
-- Centralize every magic number in `config.yaml` — no hard-coded thresholds, weights, or
-  model IDs in logic.
-- Docstrings on public interfaces; inline comments only where intent isn't obvious.
+- Type hints on all public signatures; pydantic v2 models for every boundary object.
+- Pure functions for scoring/normalization math; side effects (DB, LLM, HTTP) only at
+  marked boundaries. Prompts live in `llm/prompts/`, never inline.
+- Every magic number in `config.yaml`. SQL lives in `db.py`/migrations, not scattered.
 - No premature abstraction. Concrete before generic.
-
----
 
 ## LLM Usage Rules
 
-- All tasks go through `llm/client.py`. Treat the LLM as a replaceable I/O boundary.
-- **Structured Outputs first:** pass the pydantic model as the response schema and parse
-  directly. Keep the §8 fallback — on a refusal/cutoff/validation failure, retry once, then
-  route the applicant to `NEEDS_REVIEW` with reason `"LLM_PARSE_FAILURE"`. **Never silently
-  reject on an LLM error.**
-- **Temperature ≤ 0.2** for repeatability. Pin model IDs in `config.yaml`.
-- **In-run cache** keyed by `(task, sha256(input_text))`: dedups identical inputs and makes
-  retries free *within a single run*. It does **not** persist across runs (stateless design),
-  so re-uploading the same CSV re-bills — this is accepted.
-- **Bounded concurrency** via an `asyncio.Semaphore`; rely on the SDK's built-in transport
-  retries for 429/5xx, add backoff if needed. Per-row `try/except` so one failure becomes a
-  `NEEDS_REVIEW` row rather than aborting the batch ("when grading begins, it finishes").
-- Log every LLM call (inputs, outputs, model) **locally for dev only** — see Privacy.
-
----
+- All tasks through `llm/client.py`; Structured Outputs first; retry-once then
+  `NEEDS_REVIEW` (required signals) / 0-bonus (optional signals). Never silently reject
+  on an LLM error.
+- Temperature ≤ 0.2; model IDs pinned in config; `llm_cache` (Postgres) replaces the v2
+  in-run cache — keyed `(task, sha256(input))`, so re-grades re-bill only changed fields.
+- Bounded concurrency via semaphores; per-row try/except: one failure = one
+  `NEEDS_REVIEW`/`error` row, never a stuck queue.
+- Applicant text is always fenced data in prompts, never instructions.
 
 ## Testing Requirements
 
-Every PRD §12 invariant must have an explicit test (deterministic, no API spend):
-
-1. No optional-signal absence (resume/school/coursework) ever reduces `final_score`.
-2. No bonus changes a `REJECTED` outcome.
-3. Every `REJECTED` record names the failing gate in `primary_reason`.
-4. Normalized GPA below 3.3 never produces points without an approved Task B explanation, and
-   never scores above the bottom of the gradient band.
-5. Ranking is stable across reruns (deterministic tiebreaker; in-run cache hits identical).
-6. Nothing unscoreable is rejected — unresolvable GPA / unchecked affirmation / parse failure
-   → `NEEDS_REVIEW`, never `REJECTED`.
-
-Plus: unit tests per module, integration test of the full pipeline on a synthetic CSV.
-The LLM client is mocked with a fake in unit tests. A small live suite is gated behind
-`RUN_LLM_TESTS=1` and run sparingly against the real API.
-
----
+Every PRD v3 §10 invariant has an explicit deterministic test (no API spend;
+`FakeLLMClient`): the six v2 invariants plus (7) unsigned/tampered/stale/replayed
+requests never create or mutate rows, (8) identical re-delivery changes nothing and
+re-bills nothing, (9) a per-row crash never blocks the queue. DB tests run against
+`DATABASE_URL_TEST` (dev Neon branch). A small live suite stays behind `RUN_LLM_TESTS=1`.
 
 ## What NOT to Do
 
-- Don't deduct points for a missing optional signal (resume, school, coursework). Absence is neutral.
-- Don't let any bonus manufacture or rescue a rejection. Rejections are gated before scoring.
-- Don't silently reject. Unscoreable → `NEEDS_REVIEW`.
-- Don't add an acceptance/waitlist threshold. This system only rejects and ranks (PRD §11).
-- Don't change the GPA threshold (3.3) without an owner decision in PLAN.md.
-- Don't flag merely-awkward or ESL grammar as gibberish — that's a soft penalty in Task D, not a gate.
-- Don't persist applicant data to disk or a database. Stateless only.
-- Don't weaken the Stage 6 resume guardrails (built in Phase 12): the https-only exact-host
-  `allowed_url_hosts` SSRF allowlist (no redirects), the per-applicant fetch→extract→discard
-  memory rule (resume bytes/text never reach a record, artifact, or log), and the bonus-only
-  invariants (any failure → 0 bonus + audit note, never a block). `resume.bonus_max: 0` is the
-  permanent kill switch (zero fetches, zero tokens).
-- Don't run LLM calls before the deterministic gates that precede them. Fail-fast ordering is load-bearing.
+- Don't deduct for missing optional signals; don't let bonuses touch rejections; don't
+  add an acceptance threshold; don't silently reject. (v2 law, unchanged.)
+- Don't store resume bytes/text, ever. Don't log PII. Don't weaken the HMAC or session
+  auth paths. Don't put PII in `events`.
+- Don't run LLM calls before the deterministic gates. Don't grade in the webhook handler.
+- Don't store rank — it's computed at read time, per cohort.
+- Don't change scoring weights / GPA thresholds / gate semantics without an owner
+  decision in PLAN.md.
+- Don't touch the thinkNeuroWebsite repo — changes there go through WEBSITE_ASKS.md.
+- Don't add an ORM, external queue, second datastore, or agent framework.
 - Don't commit `data/`, `.env`, results files, or any real applicant content.
-- Don't add a database, queue, or orchestration framework without recording the reason in PLAN.md.
-
----
 
 ## Commit Conventions
 
-**Remote:** https://github.com/dominicgodfrey/srip-application-screen.git
-(Local `git init` + a `.gitignore` covering `data/` and `.env`, wired to the remote above as
-`origin`, is Phase 0.1.)
-
-- One logical change per commit; include the tests with the code they cover.
-- Format: `[stage-N] <what changed>` for pipeline-scoped work, `[infra] ...` / `[plan] ...` otherwise.
-- **Push after every atomic change.** An atomic change = one self-contained, working commit
-  (code + its passing tests). Commit it and `git push` immediately — don't batch local commits.
-- Run tests before every commit. Check `.gitignore` before every commit — never commit PII.
-
----
+- One logical change per commit, tests included; run `uv run pytest` + `uv run ruff check`
+  before every commit; push after every atomic change.
+- Format: `[pN] <what changed>` for phase work (e.g. `[p2] HMAC verification middleware`),
+  `[infra]` / `[plan]` otherwise.
+- No AI co-author trailers in commit messages (owner preference, 2026-07-04).
+- Check `.gitignore` before every commit — never commit PII.
 
 ## PLAN.md Protocol
 
-`PLAN.md` is the session-to-session memory of this project. Claude Code does not remember
-previous sessions; PLAN.md is how continuity happens.
-
-**At session start:** read CLAUDE.md → read PLAN.md → read the relevant PRD section → confirm
-the active sub-task → begin only that sub-task.
-
-**Before ending any session with meaningful work:**
-- Move completed items to "Completed" (with commit short-SHA once git exists).
-- Add a verification command to "How to Verify Completed Work."
-- Update "Active Sub-Task" / "In Progress."
-- Record any non-obvious decision in "Notes / Decisions Log" (structural facts only — never
-  real applicant content).
-- When in doubt, update PLAN.md rather than not.
+PLAN.md is the session-to-session memory. At session start: CLAUDE.md → PLAN.md → the
+relevant PRD v3 section → confirm active sub-task → begin only that. Before ending a
+session: move completed items (with SHAs), add verification commands, update the active
+sub-task, record non-obvious decisions in the Notes log (structural facts only — never
+applicant content). When in doubt, update PLAN.md.
