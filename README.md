@@ -17,10 +17,13 @@ persisted between sessions.
 Requires [uv](https://docs.astral.sh/uv/); the Python version is managed via `.python-version`.
 
 ```
-uv sync                 # create the venv + install deps (fetches Python if needed)
+uv sync --extra api     # create the venv + install deps incl. the API/UI (fetches Python if needed)
 uv run pytest           # run the test suite
 uv run ruff check .     # lint
 ```
+
+The `--extra api` group (FastAPI/uvicorn/Jinja2) is required for the API + UI and for the
+`tests/api/` suite; omit it only if you want the transport-agnostic core alone.
 
 Set `OPENAI_API_KEY` in `.env` (copy from `.env.example`) before running LLM stages.
 
