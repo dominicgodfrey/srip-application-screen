@@ -19,6 +19,23 @@ explicit owner decision (2026-07-04) — see PLAN.md Notes log.
 
 **Repository:** https://github.com/dominicgodfrey/srip-application-screen.git
 
+> ### ⚠️ v3.1 in flight — four built assumptions are being reversed
+> P0–P7 shipped against a *proposed* contract and an always-on host. The 2026-07-26 repo
+> audit and the 2026-07-27 owner decisions invalidated four of them. **This file still
+> describes the as-built v3 system; the deltas below win.** Read PLAN.md → "Phase Map
+> (v3.1)" before touching the webhook, auth, worker, or hosting paths.
+> 1. **Contract:** no `ats_mode` discriminated union — one combined payload + an
+>    `ats_run: ("essays"|"resume"|"finaid")[]` selector. Today's parser 422s every real payload.
+> 2. **Webhook auth:** the partner sends a static `X-ATS-Secret` header, not HMAC. Today's
+>    verifier 401s every real request. HMAC is deferred as pre-production hardening.
+> 3. **Hosting:** Vercel serverless (their project), not an always-on host. The grading
+>    worker becomes a per-minute cron drain over the same Postgres queue; in-memory state
+>    (sessions, throttle, `JobRegistry`) must move off-process or be retired.
+> 4. **Essay word bounds:** owner-maintained in `config.yaml`, not payload metadata —
+>    which puts the REJECTED-on-violation semantics under review (PLAN.md decision D1).
+>
+> Finaid is now **stored but never scored** (no SCORING.md change).
+
 ---
 
 ## Tech Stack

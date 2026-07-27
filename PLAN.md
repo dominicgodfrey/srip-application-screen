@@ -8,10 +8,15 @@ on the **`v2-fillout-batch`** branch together with its PLAN.md history. v3 resta
 phase numbering as P0–P8.
 
 ## Current Phase
-P0 — governance docs (v2 freeze + v3 spec suite) — this session.
+**v3.1 re-architecture — planning complete, implementation not started.** P0–P7 (tool
+half) shipped against the *proposed* contract and an always-on host; the 2026-07-26 repo
+audit + 2026-07-27 owner decisions invalidated four built assumptions (contract shape,
+auth scheme, hosting model, bounds source). P9–P13 below replace the old P8.
 
 ## Active Sub-Task
-P0 complete once the doc suite is committed; next is P1 (persistence layer).
+Start **P9.1** (unified payload model). Nothing in P9–P13 is code-blocked, but three
+owner decisions (D1–D3 in the Notes log) should be settled first — they change gate
+semantics and table count, which are expensive to reverse mid-implementation.
 
 ---
 
@@ -75,13 +80,153 @@ P0 complete once the doc suite is committed; next is P1 (persistence layer).
 - **P7 — Replay tool + E2E**: `scripts/replay.py` (fixtures or v2 CSV → signed POSTs);
         local end-to-end incl. idempotent re-replay; 466-row v2-vs-v3 calibration run
         (local only; every outcome flip explained by an intended rule change).
-- **P8 — Deploy + pilot ladder** *(blocked: WEBSITE_ASKS #12 hosting, #1 secret
-        coordination)*: host + secrets; their Test button ✓; pilot `submission_ids`
-        slice; ats_logs↔DB reconciliation; go live resume-off.
+- **P8 — Deploy + pilot ladder** — **SUPERSEDED by P13** (the always-on/Render premise
+        died with the 2026-07-27 Vercel decision).
 
-**Blocked-on-answers map:** payload fields (asks 2/3/5/6) → P2 contract freeze (build on
-fixtures meanwhile) · hosting (#12) → P8 · resume engine (#11) → post-P8 enablement ·
-retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
+---
+
+## Phase Map (v3.1 — live contract + Vercel re-architecture)
+
+Ordering rationale: P9 and P10 are both "every real request fails today" defects — the
+parser 422s every live payload and the verifier 401s every live request. They come first
+because nothing can be integration-tested until they land. P11 is the hosting port, P12
+the state that port breaks, P13 the deploy.
+
+- **P9 — Live contract rework** *(the `ats_mode` → `ats_run[]` reversal)*
+  - 9.1 `models.py`: retire the `EssaysModePayload`/`ResumeModePayload` discriminated
+        union and `parse_webhook_payload`'s `ats_mode` dispatch. One
+        `ApplicationPayload(_Payload)` carrying every sector: `ats_run: list[str]`,
+        `gpa_unweighted`/`gpa_weighted` (top-level strings, `"3.95/4.0"`),
+        `tier_first_choice`/`tier_second_choice`/`tier_third_choice`,
+        `detected_sub_track`, `all_answers: list[AnswerEntry{field_key,question,answer}]`,
+        nested `finaid: FinaidPayload{sat_score, test_score_scale, fin_aid_essays[]}`,
+        `required_essays`/`optional_essays` (still `EssayEntry`, but `field_key`/
+        `min_words`/`max_words` stay optional — payload wins if ever supplied).
+        `AliasChoices` tolerance for the old `first_choice`/`sub_track`/nested-`gpa`
+        names (cheap insurance; one screenshot still showed a joined `gpa` string).
+        `UnsupportedModeError` and the finaid-422 path retire.
+        Unmodelled-but-tolerated (`extra="ignore"`): `referral`, `referral_code`,
+        `time_spent_seconds`, legacy `ats_mode`.
+  - 9.2 **Payload storage shape.** Amend `001_init.sql` in place: replace
+        `essays_payload`/`essays_hash`/`resume_payload`/`resume_hash` with a single
+        `payload JSONB` + `payload_hash TEXT`, add `ats_run TEXT[] NOT NULL DEFAULT '{}'`.
+        Safe to amend rather than add `002_` **only because no Neon project exists yet and
+        001 has never been applied anywhere** — verify that before touching it, else write
+        `002_unified_payload.sql` instead. The per-mode split existed solely for
+        "resume may arrive before essays", a premise the combined payload kills.
+        `db.py`: `upsert_application` loses its `mode` parameter; one hash, one column.
+  - 9.3 **`ats_run` semantics.** Store every delivery; enqueue for grading only when
+        `"essays" ∈ ats_run`. Deliveries without essays (resume-only / finaid-only) land
+        in a new terminal status **`stored`** (extend the `status` CHECK) so they are not
+        re-claimed by every drain forever. A later delivery that *does* request essays
+        resets `status='received'` through the normal changed-hash path. Rejected
+        alternative: grade anyway — it spends tokens the partner explicitly did not
+        request and contradicts their "fan out to the requested graders, ignore the rest".
+  - 9.4 `ingest_webhook.py`: `map_application_payload(payload)` replacing
+        `map_essays_payload`. New `index_answers(all_answers) -> dict[str, str]` pulling
+        `gpa_explanation`, `relevant_coursework`, `programming_languages`,
+        `github_profile`, `institution`, `state_of_residence` by `field_key`. An
+        expected-but-absent key appends a `mapping_notes` entry (the mechanism already
+        exists). GPA: `gpa_unweighted` primary, `gpa_weighted`-only keeps the existing
+        `force_task_a` route. Tier values are raw form strings (`Honors`/`Intensive`/
+        `Regular`) — normalize into the existing `ProgramChoices`.
+  - 9.5 `pipeline.py`: `make_grade_fn` reads `db_row["payload"]`. The resume-only
+        NEEDS_REVIEW short-circuit is superseded by 9.3 (such rows are never claimed);
+        keep the `missing_required_essays` → NEEDS_REVIEW path, which still fires.
+  - 9.6 finaid: persisted inside `payload`, surfaced read-only in the audit UI, **scored
+        nowhere**. No SCORING.md change. Add a test asserting a finaid payload grades
+        identically to the same payload without it.
+  - 9.7 Tests: rewrite the inline `_payload`/`_payload_dict` helpers in
+        `tests/test_ingest_webhook.py` + `tests/test_pipeline_v3.py` to the new shape;
+        add `all_answers` extraction tests (present / absent / blank); update
+        `tests/test_replay.py` + `scripts/replay.py` fixture generation.
+
+- **P10 — Auth swap to the partner's static secret** *(small, do it with P9)*
+  - 10.1 `api/webhook_auth.py`: keep the module (it is the seam for restoring HMAC) but
+         reduce to `SECRET_HEADER = "X-ATS-Secret"` +
+         `verify_webhook(secret_header, secrets) -> None`. Keep `WebhookAuthError.reason`,
+         `hmac.compare_digest`, and the current+previous secrets tuple (rotation still
+         works). Delete `sign`, the timestamp header, and the skew window.
+  - 10.2 `WebhookConfig.max_skew_seconds` removed from `config.py` **and** `config.yaml`
+         (`extra="forbid"` means a leftover key fails the load).
+  - 10.3 `api/webhooks.py` call-site update — auth still runs before JSON parse and before
+         any `dbmod` call, preserving invariant #7. `scripts/replay.py` header swap.
+  - 10.4 Tests: the six pure HMAC vector tests become static-secret vectors (missing
+         header, wrong secret, previous-secret rotation, no-secrets-configured); endpoint
+         tests keep their shape with `_headers()` swapped. The stale/tampered cases in
+         `test_unsigned_tampered_stale_all_401_and_touch_nothing` no longer apply — replace
+         with missing/wrong-secret cases, keeping the "touches nothing" assertions.
+
+- **P11 — Serverless port (Vercel)**
+  - 11.1 **Driver: cron drain.** New `api/cron.py` → `POST /api/cron/drain`, authorized by
+         `Authorization: Bearer $CRON_SECRET` (Vercel sets this on cron invocations);
+         path added to `OPEN_PREFIXES` and self-guarded like the webhook. Loops the
+         **existing, unmodified `process_one`** under a wall-clock budget and a row cap
+         (`worker.drain_budget_seconds: 600`, `worker.drain_max_rows: 50` — inside an
+         800 s `maxDuration`). Returns `{claimed, graded, elapsed}`. Overlapping
+         invocations are already safe: `claim_next` uses `FOR UPDATE SKIP LOCKED`.
+  - 11.2 **Stale-claim reaper (new, and required by serverless).** An always-on process
+         drained gracefully on shutdown; a killed invocation cannot. Before claiming, the
+         drain runs `UPDATE applications SET status='received' WHERE status='grading' AND
+         updated_at < NOW() - INTERVAL '<worker.stale_grading_seconds>'`. Without this a
+         row orphaned by a timeout is stuck in `grading` forever.
+  - 11.3 **Migrations out of the lifespan.** They currently run on every cold start,
+         concurrently across instances. Move into the drain endpoint wrapped in
+         `pg_try_advisory_lock` (idempotent and near-free after the first run), plus a
+         guarded `POST /api/admin/migrate` for the manual first run. Vercel has no
+         release phase, so one of these must own it.
+  - 11.4 **Pool.** Module-level cached pool in `db.py` (`get_pool()`), `min_size=0`,
+         `max_size=2`, against Neon's **pooled** (`-pooler`) endpoint. **Gotcha:** asyncpg
+         against PgBouncer transaction mode requires `statement_cache_size=0` — without it
+         prepared-statement reuse fails intermittently under load.
+  - 11.5 **Retire the in-memory machinery** (already a P6 leftover, now load-bearing):
+         `JobRegistry`, `sweeper_loop`, the `/jobs*` routes, the upload screen, and their
+         tests. All are single-process state that is meaningless on serverless. `/cohorts`
+         what-if is already DB-backed (P6a/b) — keep.
+  - 11.6 `run_worker` is kept for local `uvicorn` dev only, started behind
+         `SRIP_LOCAL_WORKER=1` so it never runs on Vercel. Its two loop tests survive;
+         the two `process_one` tests are untouched by the whole phase.
+  - 11.7 **LLM concurrency note:** semaphores become per-invocation rather than global.
+         At `drain_max_rows: 50` × ~4 calls/row this is *gentler* than the old unbounded
+         loop, and 2 000 applications spread over ~40 one-minute drains. Verify the
+         OpenAI client's 429/backoff behavior before the pilot.
+
+- **P12 — Session state off the single process**
+  - 12.1 **Recommended: stateless HMAC-signed session cookies.** Cookie =
+         `base64(payload).hmac`, payload `{exp, v}`, signed with the existing session-key
+         secret; verification is a constant-time HMAC + expiry check. Keeps the
+         three-table scope (no CLAUDE.md deviation), adds zero per-request DB round-trips,
+         and stays pure-function testable in the existing style.
+         **Honest tradeoff: no server-side revocation** — logout clears the cookie, but a
+         stolen cookie stays valid until `exp`. Mitigations: short TTL (2 h, down from 8)
+         and a `session_key_version` so rotating the key invalidates every session at once.
+         For one shared staff password this is proportionate; see decision D2.
+  - 12.2 **Throttle from `events`.** `COUNT(*)` of `login_failed` events inside the
+         lockout window (no PII — it is a shared credential). Falls back to the existing
+         in-memory `LoginThrottle` when no pool is configured (local dev).
+  - 12.3 `tests/api/conftest.py:22` monkeypatches `SessionStore.is_valid` — re-point at
+         the new verifier. The three pure `SessionStore`/`LoginThrottle` tests are
+         replaced by sign/verify/expiry/tamper vectors; the nine TestClient login-flow
+         tests should survive unchanged.
+
+- **P13 — Vercel deploy + pilot ladder** *(replaces old P8)*
+  - 13.1 Entrypoint + `vercel.json`: ASGI `app` at a Vercel-discoverable path, a rewrite
+         sending all routes to it, `functions.maxDuration: 800`, and
+         `crons: [{path: "/api/cron/drain", schedule: "* * * * *"}]`.
+  - 13.2 Dependency manifest: Vercel's Python runtime wants `requirements.txt`; this repo
+         is `uv`/`pyproject`. Generate via `uv export` (committed, or a build step).
+  - 13.3 Env in their Vercel project: `DATABASE_URL` (Neon pooled), `OPENAI_API_KEY`,
+         `ATS_WEBHOOK_SECRET[_PREVIOUS]`, `ADMIN_PASSWORD_HASH`, session key, `CRON_SECRET`.
+  - 13.4 Pilot ladder: their Test button → a small `submission_id` slice → reconcile their
+         `ats_logs` against our rows → go live with the resume stage off.
+  - 13.5 *(optional, post-pilot)* Post-ACK grading kick (Starlette `BackgroundTask` or
+         Vercel `waitUntil`) to cut the ≤60 s cron latency. Deliberately **not** in v1 —
+         the cron path is the guaranteed-correct one and should be proven first.
+
+**Blocked-on-answers map (v3.1):** live `field_key` list / one sample payload → P9.4
+mapping confidence · Vercel Pro confirm + secret value → P13 · Neon DB → any DB-backed
+verification (P9.2 onward) · resume engine (#11) → post-pilot · retention (#13) → P6
+close-cycle · flow-back (#9) → post-v3.
 
 ---
 
@@ -188,9 +333,47 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
       set DATABASE_URL / DATABASE_URL_TEST; then run `uv run pytest tests/test_db.py`
       first). Run: server with secrets set → `scripts/replay.py --fixtures 20` →
       dashboard shows graded rows → re-replay changes nothing.
-- [ ] P8: hosting (WEBSITE_ASKS #12) → deploy → their Test button → pilot slice →
-      reconciliation → live (resume stage stays off until #11).
-- [ ] Contract freeze at P2-level: pending WEBSITE_ASKS 2/3/5/6 answers.
+- [ ] P13 deploy: needs the Vercel Pro confirm + the shared secret value from the partner
+      (WEBSITE_ASKS #12/#1), and the Neon DB from the owner.
+- [ ] Contract freeze: **unblocked for implementation.** The 2026-07-26 repo audit plus
+      the 2026-07-27 decisions settled the shape; P9 executes it. One residual accuracy
+      risk (not a blocker): the `all_answers` `field_key` strings were read from their
+      repo *seeds* (`lib/questions-default.ts`), and WEBSITE_ASKS #6 records that seeds
+      differ from the live form. **One real sample payload would retire this risk** — it
+      is the single highest-value remaining ask.
+
+## Load-bearing decisions still open
+
+Ordered by how expensive they are to reverse once P9–P13 start.
+
+**Owner (blocking implementation — settle before P9/P12 land):**
+- [ ] **D1 — config-sourced bounds violation: NEEDS_REVIEW or REJECTED?** (see Notes log;
+      recommendation NEEDS_REVIEW). Gate semantics ⇒ CLAUDE.md requires a recorded decision.
+- [ ] **D2 — session strategy:** signed cookies (three tables, no revocation) vs a fourth
+      `sessions` table (real revocation, CLAUDE.md scope amendment). Rec: signed cookies.
+- [ ] **D3 — absent `gpa_explanation` key ⇒ NEEDS_REVIEW rather than treat-as-blank?**
+      Also gate semantics. Rec: yes — key absent means *unknown*, not *declined*.
+- [ ] Confirm no Neon DB has ever run `001_init.sql` (decides amend-in-place vs `002_`).
+- [ ] Confirm retiring `/jobs` + the upload screen now (P11.5). Rec: yes.
+
+**Owner (blocking verification, not authorship):**
+- [ ] **Neon project + `DATABASE_URL`/`DATABASE_URL_TEST`** — still the top blocker; the
+      P1 db suite has never executed. Everything DB-backed in P9–P12 is unverifiable until
+      this exists.
+- [ ] `OPENAI_API_KEY`; the live form's actual essay word bounds (P13/D1); curated BLOCK
+      slur list (carried from v2).
+
+**Partner (Andrew) — blocking the pilot, not the code:**
+- [ ] One real sample payload (synthetic values, real shape) — validates every `field_key`,
+      the GPA string format, tier values, `submitted_at` offset, and the finaid block at once.
+- [ ] Vercel Pro confirmed + willingness to host a Python service in the project (and who
+      holds the env vars — see the secrets-governance note in the Notes log).
+- [ ] The `ATS_WEBHOOK_SECRET` value, and confirmation they will actually set it (their
+      dispatcher omits the header entirely when the env var is unset ⇒ we 401).
+
+**Deferred (explicitly not blocking):** HMAC re-hardening before production (ask #1);
+R2 account id (#4, resume off); per-essay bounds in the payload (#5); resume engine (#11);
+retention (#13); results flow-back (#9); cohort allocation ownership (#10).
 
 ## P6 leftovers (do during/after P7)
 - [ ] Retire the v2 `/jobs` routes + registry + upload screen + their tests once the
@@ -203,9 +386,12 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
 ## Owner inputs needed (v3)
 - [ ] **Create the Neon project/database** (separate from the website's) + a dev branch;
       put `DATABASE_URL` and `DATABASE_URL_TEST` in `.env`. Unblocks executing the P1 db
-      suite and P3 worker integration tests.
-- [ ] Generate `ATS_WEBHOOK_SECRET` (share with website team per WEBSITE_ASKS #1).
+      suite and P3 worker integration tests. **Use the pooled (`-pooler`) host** for the
+      Vercel runtime DSN (P11.4).
+- [ ] Generate `ATS_WEBHOOK_SECRET` (share with website team per WEBSITE_ASKS #1) — now a
+      static shared secret, not an HMAC key. A random UUID is fine.
 - [ ] (carried from v2) `OPENAI_API_KEY`; curated BLOCK slur list.
+- [ ] See "Load-bearing decisions still open" above for D1–D3.
 
 ## How to Verify Completed Work
 - P0: `git show v2-fillout-batch --stat`; docs present; `uv run pytest -q` green.
@@ -244,6 +430,96 @@ retention (#13) → P6 close-cycle UX · flow-back (#9) → post-v3.
      (submission_id + site-level uniqueness); affirmation gate retired.
   6. v2 frozen on `v2-fillout-batch`; CSV upload UI retired (replay tool covers dev use).
   7. Commit convention: `[pN]` prefixes; **no AI co-author trailers** (owner).
+- **2026-07-27 — HOSTING REVERSAL: Vercel serverless, not an always-on host** (owner).
+  Supersedes PRD v3 §1 ("always-on host", "no serverless") and WEBSITE_ASKS #12. The
+  partner offered to deploy in their existing Vercel project; the owner preferred that over
+  asking them to fund/run a second service.
+  **Why it is now viable (the original objection was factual, and expired):** PRD v3 §2.1
+  banned serverless because "a sleeping instance's cold wake eats your 15 s webhook
+  timeout". Their dispatcher actually uses `AbortSignal.timeout(60_000)` — 60 s, plus 3
+  retries, plus QStash retrying the job 3× more. Verified 2026-07-27 against Vercel docs:
+  FastAPI/ASGI is zero-config supported on the Python runtime (3.12/3.13/3.14) running on
+  Fluid compute; `maxDuration` is 800 s GA on Pro (1800 s beta); `waitUntil` is supported
+  on Python; Pro cron granularity is **once per minute** (Hobby is once per *day*, which
+  would have been disqualifying). The partner's `vercel.json` already runs an hourly cron
+  (`0 * * * *`), which fails deployment on Hobby ⇒ they are on Pro (confirm anyway).
+  **Why the port is cheap:** the queue is already a Postgres status column drained with
+  `FOR UPDATE SKIP LOCKED`. That design never required a long-lived process — it required
+  *something* to call `process_one`. A cron invocation satisfies it exactly as well as a
+  `while True`, so `process_one`/`claim_next`/`GradeFn` are reused unmodified; only the
+  driver changes (P11.1).
+  **What the port genuinely costs** (all in P11/P12): a stale-claim reaper (a killed
+  invocation cannot drain gracefully); migrations moved out of the lifespan; a
+  module-level pooled connection against Neon's `-pooler` host with
+  `statement_cache_size=0`; and session/throttle state off-process. The in-memory
+  `JobRegistry`/`sweeper_loop`/`/jobs` machinery is retired rather than ported.
+  **Secrets governance (accepted, worth re-reading before go-live):** deployed inside the
+  partner's Vercel project, their team can read env vars and function logs — i.e. our
+  `OPENAI_API_KEY` and the ATS DB credentials. Applicant PII is *not* newly exposed (they
+  already hold all of it in their own DB), and "separate DB, ATS-only credentials" still
+  holds. Mitigations if wanted: a separate Vercel project under their team, or their own
+  OpenAI key.
+- **2026-07-27 — three gate/scope decisions PROPOSED, awaiting owner sign-off (D1–D3).**
+  Recorded here so implementation does not quietly pick a side:
+  - **D1 — config-sourced word-bounds violation should become NEEDS_REVIEW, not REJECTED.**
+    v3 made a required-essay bounds violation a hard REJECT audited as "tampering or
+    contract drift". That inference was only defensible *because the site validated at
+    submit and sent us its own bounds*. With bounds now living in our `config.yaml`
+    (2026-07-26 decision), a violation may simply mean our config is stale — and
+    hard-rejecting a good-faith applicant over our own bookkeeping error is exactly what
+    "never silently reject" exists to prevent. Proposal: `essay_bounds.on_violation:
+    needs_review` as the shipped default, `reject` retained for when the payload itself
+    carries bounds. **Changes gate semantics ⇒ needs an owner decision (CLAUDE.md).**
+  - **D2 — session state: stateless signed cookies over a fourth table.** Keeps the
+    three-table scope and adds no per-request DB round-trip; the cost is no server-side
+    revocation (a stolen cookie lives until `exp`), mitigated by a 2 h TTL and a
+    key-version rotation knob. The alternative (a `sessions` table) buys real revocation
+    at the price of a CLAUDE.md scope amendment.
+  - **D3 — an absent `gpa_explanation` key should route sub-3.3 applicants to
+    NEEDS_REVIEW, not REJECTED.** `all_answers` is a dump of *answered* questions, so a
+    missing key means "we don't know", while present-but-blank means "declined to answer".
+    Today's code cannot tell them apart and would auto-reject the first case. Present-but-
+    blank keeps today's REJECTED (non-answer) semantics. **Also gate semantics ⇒ needs a
+    decision.**
+- **2026-07-26 — owner decisions on the two contract conflicts.**
+  1. **Auth: adopt the website's static `X-ATS-Secret` header; retire our HMAC path for
+     now.** Rationale: simpler, no website change, and changeable before full production.
+     P2's `api/webhook_auth.py` becomes a constant-time shared-secret compare (keep the
+     module + its tests as the seam). **Flagged as a pre-production hardening option** —
+     HMAC signing (timestamp + body binding + replay window) is ~10 lines on their side
+     and the code already exists in git history. Security note: a static bearer secret over
+     HTTPS is replayable and does not bind the body; acceptable for now, revisit before go-live.
+  2. **Essay word bounds: hardcode in `config.yaml`, don't ask.** The form copy is stable,
+     so per-essay `min_words`/`max_words` become owner-maintained config keyed by essay
+     slot, not payload metadata. Requires a small P4 change — `ingest_webhook.py` currently
+     sources bounds from the payload `EssayEntry`; it needs a config fallback (payload wins
+     if ever supplied). **Flagged as a future ask** if the live form's limits start changing.
+- **2026-07-26 — read-only audit of the `thinkneuro_website` repo** (full findings in
+  WEBSITE_ASKS.md → "Repo audit — 2026-07-26"). Answered asks #2, #3, #6 and discussion #8
+  without needing to ask; narrowed #4; #7 partially. **Two breaking mismatches found:**
+  (a) **`ats_mode` is gone** — they POST ONE combined payload to ONE endpoint with
+  `ats_run: [...]` selecting graders, so our `parse_webhook_payload` mode dispatch would
+  **422 every real payload**; the discriminated-union contract needs rework.
+  (b) **Auth is a static `X-ATS-Secret` header, not HMAC** — our P2 verifier would **401
+  every request**; this is what "UUID for API key" meant. Owner decision needed (accept
+  their static secret vs ask for ask-#1 HMAC).
+  Also: `all_answers` (full form dump) carries every ask-#2 field incl. `gpa_explanation`
+  — the auto-reject risk is gone; their webhook timeout is 60 s not 15 s; they retry any
+  non-2xx 3× (+ QStash 3×); `finaid` ships for everyone; `submitted_at` is Pacific-offset;
+  new unmodelled fields (`referral`, `referral_code`, `time_spent_seconds`).
+  **Trigger model settled: continuous, one POST per applicant** (QStash on submit +
+  sequential admin runs) — the PRD v3 fast-ACK + async-worker design stands; the batch
+  worry is moot, but Vercel serverless hosting still cannot run our always-on worker.
+- **2026-07-21 — website team sent the finalized payload contract (Andrew, Slack).**
+  Captured in WEBSITE_ASKS.md → "Answers received — 2026-07-21". Contract deltas to
+  reconcile at freeze: GPA as separate `gpa_unweighted`/`gpa_weighted` fields (ask #3),
+  `tier_first_choice/...` + `detected_sub_track` names (ask #6), essays are `{question,
+  answer}` only (ask #5 unmet), `finaid` nested in the essays payload (not a separate
+  `ats_mode`; we currently 422 it), presigned Cloudflare R2 `resume_url` w/ 10-min expiry
+  (asks #4/#14). **Owner decision:** finaid = store-but-don't-score (accept + persist, no
+  scoring, no SCORING.md change). Three questions sent back to Andrew (gpa_explanation
+  location; trigger model/hosting — his Vercel offer is serverless, conflicts with the
+  always-on worker + DB pool; HMAC-vs-"API key" confirm). Contract **not** frozen yet.
 - **2026-07-04 — external-dependency protocol:** anything requiring website-repo changes
   or partner decisions goes through WEBSITE_ASKS.md (never edit their repo). Payload
   contract work proceeds on PROPOSED-contract fixtures until asks 2/3/5/6 are answered;

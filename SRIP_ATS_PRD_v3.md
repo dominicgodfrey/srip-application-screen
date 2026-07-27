@@ -7,6 +7,26 @@
 where they conflict, v3 wins.
 **Approved:** owner grill session, 2026-07-04.
 
+> ### ⚠️ Partially superseded by v3.1 (2026-07-26 / 2026-07-27)
+> This document is still authoritative for **scoring, gates, pipeline order, ranking,
+> retention, and the audit record**. It is **out of date** wherever it describes the
+> transport, auth, hosting, or the payload shape — the partner's live implementation and
+> two owner decisions reversed those. **PLAN.md → "Phase Map (v3.1)" wins over this file**
+> in the sections listed below; read it before implementing any of them.
+>
+> | Section | Says | Actually |
+> |---|---|---|
+> | §1 diagram, §2.1 | Always-on host, no serverless | **Vercel serverless** (partner's project); worker → per-minute cron drain over the same Postgres queue |
+> | §2.1, §8 | HMAC-SHA256 (`X-ATS-Timestamp`/`X-ATS-Signature`), ±300 s replay window | **Static `X-ATS-Secret` header.** HMAC deferred as pre-production hardening |
+> | §2.1 | Website aborts at 15 s | Their dispatcher allows **60 s** (`AbortSignal.timeout(60_000)`) + 3 retries |
+> | §2.2, §2.3 | `ats_mode`-discriminated essays/resume payloads | **One combined payload** + `ats_run: ("essays"\|"resume"\|"finaid")[]` selector; extra fields incl. `all_answers[]`, `gpa_unweighted`/`gpa_weighted`, `tier_*_choice`, `detected_sub_track` |
+> | §0, §11 | finaid out of scope (422) | **Stored, never scored** — accepted and persisted, no gate or subscore |
+> | §4 Stage 1 | Word bounds from payload `min_words`/`max_words` | Owner-maintained in `config.yaml`; REJECTED-on-violation is under review (PLAN.md decision **D1**) |
+> | §6 | Admin session auth | Unchanged in intent, but session state moves off-process (PLAN.md **D2**) |
+>
+> Everything not in this table — §4 stages 2–8, §5 LLM tasks, §7 ranking, §9 retention,
+> §10 invariants — carries over unchanged.
+
 ---
 
 ## 0. What changed and why

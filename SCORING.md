@@ -33,7 +33,14 @@ Outcomes: `REJECTED` (failed a hard gate) · `RANKED` (scored, ranked per cohort
 1. **Profanity in ANY essay** — including the optional Essay 3 (good-faith violation).
 2. **Gibberish in a required essay** (deterministic heuristics, ≥2 signals; ESL-safe) —
    Task D backstops this. Gibberish in Essay 3 ⇒ 0 bonus only.
-3. **Word bounds, strict to the exact per-essay `min_words`/`max_words`** from the webhook
+3. **Word bounds, strict to the exact per-essay `min_words`/`max_words`** — ⚠️ **v3.1: the
+   source changed and the verdict is under review.** The partner does not send per-essay
+   bounds, so they are now owner-maintained in `config.yaml` (decision 2026-07-26). That
+   removes the justification for a hard REJECT below: it held *because* the site validated
+   at submit and sent us its own bounds. With bounds from our config, a violation may just
+   mean our config is stale — see **PLAN.md decision D1** (proposed: NEEDS_REVIEW, not
+   REJECTED, when bounds are config-sourced). The text below describes the as-built v3
+   behavior. Originally: from the webhook
    payload (the website validates required essays at submit, so a violation here signals
    tampering or contract drift — audited as such). Essay 3 over-max ⇒ bonus voided, not
    rejected (the site does not server-validate optional essays).

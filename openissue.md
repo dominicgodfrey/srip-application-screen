@@ -2,7 +2,16 @@
 
 Things only the owner (Dominic) can provide. Claude Code references this file; update the
 status lines as items land. **Do not put real secrets or applicant PII in this file** — it is
-committed to the repo. See `CLAUDE.md` → Privacy & Security.
+committed to the repo. See `CLAUDE.md` → Security.
+
+> **Scope of this file (v3.1):** long-lived owner-supplied *inputs* — API keys, curated
+> word lists, account settings. **Design and phase decisions live in `PLAN.md`**
+> ("Load-bearing decisions still open", incl. D1–D3), and everything needing the website
+> team lives in `WEBSITE_ASKS.md`. Kept separate so the three don't drift.
+>
+> v2-only items (Fillout CSV reference export, the Fillout S3 resume-host allowlist) were
+> removed 2026-07-27 — the CSV intake is retired and the resume host is now tracked as
+> `WEBSITE_ASKS.md` ask #4 (Cloudflare R2, deferred while the resume stage is off).
 
 ---
 
@@ -11,8 +20,12 @@ committed to the repo. See `CLAUDE.md` → Privacy & Security.
 ### 1. OpenAI API key  ·  STATUS: NOT PROVIDED
 - **What:** `OPENAI_API_KEY`.
 - **Where:** project-root `.env` (gitignored), one line: `OPENAI_API_KEY=sk-...`
-- **Why:** every LLM task (A GPA-normalize, B low-GPA adequacy, C coursework, D essay grading)
-  needs it. Without it, only the deterministic gates run.
+- **Why:** every LLM task (A GPA-normalize, B low-GPA adequacy, C coursework, D essay
+  grading, F technical-essay bonus) needs it. Without it, only the deterministic gates run.
+- **v3.1 note:** once the service is deployed to the partner's Vercel project, this key is
+  also set as an env var *there* — meaning their team can read it. See the secrets-governance
+  note in PLAN.md's 2026-07-27 hosting entry; a separate key for that deployment is the
+  mitigation if that matters.
 - **Never** hard-code it, commit it, or write it into any output/log.
 
 ### 2. OpenAI data-retention setting  ·  STATUS: RESOLVED (owner confirmed, 2026-06-12)
@@ -29,85 +42,35 @@ committed to the repo. See `CLAUDE.md` → Privacy & Security.
   `resources/profanity.txt` (loaded live). The allowlist was populated 2026-06-11 from the
   false positives the default list produced on the reference dataset — 7 good-faith
   applicants were being rejected over clinical/innocuous words (`stroke`, `organ`, `oral`,
-  `facial`, `thrust`, `sex-based`, …). A scan after the fix shows 0 profanity flags on the
-  reference CSV.
+  `facial`, `thrust`, `sex-based`, …). A scan after the fix showed 0 profanity flags.
 - **Still needed from owner:** the **BLOCK side** — curated slurs and profane exclamations
   the default list may miss. The file format is documented in `resources/profanity.txt`.
-- **Needed from owner:** populate `resources/profanity.txt` with —
   - **slurs to block** (the primary concern),
   - **profane exclamations**,
   - a **medical / anatomical ALLOWLIST** — clinical/anatomical terms must NOT trip the gate
-    (PRD §4.2; e.g. legitimate medical vocabulary in an extenuating-circumstances explanation).
+    (e.g. legitimate medical vocabulary in an extenuating-circumstances explanation).
 - **Why it matters:** the default list may miss the specific slurs you want gated and may
   false-positive on clinical terms, which would wrongly reject good-faith applicants.
-- **Action:** fill in the placeholder (a plain newline-separated file is fine — a LDNOOBW-style
-  base is easy to retrofit); Phase 2.2 will load it and subtract the allowlist.
-
----
-
-## Non-blocking — housekeeping / defensibility
-
-### 4. Reference CSV for integration testing  ·  STATUS: NOT SUPPLIED
-- **What:** the real Fillout export (or a representative **synthetic** copy) to validate the
-  §2 data-contract parser end-to-end.
-- **Handling:** the real CSV is PII — keep it only in gitignored `data/`, never commit it.
-  Automated tests use synthetic fixtures only.
-
----
-
-## Blocking for Phase 12 (resume parsing)
-
-### 5. Resume URL host allowlist  ·  STATUS: RESOLVED
-- **Resolved (Phase 12):** the owner supplied sample resume URLs from the real export; all
-  point at one S3 bucket host, now pinned in `config.yaml` →
-  `resume.allowed_url_hosts: [prod-fillout-oregon-s3.s3.us-west-2.amazonaws.com]`.
-  A live smoke test against five real URLs confirmed public fetchability and extraction.
-- **Note from the live sample:** some applicants upload **images** (e.g. a `.png`) in the
-  resume slot. These download fine but fail extraction with the typed `not_a_pdf` reason →
-  0 bonus + an audit note, never a block. OCR is deliberately out of scope.
-- **If Fillout ever changes buckets:** add the new hostname to `resume.allowed_url_hosts`
-  (exact host match, https only). The original rationale stands: the allowlist is the SSRF
-  guard for URLs arriving in an uploaded CSV.
-
----
-
-## Open — needs an owner decision
-
-### 6. GPA normalization routes too many applicants to NEEDS_REVIEW  ·  STATUS: SETTLED (owner decision, 2026-06-12)
-- **Decision:** current behavior is acceptable. The goal was to reduce reviewer workload, and
-  reading through a small number of NEEDS_REVIEW applications is fine. No mitigation will be
-  built; promote-from-audit (and now demote) remains the human-resolution workflow.
-- Original analysis kept below for reference.
-- **Observation (owner, 2026-06-11):** "GPA scale normalization is removing too many
-  candidates." (They are not removed — `NEEDS_REVIEW` is never a rejection — but they drop
-  out of the ranked list until a human resolves them, which reads as removal.)
-- **Measured on the reference CSV (466 rows, deterministic pass only):**
-  243 resolved deterministically · 180 routed to LLM Task A (mostly weighted `>4.0` values
-  like `4.27`, `4.42`, `weighted: 4.4`; Task A resolves many but returns
-  `requires_manual_review` for the genuinely unplaceable) · 43 blank → straight to
-  `NEEDS_REVIEW` (no token spent).
-- **Why it is conservative by design:** PRD §6.1 — "Do not reject for a missing/unscalable
-  scale" and never guess a GPA that gates someone. The blank-GPA cohort (43 = 9.2%) is the
-  floor; no normalization change can fix a blank cell.
-- **Interim path (shipped):** the audit browser now shows the raw GPA for every candidate
-  and a human can **promote** any `NEEDS_REVIEW`/`REJECTED` applicant — the system re-runs
-  all scoring on them (unscoreable GPA contributes 0 points) and folds them into the ranking
-  as an audited manual override.
-- **Candidate mitigations (owner to pick):**
-  1. Extend the deterministic parser for the common weighted patterns (`4.0 < x ≤ 5.0`
-     unweighted-cap heuristic) instead of routing them to Task A.
-  2. Loosen Task A acceptance (treat `confidence: med` + a stated scale as placeable).
-  3. Decide a policy for blank GPAs (currently NEEDS_REVIEW; alternatives: score GPA as 0
-     points and rank on essays alone, or keep manual review).
-- **Action:** owner picks a mitigation; until then promote-from-audit is the workflow.
+- **Stakes are higher in v3:** profanity in **any** essay — including the optional technical
+  essay — is a hard rejection, and applications now arrive continuously rather than in a
+  batch a human reviews before release.
 
 ---
 
 ## Settled — no action needed (listed so they aren't re-litigated)
-- GPA threshold = **3.3** (PRD §1; owner raised it from 3.0 on 2026-06-12).
+
+- GPA threshold = **3.3**; hard floor **2.0** (owner raised the threshold from 3.0 on
+  2026-06-12).
+- **GPA normalization routing to NEEDS_REVIEW is acceptable** (owner decision, 2026-06-12).
+  The concern was that scale-normalization "removes" candidates; it does not — `NEEDS_REVIEW`
+  is never a rejection, and promote-from-audit is the human-resolution workflow. No
+  mitigation will be built. *(Measured on the v2 reference CSV, 466 rows: 243 resolved
+  deterministically, 180 routed to Task A, 43 blank → NEEDS_REVIEW. Historical figures —
+  v3 receives structured `gpa_unweighted`/`gpa_weighted`, so the Task A share should fall.)*
 - LLM provider = **OpenAI**, cloud for all tasks.
-- Resume parsing = **in scope as Phase 12** (owner decision, supersedes the earlier deferral;
-  see PLAN.md Phase Map + Notes log). `bonus_max = 10` per PRD §10.1; extraction via `pypdf`;
-  Stage 6 stays the inert stub until Phase 12.5 lands, and `resume.bonus_max: 0` remains the
-  kill switch thereafter.
-- School ranking source = **U.S. News & World Report** (Best National / Best Global), frozen for Summer 2026.
+- School ranking source = **U.S. News & World Report** (Best National / Best Global), frozen
+  for Summer 2026.
+- Resume parsing ships **disabled** (`resume.bonus_max: 0` — the kill switch). The engine
+  choice is still open as `WEBSITE_ASKS.md` #11; the v3 value is 25 points once enabled.
+  Extraction is via `pypdf`; images uploaded into the resume slot fail extraction with a
+  typed `not_a_pdf` reason ⇒ 0 bonus + audit note, never a block. OCR is out of scope.

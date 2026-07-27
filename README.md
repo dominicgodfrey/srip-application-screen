@@ -1,15 +1,25 @@
-# SRIP Track 2 — Application Filtering System
+# SRIP ATS — Continuous Application Filtering Service (CS Track)
 
-A stateless service that **rejects** applications failing deterministic hard-gate quality
-checks and **scores + ranks** every survivor. It does *not* decide acceptances — that is a
-deferred downstream step that consumes this system's ranked output.
+A **persistent, secured webhook-receiver** ATS. The partner-owned thinkNeuroWebsite POSTs
+one JSON payload per application; this service validates, stores, grades asynchronously,
+and gives staff a session-gated review UI over the live cohort. It **rejects** applications
+failing deterministic hard-gate quality checks and **scores + ranks** every survivor. It
+does *not* decide acceptances — that is a downstream step consuming this system's ranked output.
 
-Input is a CSV export from Fillout; output is a set of downloadable result files. Nothing is
-persisted between sessions.
+Results persist in a dedicated Neon Postgres database (applications · llm_cache · events).
+
+> **v2 note:** the stateless Fillout-CSV batch system described by
+> [`SRIP_Application_Filter_PRD.md`](SRIP_Application_Filter_PRD.md) is **superseded** and
+> frozen on the `v2-fillout-batch` branch.
+> **v3.1 in flight:** the contract, webhook auth, and hosting model are mid-reversal —
+> see the banner in [`CLAUDE.md`](CLAUDE.md) and PLAN.md → "Phase Map (v3.1)".
 
 ## Docs
 - [`CLAUDE.md`](CLAUDE.md) — how the system is built (stack, conventions, guardrails)
-- [`SRIP_Application_Filter_PRD.md`](SRIP_Application_Filter_PRD.md) — functional spec (what it decides)
+- [`SRIP_ATS_PRD_v3.md`](SRIP_ATS_PRD_v3.md) — **current** functional spec (what it decides)
+- [`SCORING.md`](SCORING.md) — the 150-point scoring model
+- [`WEBSITE_ASKS.md`](WEBSITE_ASKS.md) — partner-team asks, answers, and open discussions
+- [`SRIP_Application_Filter_PRD.md`](SRIP_Application_Filter_PRD.md) — superseded v2 spec
 - [`PLAN.md`](PLAN.md) — phase-by-phase progress tracker
 - [`openissue.md`](openissue.md) — owner inputs still required
 
@@ -28,8 +38,12 @@ The `--extra api` group (FastAPI/uvicorn/Jinja2) is required for the API + UI an
 Set `OPENAI_API_KEY` in `.env` (copy from `.env.example`) before running LLM stages.
 
 ## Privacy
-This system processes minors' PII. Nothing is written to disk or a database; never commit
-`data/`, `.env`, results files, or any real applicant content. Test fixtures are synthetic.
+This system processes minors' PII. Applicant data **is persisted** — in the ATS's own Neon
+Postgres database only (v2's "no database" rule was deliberately overturned; see PRD v3 §9).
+The privacy stance is now retention-based: per-submission delete plus a close-cycle
+export-then-purge, so the DB is empty between cycles. Never commit `data/`, `.env`, results
+files, or any real applicant content. Test fixtures are synthetic. Logs and the `events`
+ledger carry `submission_id` only — never essay, explanation, or resume text.
 
 Resume PDFs (Stage 6) are downloaded only from the https hosts pinned in
 `resume.allowed_url_hosts` (`config.yaml`), processed in memory one applicant at a time
