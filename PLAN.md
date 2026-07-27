@@ -14,9 +14,10 @@ audit + 2026-07-27 owner decisions invalidated four built assumptions (contract 
 auth scheme, hosting model, bounds source). P9–P13 below replace the old P8.
 
 ## Active Sub-Task
-Start **P9.1** (unified payload model). Nothing in P9–P13 is code-blocked, but three
-owner decisions (D1–D3 in the Notes log) should be settled first — they change gate
-semantics and table count, which are expensive to reverse mid-implementation.
+Start **P9.1** (unified payload model). **D1–D3 are settled (owner, 2026-07-27)** — the
+gate-semantics and table-count questions that were holding this back are answered, so
+P9→P13 is now unblocked for authorship end to end. What remains blocked is *verification*
+(no Neon project) and the *pilot* (three partner items), not the code.
 
 ---
 
@@ -127,8 +128,12 @@ the state that port breaks, P13 the deploy.
         `gpa_explanation`, `relevant_coursework`, `programming_languages`,
         `github_profile`, `institution`, `state_of_residence` by `field_key`. An
         expected-but-absent key appends a `mapping_notes` entry (the mechanism already
-        exists). GPA: `gpa_unweighted` primary, `gpa_weighted`-only keeps the existing
-        `force_task_a` route. Tier values are raw form strings (`Honors`/`Intensive`/
+        exists). **Per D3 (2026-07-27): absent and blank collapse to one path** — a missing
+        `gpa_explanation` is treated as "no explanation", i.e. the existing sub-3.3 REJECT.
+        Keep the `mapping_notes` entry anyway so the audit record shows the key was never
+        delivered, and add the batch-level drift check (key absent from *every* row in a
+        drain ⇒ contract drift, not unanimous non-answer). GPA: `gpa_unweighted` primary,
+        `gpa_weighted`-only keeps the existing `force_task_a` route. Tier values are raw form strings (`Honors`/`Intensive`/
         `Regular`) — normalize into the existing `ProgramChoices`.
   - 9.5 `pipeline.py`: `make_grade_fn` reads `db_row["payload"]`. The resume-only
         NEEDS_REVIEW short-circuit is superseded by 9.3 (such rows are never claimed);
@@ -140,6 +145,20 @@ the state that port breaks, P13 the deploy.
         `tests/test_ingest_webhook.py` + `tests/test_pipeline_v3.py` to the new shape;
         add `all_answers` extraction tests (present / absent / blank); update
         `tests/test_replay.py` + `scripts/replay.py` fixture generation.
+  - 9.8 **Essay bounds: config-sourced + D1 semantics.** Two coupled changes, both from
+        owner decisions. (a) *Source* (2026-07-26): `ingest_webhook.py` reads
+        `min_words`/`max_words` from a new `essay_bounds:` config block keyed by essay
+        slot, since the live payload carries no bounds — payload still wins if ever
+        supplied. (b) *Severity* (D1, 2026-07-27): a required-essay bounds violation
+        becomes **NEEDS_REVIEW, not REJECTED**. Add `essay_bounds.on_violation:
+        needs_review` (the `reject` branch stays reachable for the payload-supplied case).
+        Retire the "tampering or contract drift" REJECT audit note — that inference was
+        only ever defensible when the *site* supplied the bounds. Essay 3 over-max still
+        just voids its bonus. Tests: the existing bounds matrix flips its expected outcome
+        for required essays; inclusive-boundary cases are unaffected.
+        **Owner note (do not action now):** deleting the length gate outright is on the
+        table for after the pilot — if the site validates at submit, the gate may only
+        ever produce false positives. Decide with real violation counts in hand.
 
 - **P10 — Auth swap to the partner's static secret** *(small, do it with P9)*
   - 10.1 `api/webhook_auth.py`: keep the module (it is the seam for restoring HMAC) but
@@ -346,13 +365,11 @@ close-cycle · flow-back (#9) → post-v3.
 
 Ordered by how expensive they are to reverse once P9–P13 start.
 
-**Owner (blocking implementation — settle before P9/P12 land):**
-- [ ] **D1 — config-sourced bounds violation: NEEDS_REVIEW or REJECTED?** (see Notes log;
-      recommendation NEEDS_REVIEW). Gate semantics ⇒ CLAUDE.md requires a recorded decision.
-- [ ] **D2 — session strategy:** signed cookies (three tables, no revocation) vs a fourth
-      `sessions` table (real revocation, CLAUDE.md scope amendment). Rec: signed cookies.
-- [ ] **D3 — absent `gpa_explanation` key ⇒ NEEDS_REVIEW rather than treat-as-blank?**
-      Also gate semantics. Rec: yes — key absent means *unknown*, not *declined*.
+**Owner (blocking implementation) — D1–D3 all DECIDED 2026-07-27; see Notes log:**
+- [x] **D1 — NEEDS_REVIEW** (not REJECTED) for a config-sourced bounds violation.
+- [x] **D2 — stateless signed cookies** (P12.1 as written).
+- [x] **D3 — absent `gpa_explanation` = no explanation ⇒ REJECTED.** Owner overrode the
+      NEEDS_REVIEW recommendation; treat missing exactly like blank.
 - [ ] Confirm no Neon DB has ever run `001_init.sql` (decides amend-in-place vs `002_`).
 - [ ] Confirm retiring `/jobs` + the upload screen now (P11.5). Rec: yes.
 
@@ -461,8 +478,32 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
   already hold all of it in their own DB), and "separate DB, ATS-only credentials" still
   holds. Mitigations if wanted: a separate Vercel project under their team, or their own
   OpenAI key.
-- **2026-07-27 — three gate/scope decisions PROPOSED, awaiting owner sign-off (D1–D3).**
-  Recorded here so implementation does not quietly pick a side:
+- **2026-07-27 — D1–D3 ANSWERED (owner).** The proposals below were put to the owner and
+  all three are now settled. **D1: NEEDS_REVIEW — accepted as proposed.** Owner's reasoning
+  matches the proposal: length is already validated on the input end, so a violation
+  reaching us is our problem to look at, not the applicant's to be rejected for.
+  **Owner note for the future: it may be worth removing the length gate entirely** —
+  if the site validates at submit, the gate arguably earns nothing but false positives.
+  Deliberately *not* now; revisit after the pilot has produced real violation counts (if
+  the NEEDS_REVIEW queue never sees one, that is the evidence to delete it).
+  **D2: stateless signed cookies — accepted as proposed** (P12.1 stands as written; 2 h
+  TTL + `session_key_version`, no server-side revocation).
+  **D3: REJECTED — owner OVERRODE the NEEDS_REVIEW recommendation.** An absent
+  `gpa_explanation` key is to be treated exactly like a blank one: a sufficiently low GPA
+  with no explanation, which the existing gate rejects. So `index_answers` returning no
+  key and returning `""` collapse to one path — simpler than the proposal, and it removes
+  the "unknown vs declined" distinction from the code entirely.
+  **Consequence to hold onto:** this makes the `gpa_explanation` *field key* load-bearing
+  for a rejection path. If the live key differs from the `lib/questions-default.ts` seed we
+  mapped from, or the site stops sending it, every sub-3.3 applicant who wrote an
+  explanation is auto-rejected and nothing surfaces it. Two cheap mitigations to build with
+  P9.4, neither of which reopens the decision: (a) still append the existing
+  `mapping_notes` entry when the key is absent, so the audit record shows *why*; (b) a
+  drain-level sanity check — the key absent from **every** row in a batch is contract
+  drift, not a cohort that all declined to answer. This is also the strongest argument for
+  partner ask #1 (one real sample payload) being the top external item.
+- **2026-07-27 — the three gate/scope proposals as originally written (D1–D3).**
+  Kept for the reasoning; see the entry above for what was actually decided:
   - **D1 — config-sourced word-bounds violation should become NEEDS_REVIEW, not REJECTED.**
     v3 made a required-essay bounds violation a hard REJECT audited as "tampering or
     contract drift". That inference was only defensible *because the site validated at
