@@ -115,7 +115,9 @@ No o-series reasoning models. Verify exact IDs against OpenAI's catalog; swap in
 - **Resume guardrails (unchanged law):** https-only exact-host allowlist (the website's R2
   host), no redirects, streaming size cap, fetch → extract → score → **discard** — resume
   bytes/text never reach the DB, an artifact, or a log. `resume.bonus_max: 0` is the kill
-  switch and current default (engine decision pending, WEBSITE_ASKS #11).
+  switch and current default. Engine decided **in-house** (owner, 2026-07-27,
+  WEBSITE_ASKS #11) — no third-party agent framework in this path; enablement is
+  post-pilot.
 - **Logging & events:** `submission_id` only — never essay/explanation/resume text.
 - **Retention:** per-submission delete + close-cycle export-then-purge exist by design;
   policy finalization pending WEBSITE_ASKS #13. Never commit real applicant data;

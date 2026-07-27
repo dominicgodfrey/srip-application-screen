@@ -70,7 +70,8 @@ committed to the repo. See `CLAUDE.md` → Security.
 - LLM provider = **OpenAI**, cloud for all tasks.
 - School ranking source = **U.S. News & World Report** (Best National / Best Global), frozen
   for Summer 2026.
-- Resume parsing ships **disabled** (`resume.bonus_max: 0` — the kill switch). The engine
-  choice is still open as `WEBSITE_ASKS.md` #11; the v3 value is 25 points once enabled.
+- Resume parsing ships **disabled** (`resume.bonus_max: 0` — the kill switch). Engine
+  **decided in-house** (owner, 2026-07-27, `WEBSITE_ASKS.md` #11 — hiring-agent rejected);
+  the v3 value is 25 points once enabled, and enablement is post-pilot.
   Extraction is via `pypdf`; images uploaded into the resume slot fail extraction with a
   typed `not_a_pdf` reason ⇒ 0 bonus + audit note, never a block. OCR is out of scope.

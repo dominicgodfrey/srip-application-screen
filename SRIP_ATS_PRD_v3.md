@@ -193,7 +193,10 @@ Stage-by-stage deltas from v2:
   rationale}` — deterministic config-priced math maps signals to 0–20 (model judges,
   config prices — the Task C pattern). `on_topic=false` or `gibberish=true` ⇒ 0 bonus.
   Absent essay ⇒ 0, no LLM call. Profanity in this essay was already a Stage-1 reject.
-- **Stage 6 resume:** engine decision pending (`WEBSITE_ASKS.md` #11). The stage is a
+- **Stage 6 resume:** engine **decided in-house** (owner, 2026-07-27 — `WEBSITE_ASKS.md`
+  #11; HackerRank hiring-agent rejected: black box, third-party agent framework in a
+  minors'-PII path, bypasses the fetch-and-discard guardrails). Task E extracts signals,
+  `config.yaml` prices them — the Task C/F pattern. The stage is a
   seam: `payload → {score_0_25, signals, audit_notes}`. Ships with
   `resume.bonus_max: 0` (zero fetches, zero tokens). When enabled: fetch from the R2
   host (https-only exact-host allowlist — ask #4), pypdf extract,

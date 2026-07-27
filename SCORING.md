@@ -23,7 +23,7 @@ Outcomes: `REJECTED` (failed a hard gate) · `RANKED` (scored, ranked per cohort
 | Essay 3 (technical, optional) | 0–20 | bonus | Task F: relevance to its prompt, technical depth/difficulty, real-world impact. Surface-level interest scores low; interest → side project → real impact scores high. Absent ⇒ 0 (neutral). Gibberish/off-topic/over-max ⇒ 0 bonus, never a rejection. |
 | Relevant coursework | 0–15 | bonus | Task C decomposition; CS > Math > Data, others ignored; flat weight × unit per counting course; explicit grade < 80% excludes a course. |
 | School | 0–20 | bonus | Fuzzy match vs curated lists: Top-20 US = 20, Top-50 Intl = 16. "High School"/unmatched ⇒ 0. |
-| Resume | 0–25 | bonus | **Engine decision pending** (HackerRank hiring-agent vs in-house rubric). Ships disabled (`resume.bonus_max: 0`) until decided. Any failure ⇒ 0 + audit note, never a block. |
+| Resume | 0–25 | bonus | **In-house rubric** (owner, 2026-07-27 — hiring-agent rejected, WEBSITE_ASKS #11): Task E extracts signals, `config.yaml` prices them, same shape as Tasks C/F. Ships disabled (`resume.bonus_max: 0`) until calibrated post-pilot. Any failure ⇒ 0 + audit note, never a block. |
 
 **Required core = 70** (GPA 40 + essays 30). **Bonuses = up to 80.** Theoretical max **150**
 (125 while resume is disabled).

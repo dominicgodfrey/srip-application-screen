@@ -82,10 +82,13 @@ school:
 # The weight_* knobs price the Task E signal counts deterministically (model counts, config
 # prices); the sum is capped at bonus_max.
 resume:
-  # v3: the engine decision is pending (WEBSITE_ASKS #11) — 0 is the kill switch and the
-  # shipping default (zero fetches, zero tokens). 25 is the value once an engine is chosen
-  # (SCORING.md). The allowlist must be re-pinned to the website's R2 host (ask #4) before
-  # enabling — the Fillout S3 entry below is the frozen v2 value.
+  # v3: engine DECIDED in-house (owner, 2026-07-27, WEBSITE_ASKS #11) — Task E extracts,
+  # the weight_* knobs below price it. 0 is the kill switch and the shipping default (zero
+  # fetches, zero tokens); 25 is the value once the rubric is calibrated post-pilot
+  # (SCORING.md). Two things must land before flipping this off 0: the allowlist must be
+  # re-pinned to the website's R2 host (ask #4 — the Fillout S3 entry below is the frozen
+  # v2 value), and the weights must be re-priced for the 0-25 scale (they were tuned for
+  # v2's 10).
   bonus_max: 0
   max_download_bytes: 10485760   # 10 MiB streaming cap per resume; abort above this
   download_timeout_s: 20.0

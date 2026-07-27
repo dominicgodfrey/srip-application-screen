@@ -225,7 +225,7 @@ the state that port breaks, P13 the deploy.
 
 **Blocked-on-answers map (v3.1):** live `field_key` list / one sample payload → P9.4
 mapping confidence · Vercel Pro confirm + secret value → P13 · Neon DB → any DB-backed
-verification (P9.2 onward) · resume engine (#11) → post-pilot · retention (#13) → P6
+verification (P9.2 onward) · retention (#13) → P6
 close-cycle · flow-back (#9) → post-v3.
 
 ---
@@ -372,8 +372,9 @@ Ordered by how expensive they are to reverse once P9–P13 start.
       dispatcher omits the header entirely when the env var is unset ⇒ we 401).
 
 **Deferred (explicitly not blocking):** HMAC re-hardening before production (ask #1);
-R2 account id (#4, resume off); per-essay bounds in the payload (#5); resume engine (#11);
-retention (#13); results flow-back (#9); cohort allocation ownership (#10).
+R2 account id (#4, resume off); per-essay bounds in the payload (#5); retention (#13);
+results flow-back (#9); cohort allocation ownership (#10). **Resume engine (#11) is no
+longer here — decided in-house 2026-07-27; only the *build* is deferred to post-pilot.**
 
 ## P6 leftovers (do during/after P7)
 - [ ] Retire the v2 `/jobs` routes + registry + upload screen + their tests once the
@@ -425,7 +426,8 @@ retention (#13); results flow-back (#9); cohort allocation ownership (#10).
      strict-to-exact from payload metadata. Profanity in any essay rejects; optional-essay
      gibberish/off-topic only zeroes its bonus.
   4. **Resume engine undecided** (hiring-agent vs in-house) → pluggable seam, ships
-     `bonus_max: 0`.
+     `bonus_max: 0`. *(Superseded 2026-07-27 — decided in-house; see the entry below.
+     The seam and the `bonus_max: 0` default survive the decision unchanged.)*
   5. Scope: CS track only; finaid mode out of scope; email/name dedup retired
      (submission_id + site-level uniqueness); affirmation gate retired.
   6. v2 frozen on `v2-fillout-batch`; CSV upload UI retired (replay tool covers dev use).
@@ -481,6 +483,25 @@ retention (#13); results flow-back (#9); cohort allocation ownership (#10).
     Today's code cannot tell them apart and would auto-reject the first case. Present-but-
     blank keeps today's REJECTED (non-answer) semantics. **Also gate semantics ⇒ needs a
     decision.**
+- **2026-07-27 — RESUME ENGINE DECIDED: in-house** (owner). Closes WEBSITE_ASKS #11 and
+  supersedes the 2026-07-04 "undecided" item above. **hiring-agent rejected on four
+  counts:** (1) it is calibrated for professional hiring, not high-school applicants;
+  (2) it is a black box, against an audit record whose whole premise is that every
+  subscore is explainable; (3) it puts a third-party agent framework in a minors'-PII
+  path — a direct CLAUDE.md "no agent framework" violation; (4) it bypasses the
+  fetch → extract → score → discard guardrails unless wrapped, and the wrapper is most of
+  the work anyway. **In-house shape:** Task E extracts signals, `config.yaml` `weight_*`
+  knobs price them — identical to the Task C/F "model judges, config prices" pattern
+  already shipped. **Cost accepted:** rubric quality is on us; the calibration plan is to
+  run hiring-agent offline on sample resumes and compare, *if* it's ever worth the time.
+  **Explicitly NOT changed by this:** `resume.bonus_max` stays `0`, the stage stays
+  disabled, and enablement stays **post-pilot** — this fixes *which* engine, not *when*.
+  Three things gate flipping it on: WEBSITE_ASKS #4 (R2 host for the allowlist), the
+  `weight_*` knobs being re-priced for 0–25 (they were tuned for v2's 10), and the
+  150-point ceiling only being real once it ships (125 until then).
+  *Note: an earlier draft of this rationale argued hiring-agent "has less to read with no
+  GitHub/languages fields" — that argument is dead: the 2026-07-26 repo audit confirmed
+  `programming_languages` and `github_profile` do ship in `all_answers`.*
 - **2026-07-26 — owner decisions on the two contract conflicts.**
   1. **Auth: adopt the website's static `X-ATS-Secret` header; retire our HMAC path for
      now.** Rationale: simpler, no website change, and changeable before full production.
