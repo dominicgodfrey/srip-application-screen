@@ -21,25 +21,23 @@ from api import admin_api as admin_mod
 from srip_filter.config import AppConfig
 from srip_filter.llm.client import FakeLLMClient
 from srip_filter.models import TaskDOutput, TaskFOutput
+from tests.live_payload import make_payload
 
 _WORDS_150 = " ".join(f"idea{i}" for i in range(150))
 
 
 def _essays_payload(sid: str) -> dict:
-    return {
-        "ats_mode": "essays",
-        "submission_id": sid,
-        "user_email": "syn@example.com",
-        "student_name": "Syn Thetic",
-        "cohort_name": "su26-cs",
-        "gpa": {"unweighted": "3.9 / 4.0", "weighted": None},
-        "required_essays": [
-            {"question": "Why?", "answer": _WORDS_150, "min_words": 100, "max_words": 350},
-            {"question": "Future?", "answer": _WORDS_150 + " more",
-             "min_words": 100, "max_words": 350},
+    return make_payload(
+        submission_id=sid,
+        cohort_name="su26-cs",
+        gpa_unweighted="3.9 / 4.0",
+        gpa_weighted=None,
+        required_essays=[
+            {"question": "Why?", "answer": _WORDS_150},
+            {"question": "Future?", "answer": _WORDS_150 + " more"},
         ],
-        "optional_essays": [],
-    }
+        optional_essays=[],
+    )
 
 
 def _audit(sid: str, *, outcome: str, score: float | None, cohort: str = "su26-cs") -> dict:
@@ -68,8 +66,7 @@ class _FakeStore:
             "student_name": "Syn Thetic",
             "sub_track": "cs",
             "status": "graded",
-            "essays_payload": _essays_payload(sid),
-            "resume_payload": None,
+            "payload": _essays_payload(sid),
             "audit_record": None,
             "submitted_at": datetime(2026, 7, 1, tzinfo=UTC),
             "updated_at": datetime(2026, 7, 2, tzinfo=UTC),
@@ -174,7 +171,7 @@ def test_detail_404_and_full_record(client: TestClient, store: _FakeStore) -> No
     body = client.get(f"/api/applications/{sid}").json()
     assert body["audit_record"]["outcome"] == "RANKED"
     assert body["audit_record"]["rank"] == 1  # read-time rank present on detail too
-    assert body["has_essays_payload"] is True
+    assert body["has_payload"] is True
 
 
 # ------------------------------------------------------------------------------------------------
@@ -206,10 +203,10 @@ def test_promote_conflicts(client: TestClient, store: _FakeStore) -> None:
     ungraded = str(uuid.uuid4())
     store.add(ungraded, status="received", audit_record=None)
     assert client.post(f"/api/applications/{ungraded}/promote").status_code == 409
-    resume_only = str(uuid.uuid4())
-    store.add(resume_only, essays_payload=None,
-              audit_record=_audit(resume_only, outcome="NEEDS_REVIEW", score=None))
-    assert client.post(f"/api/applications/{resume_only}/promote").status_code == 409
+    no_payload = str(uuid.uuid4())
+    store.add(no_payload, payload=None,
+              audit_record=_audit(no_payload, outcome="NEEDS_REVIEW", score=None))
+    assert client.post(f"/api/applications/{no_payload}/promote").status_code == 409
 
 
 def test_demote_is_deterministic_and_reversible_shape(

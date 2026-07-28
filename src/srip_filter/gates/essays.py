@@ -401,41 +401,30 @@ def run_essay_gates(
 
 
 # ================================================================================================
-# v3 Stage 1 — strict per-essay bounds + profanity across ALL essays (P4, PRD v3 §4)
+# v3 Stage 1 — profanity across ALL essays + gibberish on the required ones (P4, PRD v3 §4)
 # ================================================================================================
 # Deltas from the v2 aggregator above (which stays for the replay/calibration path):
-#   * word bounds are STRICT to the exact per-essay min/max delivered in the webhook payload —
-#     the site validates required essays at submit, so a violation reaching us signals tampering
-#     or contract drift and REJECTS with an audit note saying exactly that. No soft-penalty ramp.
-#     An essay without bounds gets no length check. The optional essay 3 over max is NOT a
-#     rejection — the technical-essay stage voids its bonus instead (bonus-only law).
+#   * NO length gate. The site server-validates word bounds at submit (400, the submission never
+#     lands), so a violation cannot reach us from a real applicant — only from our own stale
+#     config. Both the v2 soft-penalty ramp and v3's strict payload-bounds reject are retired
+#     (owner, 2026-07-28). Word counts are still reported for the audit record.
 #   * profanity checks ALL essays including the optional one (good-faith violation ⇒ REJECTED —
 #     owner decision 2026-07-04).
 #   * gibberish heuristics run on the REQUIRED essays only (essay-3 gibberish merely zeroes its
-#     bonus via Task F).
-
-
-def check_word_bounds(text: str, min_words: int | None, max_words: int | None) -> tuple[int, bool]:
-    """Exact-bounds check: ``(word_count, ok)``. Absent bounds are not enforced. Pure."""
-    wc = word_count(text)
-    if min_words is not None and wc < min_words:
-        return wc, False
-    if max_words is not None and wc > max_words:
-        return wc, False
-    return wc, True
+#     bonus via Task F — it stays bonus-only even though the live form makes it mandatory to
+#     submit; owner, 2026-07-28).
 
 
 def run_essay_gates_v3(
     applicant: WebhookApplicant, cfg: AppConfig, matcher: Profanity | None = None
 ) -> Stage1Result:
-    """v3 Stage 1 over a webhook applicant: strict bounds + profanity(all) + gibberish(required).
+    """v3 Stage 1 over a webhook applicant: profanity(all essays) + gibberish(required essays).
 
-    Returns the same :class:`Stage1Result` shape the pipeline already consumes; the soft
-    length penalties are always 0 in v3 (the ramp retired — bounds are binary now).
+    Returns the same :class:`Stage1Result` shape the pipeline already consumes; length
+    penalties are always 0 and the length gate never fails (bounds live upstream).
     """
     row = applicant.row
-    b1_wc, b1_ok = check_word_bounds(row.essay1, applicant.e1.min_words, applicant.e1.max_words)
-    b2_wc, b2_ok = check_word_bounds(row.essay2, applicant.e2.min_words, applicant.e2.max_words)
+    b1_wc, b2_wc = word_count(row.essay1), word_count(row.essay2)
 
     all_essays = [("1", row.essay1), ("2", row.essay2)]
     if row.essay3.strip():
@@ -467,21 +456,7 @@ def run_essay_gates_v3(
         if fired
     ]
 
-    hard_fail = not b1_ok or not b2_ok
-    if hard_fail:
-        bad = ", ".join(
-            f"essay {n} ({wc} words, allowed {meta.min_words or 0}-{meta.max_words or '∞'})"
-            for n, wc, ok, meta in (
-                ("1", b1_wc, b1_ok, applicant.e1),
-                ("2", b2_wc, b2_ok, applicant.e2),
-            )
-            if not ok
-        )
-        reason = (
-            f"Required essay outside its exact submitted bounds: {bad}. The website "
-            "validates these at submit — this signals tampering or contract drift."
-        )
-    elif profanity_hit:
+    if profanity_hit:
         reason = "Profanity detected in an essay"
     elif gibberish_hit:
         reason = "Essay flagged as gibberish by deterministic heuristics"
@@ -489,10 +464,12 @@ def run_essay_gates_v3(
         reason = ""
 
     return Stage1Result(
-        rejected=hard_fail or profanity_hit or gibberish_hit,
+        rejected=profanity_hit or gibberish_hit,
         primary_reason=reason,
+        # Word counts are audit data only — ok/hard_fail are pinned True/False because the
+        # length gate retired (bounds are enforced by the site at submit).
         length_gate=EssayLengthGate(
-            e1_wc=b1_wc, e2_wc=b2_wc, e1_ok=b1_ok, e2_ok=b2_ok, hard_fail=hard_fail
+            e1_wc=b1_wc, e2_wc=b2_wc, e1_ok=True, e2_ok=True, hard_fail=False
         ),
         profanity=HitGate(hit=profanity_hit, terms=list(profane_terms)),
         gibberish=HitGate(hit=gibberish_hit, terms=gib_terms),

@@ -28,12 +28,11 @@ from pydantic import ValidationError
 
 from srip_filter import db as dbmod
 from srip_filter.cohort import assign_cohorts
-from srip_filter.ingest_webhook import map_essays_payload
+from srip_filter.ingest_webhook import map_application_payload
 from srip_filter.models import (
+    ApplicationPayload,
     AuditRecord,
     CohortCapacities,
-    EssaysModePayload,
-    ResumeModePayload,
 )
 from srip_filter.outputs import build_summary
 from srip_filter.pipeline import grade_webhook_applicant
@@ -138,8 +137,7 @@ def register_admin_api(app: FastAPI) -> None:
         return {
             "submission_id": str(row["submission_id"]),
             "status": row.get("status"),
-            "has_essays_payload": row.get("essays_payload") is not None,
-            "has_resume_payload": row.get("resume_payload") is not None,
+            "has_payload": row.get("payload") is not None,
             "audit_record": record.model_dump(mode="json") if record else None,
         }
 
@@ -150,8 +148,7 @@ def register_admin_api(app: FastAPI) -> None:
         """Manually promote into the ranking: full re-score with gates recorded-but-bypassed.
 
         Spends LLM tokens (the re-score); the durable cache makes unchanged fields free.
-        409 for already-RANKED or not-yet-graded rows; 409 for resume-only rows (nothing
-        to score yet).
+        409 for already-RANKED or not-yet-graded rows; 409 when no payload is stored.
         """
         pool = _pool()
         row = await _row_or_404(pool, submission_id)
@@ -162,15 +159,11 @@ def register_admin_api(app: FastAPI) -> None:
             )
         if existing.outcome == "RANKED":
             raise HTTPException(status_code=409, detail="Application is already ranked.")
-        if not row.get("essays_payload"):
-            raise HTTPException(
-                status_code=409, detail="No essays payload to score (resume-only row)."
-            )
+        if not row.get("payload"):
+            raise HTTPException(status_code=409, detail="No stored payload to score.")
 
-        payload = EssaysModePayload.model_validate(row["essays_payload"])
-        resume_raw = row.get("resume_payload")
-        resume_payload = ResumeModePayload.model_validate(resume_raw) if resume_raw else None
-        applicant = map_essays_payload(payload, resume_payload=resume_payload)
+        payload = ApplicationPayload.model_validate(row["payload"])
+        applicant = map_application_payload(payload)
         record = await grade_webhook_applicant(
             applicant, app.state.llm_client, app.state.config, bypass_gates=True
         )

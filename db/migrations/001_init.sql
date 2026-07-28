@@ -10,16 +10,17 @@ CREATE TABLE IF NOT EXISTS applications (
   sub_track       TEXT NOT NULL DEFAULT '',
   submitted_at    TIMESTAMPTZ,
 
-  -- Per-mode webhook payloads (PRD v3 §2.2/§2.3). A row may hold either or both;
-  -- resume-before-essays arrival is legal.
-  essays_payload  JSONB,
-  essays_hash     TEXT,
-  resume_payload  JSONB,
-  resume_hash     TEXT,
+  -- The one combined webhook payload (P9). The per-mode split retired with `ats_mode`:
+  -- the partner sends every sector in one body, so "resume may arrive before essays"
+  -- cannot happen. `ats_run` lives inside the payload; it drives status, not a column.
+  payload         JSONB,
+  payload_hash    TEXT,
 
   -- Grading lifecycle (the queue IS this column; workers claim with SKIP LOCKED).
+  -- 'stored' is terminal: a delivery that did not request essay grading, kept so it is
+  -- never re-claimed by a drain.
   status          TEXT NOT NULL DEFAULT 'received'
-                  CHECK (status IN ('received', 'grading', 'graded', 'error')),
+                  CHECK (status IN ('received', 'grading', 'graded', 'error', 'stored')),
 
   -- Grading result. Rank is NEVER stored — computed at read time per cohort.
   audit_record    JSONB,

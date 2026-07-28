@@ -129,10 +129,10 @@ db:
   pool_min_size: 1
   pool_max_size: 5
 
-# Webhook edge (P2, PRD v3 §2.1). Secrets (ATS_WEBHOOK_SECRET[_PREVIOUS]) come from env.
+# Webhook edge (P2/P10). Secrets (ATS_WEBHOOK_SECRET[_PREVIOUS]) come from env and are
+# compared constant-time against the partner's static X-ATS-Secret header.
 webhook:
   max_body_bytes: 1048576   # 1 MiB cap on a single application payload -> 413 above
-  max_skew_seconds: 300.0   # HMAC replay window: |now - X-ATS-Timestamp| must be <= this
 
 # Grading worker (P3, PRD v3 §3) — drains the applications status queue.
 worker:

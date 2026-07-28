@@ -82,7 +82,7 @@ def test_bonus_never_negative_and_capped() -> None:
 
 async def test_absent_essay_is_neutral_and_free() -> None:
     client = FakeLLMClient(APP)  # no handler: any call would raise
-    r = await score_technical_essay("   ", QUESTION, 500, client, APP)
+    r = await score_technical_essay("   ", QUESTION, client, APP, max_words=500)
     assert r.bonus == 0.0
     assert r.assessment.present is False
     assert r.assessment.skipped_reason == "absent"
@@ -92,7 +92,7 @@ async def test_absent_essay_is_neutral_and_free() -> None:
 async def test_over_max_voids_bonus_without_llm_call() -> None:
     client = FakeLLMClient(APP)
     long_essay = " ".join(["word"] * 501)
-    r = await score_technical_essay(long_essay, QUESTION, 500, client, APP)
+    r = await score_technical_essay(long_essay, QUESTION, client, APP, max_words=500)
     assert r.bonus == 0.0
     assert r.assessment.over_max is True
     assert "over_max" in r.assessment.skipped_reason
@@ -102,7 +102,7 @@ async def test_over_max_voids_bonus_without_llm_call() -> None:
 async def test_no_max_words_means_no_over_max_check() -> None:
     client = FakeLLMClient(APP, handler=lambda t, u, s: _task_f())
     long_essay = " ".join(["word"] * 501)
-    r = await score_technical_essay(long_essay, QUESTION, None, client, APP)
+    r = await score_technical_essay(long_essay, QUESTION, client, APP)
     assert r.assessment.over_max is False
     assert r.bonus == pytest.approx(10.0)
 
@@ -110,7 +110,7 @@ async def test_no_max_words_means_no_over_max_check() -> None:
 async def test_good_essay_scores_and_records_signals() -> None:
     client = FakeLLMClient(APP, handler=lambda t, u, s: _task_f(depth=8, exploration=7,
                                                                 impact=6))
-    r = await score_technical_essay(ESSAY, QUESTION, 500, client, APP)
+    r = await score_technical_essay(ESSAY, QUESTION, client, APP, max_words=500)
     assert r.bonus == pytest.approx(20 * (8 + 7 + 6) / 30)
     assert r.llm_called and r.assessment.signals is not None
     assert client.calls and client.calls[0][0] == "task_f"
@@ -122,7 +122,7 @@ async def test_parse_failure_degrades_to_zero_bonus_with_note() -> None:
         raise LLMParseFailure(t, "bad json")
 
     client = FakeLLMClient(APP, handler=boom)
-    r = await score_technical_essay(ESSAY, QUESTION, 500, client, APP)
+    r = await score_technical_essay(ESSAY, QUESTION, client, APP, max_words=500)
     assert r.bonus == 0.0  # bonus signal: parse failure is neutral, never NEEDS_REVIEW
     assert r.assessment.skipped_reason == "llm_parse_failure"
     assert r.errors and "task_f" in r.errors[0]

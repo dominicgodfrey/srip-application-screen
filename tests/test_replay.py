@@ -1,6 +1,6 @@
 """P7 — replay-tool conversion tests (no network; the send path is exercised in E2E).
 
-Proves the CSV→payload conversion emits the PROPOSED §2.2 contract exactly (it must
+Proves the CSV→payload conversion emits the LIVE combined contract exactly (it must
 round-trip through the real edge models), that submission-id mapping is deterministic,
 and that the synthetic fixtures are contract-valid and span the outcome space.
 """
@@ -20,8 +20,8 @@ from replay import (  # noqa: E402
 )
 
 from srip_filter.ingest import ApplicantRow
-from srip_filter.ingest_webhook import map_essays_payload
-from srip_filter.models import EssaysModePayload
+from srip_filter.ingest_webhook import map_application_payload
+from srip_filter.models import ApplicationPayload
 
 
 def _row(**overrides) -> ApplicantRow:
@@ -45,15 +45,17 @@ def _row(**overrides) -> ApplicantRow:
 
 def test_payload_validates_against_the_edge_contract() -> None:
     payload = payload_from_row(_row(), "replay-cs")
-    parsed = EssaysModePayload.model_validate(payload)  # would raise on contract drift
+    parsed = ApplicationPayload.model_validate(payload)  # would raise on contract drift
     assert parsed.cohort_name == "replay-cs"
-    assert parsed.required_essays[0].min_words == 100
-    assert parsed.required_essays[1].max_words == 350
+    assert parsed.ats_run == ["essays"] and parsed.grades_essays()
+    assert len(parsed.required_essays) == 2
     # And the full round trip into the pipeline mapping works.
-    applicant = map_essays_payload(parsed)
+    applicant = map_application_payload(parsed)
     assert applicant.row.essay1.startswith("w0 ")
     assert applicant.row.gpa == "3.8"
+    assert applicant.row.institution == "High School"  # read back out of all_answers
     assert not applicant.missing_required_essays
+    assert applicant.mapping_notes == ()  # every expected field_key present
 
 
 def test_submission_id_mapping_is_deterministic_and_uuid_preserving() -> None:
@@ -73,8 +75,8 @@ def test_synthetic_fixtures_are_contract_valid_and_varied() -> None:
     gpas = set()
     with_optional = 0
     for p in payloads:
-        parsed = EssaysModePayload.model_validate(p)
-        gpas.add(parsed.gpa.unweighted)
+        parsed = ApplicationPayload.model_validate(p)
+        gpas.add(parsed.gpa_unweighted)
         with_optional += bool(parsed.optional_essays)
         assert "@example.com" in parsed.user_email  # synthetic-only guarantee
     assert len(gpas) == 3  # high / low-with-explanation / below-floor

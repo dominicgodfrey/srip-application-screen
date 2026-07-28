@@ -8,18 +8,22 @@ needs. No LLM, no I/O.
 
 Mapping rules that carry decisions:
 
-* **Essays:** ``required_essays[0]`` → essay 1, ``[1]`` → essay 2 (order is the site's
-  dispatch order; ``field_key`` is carried for the audit trail). The optional technical
-  essay is ``optional_essays[0]``. Fewer than two required essays ⇒ the application is
-  unscoreable → ``NEEDS_REVIEW`` (never silently rejected); surplus entries are noted in
+* **Essays:** ``required_essays[0]`` → essay 1, ``[1]`` → essay 2 (the site orders by
+  ``sort_order``: motivation, then trajectory). The bonus essay is ``optional_essays[0]``.
+  The site tags these via ``ats_role`` on the live question config, so the arrays are
+  authoritative — no field_key guessing. Fewer than two required essays ⇒ unscoreable →
+  ``NEEDS_REVIEW`` (never silently rejected); surplus entries are noted in
   ``mapping_notes`` (contract-drift signal), not graded.
-* **GPA:** ``gpa.unweighted`` is primary (deterministic path). A weighted-only
+* **Named fields come from ``all_answers``** — the full form dump is the only place
+  ``field_key`` exists. An expected-but-absent key appends a ``mapping_notes`` entry;
+  absent and blank are the same thing to the gates (owner decision D3, 2026-07-27).
+* **GPA:** ``gpa_unweighted`` is primary (deterministic path). A weighted-only
   submission sets ``force_task_a`` — the deterministic /5 conversion would misread a
-  weighted scale (PRD v3 §4 Stage 2). The site's legacy joined string is passed through
-  as-is until WEBSITE_ASKS #3 lands.
+  weighted scale (PRD v3 §4 Stage 2).
 * **International:** derived, not trusted from a sentinel — a non-blank
-  ``state_of_residence`` that is not a US state/DC/territory name ⇒ international.
-  (The dropdown sends full names; the exact non-US sentinel is unconfirmed — ask #6.)
+  ``state_of_residence`` that is not a US state/DC/territory name ⇒ international. The
+  live dropdown's sole non-US value, ``"Non-U.S. Territory"``, falls out of this
+  unchanged.
 """
 
 from __future__ import annotations
@@ -27,7 +31,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .ingest import ApplicantRow
-from .models import EssaysModePayload, GpaPayload, ResumeModePayload
+from .models import ApplicationPayload
+
+# Named answers we read out of `all_answers`. `programming_languages` and `github_profile`
+# are NOT on the live CS form (repo seed only, verified 2026-07-28) — absent is normal for
+# them, so they stay out of the expected set and never raise a drift note.
+EXPECTED_ANSWER_KEYS: tuple[str, ...] = (
+    "gpa_explanation",
+    "relevant_coursework",
+    "institution",
+    "state_of_residence",
+)
 
 # Full names as the dropdown sends them (owner: full state names). Lowercased for lookup.
 US_STATE_NAMES: frozenset[str] = frozenset(
@@ -55,21 +69,14 @@ def is_international(state_of_residence: str) -> bool:
 
 @dataclass(frozen=True)
 class EssayMeta:
-    """Per-essay grading metadata carried alongside the text (PRD v3 §4 Stage 1)."""
+    """Per-essay metadata carried alongside the text — question text only.
+
+    Word bounds retired 2026-07-28: the site server-validates them at submit (400, the
+    submission never lands), so re-checking here could only ever fire on our own stale
+    config. Task D falls back to its module-default target range.
+    """
 
     question: str = ""
-    field_key: str = ""
-    min_words: int | None = None
-    max_words: int | None = None
-
-    @property
-    def target_range(self) -> str | None:
-        """Human-readable band for the Task D prompt ("100-350"), None without bounds."""
-        if self.min_words is None and self.max_words is None:
-            return None
-        lo = self.min_words if self.min_words is not None else 0
-        hi = self.max_words if self.max_words is not None else "∞"
-        return f"{lo}-{hi}"
 
 
 @dataclass(frozen=True)
@@ -88,31 +95,26 @@ class WebhookApplicant:
     mapping_notes: tuple[str, ...] = ()  # contract-drift observations for the audit trail
 
 
-def _gpa_string(gpa: GpaPayload | str | None) -> tuple[str, bool]:
+def _gpa_string(unweighted: str | None, weighted: str | None) -> tuple[str, bool]:
     """Reduce the payload GPA to (raw string for Stage 2, force_task_a flag)."""
-    if gpa is None:
-        return "", False
-    if isinstance(gpa, str):  # legacy joined string until WEBSITE_ASKS #3
-        return gpa.strip(), False
-    unweighted = (gpa.unweighted or "").strip()
-    weighted = (gpa.weighted or "").strip()
-    if unweighted:
-        return unweighted, False
-    if weighted:
-        return weighted, True  # weighted-only: deterministic /N conversion would be wrong
+    if u := (unweighted or "").strip():
+        return u, False
+    if w := (weighted or "").strip():
+        return w, True  # weighted-only: deterministic /N conversion would be wrong
     return "", False
 
 
-def map_essays_payload(
-    payload: EssaysModePayload, *, resume_payload: ResumeModePayload | None = None
-) -> WebhookApplicant:
-    """Build the pipeline input from the stored payload(s). Pure.
-
-    ``resume_payload`` fills ``resume_url`` when the resume-mode delivery arrived
-    separately (a row may hold both payloads, PRD v3 §1.1); the essays-mode value wins
-    when both carry one.
-    """
+def map_application_payload(payload: ApplicationPayload) -> WebhookApplicant:
+    """Build the pipeline input from the stored combined payload. Pure."""
     notes: list[str] = []
+
+    answers = payload.answers()
+    for key in EXPECTED_ANSWER_KEYS:
+        if key not in answers:
+            notes.append(
+                f"all_answers has no {key!r} entry — check the live question config "
+                "(field renamed or removed)"
+            )
 
     required = payload.required_essays
     optional = payload.optional_essays
@@ -136,50 +138,42 @@ def map_essays_payload(
 
     r1, r2, o1 = entry(required, 0), entry(required, 1), entry(optional, 0)
 
-    gpa_raw, force_task_a = _gpa_string(payload.gpa)
-    resume_url = payload.resume_url or (resume_payload.resume_url if resume_payload else None)
+    gpa_raw, force_task_a = _gpa_string(payload.gpa_unweighted, payload.gpa_weighted)
+    state = answers.get("state_of_residence", "")
 
-    name = (payload.student_name or "").strip()
     row = ApplicantRow(
         submission_id=str(payload.submission_id),
         # The webhook carries one display name; keep it whole in first_name (the audit
         # record joins first+last with a space, so this renders correctly).
-        first_name=name,
+        first_name=(payload.student_name or "").strip(),
         last_name="",
         email=payload.user_email.strip(),
-        institution=payload.institution.strip(),
-        state=payload.state_of_residence.strip(),
-        first_choice=payload.first_choice.strip(),
-        second_choice=payload.second_choice.strip(),
-        third_choice=payload.third_choice.strip(),
+        institution=answers.get("institution", ""),
+        state=state,
+        first_choice=(payload.tier_first_choice or "").strip(),
+        second_choice=(payload.tier_second_choice or "").strip(),
+        third_choice=(payload.tier_third_choice or "").strip(),
         gpa=gpa_raw,
-        gpa_explanation=payload.gpa_explanation.strip(),
-        coursework=payload.relevant_coursework.strip(),
-        resume_url=(resume_url or "").strip(),
+        gpa_explanation=answers.get("gpa_explanation", ""),
+        coursework=answers.get("relevant_coursework", ""),
+        resume_url=(payload.resume_url or "").strip(),
         essay1=(r1.answer if r1 else "").strip(),
         essay2=(r2.answer if r2 else "").strip(),
         essay3=(o1.answer if o1 else "").strip(),
-        programming_languages=payload.programming_languages.strip(),
-        github_profile=payload.github_profile.strip(),
-        sub_track=payload.sub_track.strip(),
+        # Not on the live CS form — blank is the normal case, never a drift signal.
+        programming_languages=answers.get("programming_languages", ""),
+        github_profile=answers.get("github_profile", ""),
+        sub_track=(payload.detected_sub_track or "").strip(),
     )
-
-    def meta(e) -> EssayMeta:
-        if e is None:
-            return EssayMeta()
-        return EssayMeta(
-            question=e.question, field_key=e.field_key,
-            min_words=e.min_words, max_words=e.max_words,
-        )
 
     return WebhookApplicant(
         row=row,
-        e1=meta(r1),
-        e2=meta(r2),
-        e3=meta(o1),
+        e1=EssayMeta(question=r1.question if r1 else ""),
+        e2=EssayMeta(question=r2.question if r2 else ""),
+        e3=EssayMeta(question=o1.question if o1 else ""),
         cohort_name=payload.cohort_name,
-        state_of_residence=payload.state_of_residence.strip(),
-        international=is_international(payload.state_of_residence),
+        state_of_residence=state,
+        international=is_international(state),
         force_task_a=force_task_a,
         missing_required_essays=missing_required,
         mapping_notes=tuple(notes),

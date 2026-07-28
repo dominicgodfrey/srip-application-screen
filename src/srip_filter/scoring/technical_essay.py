@@ -56,9 +56,10 @@ class Stage4bResult:
 async def score_technical_essay(
     essay_text: str,
     question: str,
-    max_words: int | None,
     client: BaseLLMClient,
     cfg: AppConfig,
+    *,
+    max_words: int | None = None,
 ) -> Stage4bResult:
     """Run Stage 4b for one applicant.
 

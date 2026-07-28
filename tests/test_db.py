@@ -109,25 +109,24 @@ async def test_migrations_apply_once_then_noop(pool):
 async def test_first_delivery_is_accepted_and_queued(pool):
     sid = _sid()
     result = await upsert_application(
-        pool, mode="essays", submission_id=sid, payload=_payload(), user_email="a@example.com"
+        pool, submission_id=sid, payload=_payload(), user_email="a@example.com"
     )
     assert result == "accepted"
     row = await get_application(pool, sid)
     assert row is not None
     assert row["status"] == dbmod.STATUS_RECEIVED
-    assert row["essays_payload"]["gpa"]["unweighted"] == "3.8 / 4.0"
-    assert row["essays_hash"] == content_hash(_payload())
-    assert row["resume_payload"] is None
+    assert row["payload"]["gpa_unweighted"] == "3.8 / 4.0"
+    assert row["payload_hash"] == content_hash(_payload())
 
 
 async def test_identical_redelivery_is_unchanged_and_touches_nothing(pool):
     sid = _sid()
-    await upsert_application(pool, mode="essays", submission_id=sid, payload=_payload())
+    await upsert_application(pool, submission_id=sid, payload=_payload())
     # Simulate the worker having finished so we can prove no reset happens.
     await finish_graded(
         pool, sid, audit_record={"outcome": "RANKED"}, outcome="RANKED", final_score=101.5
     )
-    result = await upsert_application(pool, mode="essays", submission_id=sid, payload=_payload())
+    result = await upsert_application(pool, submission_id=sid, payload=_payload())
     assert result == "unchanged"
     row = await get_application(pool, sid)
     assert row["status"] == dbmod.STATUS_GRADED  # untouched: no requeue
@@ -136,34 +135,37 @@ async def test_identical_redelivery_is_unchanged_and_touches_nothing(pool):
 
 async def test_changed_content_requeues_for_regrade(pool):
     sid = _sid()
-    await upsert_application(pool, mode="essays", submission_id=sid, payload=_payload())
+    await upsert_application(pool, submission_id=sid, payload=_payload())
     await finish_graded(
         pool, sid, audit_record={"outcome": "RANKED"}, outcome="RANKED", final_score=90.0
     )
     changed = _payload(required_essays=[{"question": "Q1", "answer": "REVISED essay"}])
-    result = await upsert_application(pool, mode="essays", submission_id=sid, payload=changed)
+    result = await upsert_application(pool, submission_id=sid, payload=changed)
     assert result == "accepted"
     row = await get_application(pool, sid)
     assert row["status"] == dbmod.STATUS_RECEIVED  # requeued
-    assert row["essays_hash"] == content_hash(changed)
+    assert row["payload_hash"] == content_hash(changed)
 
 
-async def test_resume_mode_lands_on_same_row_and_may_arrive_first(pool):
+async def test_delivery_without_essays_is_stored_and_never_claimed(pool):
+    """ats_run without "essays" ⇒ terminal 'stored', so no drain ever spends tokens on it."""
     sid = _sid()
-    resume_payload = {"submission_id": sid, "resume_url": "https://r2.example/resume.pdf"}
     assert (
-        await upsert_application(pool, mode="resume", submission_id=sid, payload=resume_payload)
-        == "accepted"
-    )
-    essays = _payload()
-    assert (
-        await upsert_application(pool, mode="essays", submission_id=sid, payload=essays)
+        await upsert_application(
+            pool, submission_id=sid, payload=_payload(ats_run=["resume"]), grade=False
+        )
         == "accepted"
     )
     row = await get_application(pool, sid)
-    assert row["resume_payload"]["resume_url"].endswith("resume.pdf")
-    assert row["essays_payload"] is not None
-    assert row["essays_hash"] != row["resume_hash"]
+    assert row["status"] == dbmod.STATUS_STORED
+    assert await claim_next(pool) is None  # invisible to the queue
+
+    # A later delivery that DOES request essays flips it back through changed-hash.
+    assert (
+        await upsert_application(pool, submission_id=sid, payload=_payload(), grade=True)
+        == "accepted"
+    )
+    assert (await get_application(pool, sid))["status"] == dbmod.STATUS_RECEIVED
 
 
 async def test_content_hash_is_key_order_independent():
@@ -179,9 +181,9 @@ async def test_content_hash_is_key_order_independent():
 
 async def test_claim_marks_grading_and_next_claim_gets_a_different_row(pool):
     sid1, sid2 = _sid(), _sid()
-    await upsert_application(pool, mode="essays", submission_id=sid1, payload=_payload())
+    await upsert_application(pool, submission_id=sid1, payload=_payload())
     await upsert_application(
-        pool, mode="essays", submission_id=sid2, payload=_payload(extra="two")
+        pool, submission_id=sid2, payload=_payload(extra="two")
     )
     first = await claim_next(pool)
     second = await claim_next(pool)
@@ -195,7 +197,7 @@ async def test_claim_marks_grading_and_next_claim_gets_a_different_row(pool):
 
 async def test_error_row_leaves_queue_and_is_tombstoned(pool):
     sid = _sid()
-    await upsert_application(pool, mode="essays", submission_id=sid, payload=_payload())
+    await upsert_application(pool, submission_id=sid, payload=_payload())
     claimed = await claim_next(pool)
     assert claimed is not None
     await mark_error(pool, sid, "boom: synthetic failure class")
@@ -221,10 +223,10 @@ async def test_llm_cache_round_trip_and_conflict_keeps_first(pool):
 async def test_list_scopes_by_cohort(pool):
     a, b = _sid(), _sid()
     await upsert_application(
-        pool, mode="essays", submission_id=a, payload=_payload(), cohort_name="su26-cs"
+        pool, submission_id=a, payload=_payload(), cohort_name="su26-cs"
     )
     await upsert_application(
-        pool, mode="essays", submission_id=b, payload=_payload(extra="z"), cohort_name="su27-cs"
+        pool, submission_id=b, payload=_payload(extra="z"), cohort_name="su27-cs"
     )
     su26 = await list_applications(pool, cohort_name="su26-cs")
     assert [str(r["submission_id"]) for r in su26] == [a]
@@ -233,7 +235,7 @@ async def test_list_scopes_by_cohort(pool):
 
 async def test_delete_submission_hard_deletes_and_tombstones(pool):
     sid = _sid()
-    await upsert_application(pool, mode="essays", submission_id=sid, payload=_payload())
+    await upsert_application(pool, submission_id=sid, payload=_payload())
     assert await delete_submission(pool, sid) is True
     assert await get_application(pool, sid) is None
     assert await delete_submission(pool, sid) is False  # honest double-delete

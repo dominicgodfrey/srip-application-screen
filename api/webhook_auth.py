@@ -1,75 +1,53 @@
-"""Webhook HMAC verification (P2, PRD v3 §2.1).
+"""Webhook authentication (P10, live scheme).
 
-Scheme (mirrored by the website's ``sendWebhook`` per WEBSITE_ASKS #1, and by
-``scripts/replay.py``):
+The partner's dispatcher sends a single static header (`thinkNeuroWebsite/lib/ats.ts`)::
 
-    X-ATS-Timestamp: <unix seconds>
-    X-ATS-Signature: hex(HMAC_SHA256(secret, f"{timestamp}.{raw_body}"))
+    X-ATS-Secret: <ATS_WEBHOOK_SECRET>
 
-Rules: constant-time comparison; the timestamp must parse and sit within
-``max_skew_seconds`` of the server clock (replay window); any configured secret
-(current or previous) may sign — that is the zero-downtime rotation path. A failure
-raises :class:`WebhookAuthError` with a machine reason for the server log; the HTTP
-response stays a generic 401 so probes learn nothing (CLAUDE.md security rules).
+Rules: constant-time comparison; any configured secret (current or previous) may match —
+that is the zero-downtime rotation path. A failure raises :class:`WebhookAuthError` with a
+machine reason for the server log; the HTTP response stays a generic 401 so probes learn
+nothing (CLAUDE.md security rules).
 
-Pure functions, no FastAPI imports — fully unit-testable and reusable by the replay tool.
+**Fail closed:** with no secrets configured every request is rejected. Their dispatcher
+omits the header entirely when its env var is unset, so an unset secret on either side
+looks like a healthy deploy that authenticates nothing — rejecting is the safe read.
+
+HMAC (timestamp + body binding + replay window) was the v3 design and is the intended
+pre-production hardening (WEBSITE_ASKS #1); it lives in git history and this module is the
+seam to restore it. A static bearer secret over HTTPS is replayable and does not bind the
+body — accepted deliberately, revisit before go-live.
+
+Pure functions, no FastAPI imports — unit-testable and reusable by the replay tool.
 """
 
 from __future__ import annotations
 
-import hashlib
 import hmac
-import time
 
-TIMESTAMP_HEADER = "X-ATS-Timestamp"
-SIGNATURE_HEADER = "X-ATS-Signature"
+SECRET_HEADER = "X-ATS-Secret"
 
 
 class WebhookAuthError(Exception):
-    """Signature verification failed. ``reason`` is for server logs, never the response."""
+    """Authentication failed. ``reason`` is for server logs, never the response."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
 
 
-def sign(secret: str, timestamp: int | str, body: bytes) -> str:
-    """Compute the hex signature for a payload — the single source of the signing rule."""
-    message = f"{timestamp}.".encode() + body
-    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
-
-
-def verify_webhook(
-    timestamp_header: str | None,
-    signature_header: str | None,
-    body: bytes,
-    secrets: tuple[str, ...],
-    *,
-    max_skew_seconds: float,
-    now: float | None = None,
-) -> None:
-    """Raise :class:`WebhookAuthError` unless the request is authentically signed and fresh.
+def verify_webhook(secret_header: str | None, secrets: tuple[str, ...]) -> None:
+    """Raise :class:`WebhookAuthError` unless the header matches a configured secret.
 
     ``secrets`` is (current,) or (current, previous) — any match passes. Every branch uses
-    ``hmac.compare_digest`` so timing reveals nothing about how close a forgery got.
+    ``hmac.compare_digest`` so timing reveals nothing about how close a guess got.
     """
     if not secrets:
         raise WebhookAuthError("no_secrets_configured")
-    if not timestamp_header or not signature_header:
-        raise WebhookAuthError("missing_headers")
+    if not secret_header:
+        raise WebhookAuthError("missing_header")
 
-    try:
-        ts = float(timestamp_header)
-    except ValueError:
-        raise WebhookAuthError("bad_timestamp") from None
-
-    current = time.time() if now is None else now
-    if abs(current - ts) > max_skew_seconds:
-        raise WebhookAuthError("stale_timestamp")
-
-    provided = signature_header.strip().lower()
     for secret in secrets:
-        expected = sign(secret, timestamp_header, body)
-        if hmac.compare_digest(expected, provided):
+        if hmac.compare_digest(secret, secret_header):
             return
-    raise WebhookAuthError("bad_signature")
+    raise WebhookAuthError("bad_secret")

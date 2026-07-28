@@ -448,13 +448,15 @@ class CohortResult(_Model):
 
 
 # ============================================================================================
-# Webhook payload contracts (P2, PRD v3 §2.2) — PROPOSED contract v1
+# Webhook payload contract (P9, live) — one combined payload per applicant
 # ============================================================================================
-# Pinned against the PROPOSED contract until WEBSITE_ASKS 2/3/5/6 are answered (freeze at
-# P2 completion). Edge philosophy: *required essentials strict, everything else tolerant* —
-# a payload missing `submission_id` is unprocessable (422), but a missing optional field
-# must not bounce a real applicant while the contract is still settling. Unknown keys are
-# ignored (the site may add fields before we consume them).
+# Pinned against the partner's actual dispatcher (`thinkNeuroWebsite/lib/ats.ts`
+# `buildAtsPayload`) and the live SP27-CSE question config, read 2026-07-28. The v3
+# `ats_mode` discriminated union retired: they POST ONE body containing every sector, and
+# `ats_run` selects which grader(s) to run. Edge philosophy unchanged: *required essentials
+# strict, everything else tolerant* — a payload missing `submission_id` is unprocessable
+# (422), but a missing optional field must never bounce a real applicant. Unknown keys are
+# ignored (`referral`, `referral_code`, `time_spent_seconds`, legacy `ats_mode`).
 
 
 class _Payload(BaseModel):
@@ -463,89 +465,79 @@ class _Payload(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
 
-class GpaPayload(_Payload):
-    """Structured GPA per WEBSITE_ASKS #3. ``unweighted`` is primary (deterministic path);
-    a weighted-only submission routes through Task A (PRD v3 §4 Stage 2)."""
+class AnswerEntry(_Payload):
+    """One entry of ``all_answers`` — the full form dump.
 
-    unweighted: str | None = None
-    weighted: str | None = None
+    The only place ``field_key`` appears in the payload: the essay arrays carry question
+    text and answer alone, so this is the sole source of field identity.
+    """
+
+    field_key: str = ""
+    question: str = ""
+    answer: str | None = None  # null (not "") for an unanswered question
 
 
 class EssayEntry(_Payload):
-    """One essay as delivered: the question label, the answer, and (WEBSITE_ASKS #5) the
-    per-essay word bounds that drive the strict Stage-1 length check."""
+    """One essay as delivered. The site sends ``question`` + ``answer`` only — no
+    ``field_key`` and no word bounds (WEBSITE_ASKS #5 closed; bounds are server-enforced
+    at submit, so the ATS does not re-check them)."""
 
     question: str = ""
     answer: str = ""
-    field_key: str = ""
-    min_words: int | None = None
-    max_words: int | None = None
 
 
-class EssaysModePayload(_Payload):
-    """`ats_mode="essays"` — the primary application record (PRD v3 §2.2).
+class FinaidPayload(_Payload):
+    """Financial-aid block: **stored, never scored** (owner, 2026-07-21).
 
-    ``gpa`` accepts the structured shape (ask #3) or the site's current joined string, so
-    the receiver works before and after the website-side change lands.
+    Present on every payload, empty-ish for non-finaid applicants (`ats_run` drops
+    ``"finaid"`` instead of omitting the block).
     """
 
-    ats_mode: Literal["essays"] = "essays"
+    sat_score: str | None = None
+    test_score_scale: dict[str, int] = Field(default_factory=dict)
+    fin_aid_essays: list[EssayEntry] = Field(default_factory=list)
+
+
+class ApplicationPayload(_Payload):
+    """The one combined payload the website POSTs per applicant.
+
+    ``ats_run`` is the grader selector (any subset of essays/resume/finaid); every sector's
+    data is present regardless. Only ``submission_id`` and ``user_email`` are strict.
+    """
+
     submission_id: UUID
     user_email: str = Field(min_length=1)
     student_name: str | None = None
     cohort_name: str = ""
     cohort_display_name: str = ""
-    submitted_at: datetime | None = None
+    submitted_at: datetime | None = None  # U.S. Pacific ISO with offset, not UTC Z
     ed: bool = False
     is_finaid: bool = False
-    gpa: GpaPayload | str | None = None
-    gpa_explanation: str = ""
-    relevant_coursework: str = ""
-    programming_languages: str = ""
-    institution: str = ""
-    state_of_residence: str = ""
-    github_profile: str = ""
-    sub_track: str = ""
-    resume_url: str | None = None
-    first_choice: str = ""
-    second_choice: str = ""
-    third_choice: str = ""
+    ats_run: list[str] = Field(default_factory=list)
+    tier_first_choice: str | None = None
+    tier_second_choice: str | None = None
+    tier_third_choice: str | None = None
+    detected_sub_track: str | None = None
+    gpa_unweighted: str | None = None  # "3.95/4.0"
+    gpa_weighted: str | None = None  # "4.23/4.0"
+    all_answers: list[AnswerEntry] = Field(default_factory=list)
+    resume_url: str | None = None  # presigned R2 GET, 10-min expiry, or null
     required_essays: list[EssayEntry] = Field(default_factory=list)
     optional_essays: list[EssayEntry] = Field(default_factory=list)
+    finaid: FinaidPayload = Field(default_factory=FinaidPayload)
+
+    def answers(self) -> dict[str, str]:
+        """``field_key`` → stripped answer. Null and blank collapse (owner decision D3)."""
+        return {a.field_key: (a.answer or "").strip() for a in self.all_answers if a.field_key}
+
+    def grades_essays(self) -> bool:
+        """True when this delivery asks for essay grading; otherwise the row is stored only."""
+        return "essays" in self.ats_run
 
 
-class ResumeModePayload(_Payload):
-    """`ats_mode="resume"` — thin payload; may legally arrive before the essays row."""
+def parse_webhook_payload(data: dict) -> ApplicationPayload:
+    """Validate a decoded JSON body. Pydantic ``ValidationError`` propagates to the 422 path.
 
-    ats_mode: Literal["resume"]
-    submission_id: UUID
-    user_email: str = ""
-    student_name: str | None = None
-    cohort_name: str = ""
-    submitted_at: datetime | None = None
-    is_finaid: bool = False
-    resume_url: str | None = None
-    gpa: GpaPayload | str | None = None
-
-
-WebhookPayload = EssaysModePayload | ResumeModePayload
-
-
-class UnsupportedModeError(ValueError):
-    """A syntactically valid payload whose ``ats_mode`` this service does not accept."""
-
-
-def parse_webhook_payload(data: dict) -> WebhookPayload:
-    """Dispatch a decoded JSON body to its mode contract.
-
-    ``finaid`` (and anything else unknown) raises :class:`UnsupportedModeError` — the
-    caller turns that into a 422 telling the website the mode is not configured here
-    (finaid is out of scope in v3, PRD v3 §11). Pydantic ``ValidationError`` propagates
-    for malformed payloads of a supported mode.
+    There is no mode dispatch any more — one payload shape, `ats_run` selects the graders.
     """
-    mode = data.get("ats_mode")
-    if mode == "essays":
-        return EssaysModePayload.model_validate(data)
-    if mode == "resume":
-        return ResumeModePayload.model_validate(data)
-    raise UnsupportedModeError(f"unsupported ats_mode: {mode!r}")
+    return ApplicationPayload.model_validate(data)

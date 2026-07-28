@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 import uuid
 from pathlib import Path
 
@@ -37,7 +36,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROJECT_ROOT))  # allow `python scripts/replay.py` without install
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
-from api.webhook_auth import SIGNATURE_HEADER, TIMESTAMP_HEADER, sign  # noqa: E402
+from api.webhook_auth import SECRET_HEADER  # noqa: E402
 
 from srip_filter.ingest import (  # noqa: E402
     ApplicantRow,
@@ -50,7 +49,6 @@ from srip_filter.ingest import (  # noqa: E402
 _SID_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # RFC 4122 NS_DNS
 
 # The v2 form's fixed word bounds — the CSV path predates per-essay payload metadata.
-_V2_MIN_WORDS, _V2_MAX_WORDS = 100, 350
 
 
 def to_submission_uuid(raw_id: str) -> str:
@@ -61,46 +59,50 @@ def to_submission_uuid(raw_id: str) -> str:
         return str(uuid.uuid5(_SID_NAMESPACE, raw_id))
 
 
+def _answers(pairs: dict[str, str | None]) -> list[dict]:
+    """all_answers entries — the only place field_key appears in the live contract."""
+    return [
+        {"field_key": k, "question": k.replace("_", " ").title(), "answer": v}
+        for k, v in pairs.items()
+    ]
+
+
 def payload_from_row(row: ApplicantRow, cohort_name: str) -> dict:
-    """Convert one canonical CSV row to the PRD v3 §2.2 PROPOSED essays-mode payload."""
+    """Convert one canonical CSV row to the LIVE combined payload (lib/ats.ts shape)."""
     return {
-        "ats_mode": "essays",
         "submission_id": to_submission_uuid(row.submission_id),
         "user_email": row.email,
         "student_name": f"{row.first_name} {row.last_name}".strip(),
         "cohort_name": cohort_name,
         "cohort_display_name": cohort_name,
+        "submitted_at": None,
+        "ed": False,
         "is_finaid": False,
-        "gpa": {"unweighted": row.gpa or None, "weighted": None},
-        "gpa_explanation": row.gpa_explanation,
-        "relevant_coursework": row.coursework,
-        "programming_languages": "",
-        "institution": row.institution,
-        "state_of_residence": row.state,
-        "github_profile": "",
-        "sub_track": "cs",
+        "ats_run": ["essays"],
+        "tier_first_choice": row.first_choice or None,
+        "tier_second_choice": row.second_choice or None,
+        "tier_third_choice": row.third_choice or None,
+        "detected_sub_track": "intensive",
+        "gpa_unweighted": row.gpa or None,
+        "gpa_weighted": None,
+        "all_answers": _answers({
+            "institution": row.institution or None,
+            "state_of_residence": row.state or None,
+            "gpa_explanation": row.gpa_explanation or None,
+            "relevant_coursework": row.coursework or None,
+        }),
         "resume_url": row.resume_url or None,
-        "first_choice": row.first_choice,
-        "second_choice": row.second_choice,
-        "third_choice": row.third_choice,
         "required_essays": [
-            {
-                "question": "What motivates you to apply to Track 2 of the SRIP program?",
-                "answer": row.essay1,
-                "field_key": "essay_motivation",
-                "min_words": _V2_MIN_WORDS,
-                "max_words": _V2_MAX_WORDS,
-            },
-            {
-                "question": "How does Track 2 fit your trajectory as a foundation for "
-                "future research?",
-                "answer": row.essay2,
-                "field_key": "essay_trajectory",
-                "min_words": _V2_MIN_WORDS,
-                "max_words": _V2_MAX_WORDS,
-            },
+            {"question": "What motivates you to apply to Track 2 of the SRIP program?",
+             "answer": row.essay1},
+            {"question": "How does Track 2 fit your trajectory as a foundation for "
+                         "future research?",
+             "answer": row.essay2},
         ],
         "optional_essays": [],
+        "finaid": {"sat_score": None,
+                   "test_score_scale": {"SAT": 1600, "PSAT": 1600, "ACT": 36},
+                   "fin_aid_essays": []},
     }
 
 
@@ -141,8 +143,6 @@ def synthetic_payloads(count: int, cohort_name: str) -> list[dict]:
                 {
                     "question": "Describe a technical problem you are curious about.",
                     "answer": " ".join(f"project{i} build{i}" for i in range(100)),
-                    "field_key": "essay_technical",
-                    "max_words": 500,
                 }
             ]
         out.append(payload)
@@ -151,16 +151,11 @@ def synthetic_payloads(count: int, cohort_name: str) -> list[dict]:
 
 def send(url: str, secret: str, payloads: list[dict], *, test_ping: bool) -> int:
     failures = 0
-    with httpx.Client(timeout=15.0) as client:  # mirror the website's 15 s abort
+    with httpx.Client(timeout=60.0) as client:  # mirror the website's 60 s abort
         items = ([{"_test": True}] if test_ping else []) + payloads
         for payload in items:
             body = json.dumps(payload).encode("utf-8")
-            ts = str(int(time.time()))
-            headers = {
-                "Content-Type": "application/json",
-                TIMESTAMP_HEADER: ts,
-                SIGNATURE_HEADER: sign(secret, ts, body),
-            }
+            headers = {"Content-Type": "application/json", SECRET_HEADER: secret}
             resp = client.post(url, content=body, headers=headers)
             label = "_test" if payload.get("_test") else payload["submission_id"]
             print(f"  {label}: {resp.status_code} {resp.text[:120]}")
@@ -193,7 +188,7 @@ def main() -> int:
     if args.dry_run:
         for p in payloads:
             wc1 = len(p["required_essays"][0]["answer"].split())
-            print(f"  {p['submission_id']}  gpa={p['gpa']['unweighted']!r}  e1_words={wc1}")
+            print(f"  {p['submission_id']}  gpa={p['gpa_unweighted']!r}  e1_words={wc1}")
         print(f"{len(payloads)} payload(s); dry run — nothing sent.")
         return 0
 

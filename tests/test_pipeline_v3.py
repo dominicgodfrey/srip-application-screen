@@ -9,15 +9,14 @@ off-topic there only zeroes the bonus; strict exact word bounds).
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
 from srip_filter.config import AppConfig
-from srip_filter.ingest_webhook import map_essays_payload
+from srip_filter.ingest_webhook import map_application_payload
 from srip_filter.llm.client import FakeLLMClient
-from srip_filter.models import EssaysModePayload, TaskCOutput, TaskDOutput, TaskFOutput
+from srip_filter.models import ApplicationPayload, TaskCOutput, TaskDOutput, TaskFOutput
 from srip_filter.pipeline import grade_webhook_applicant, make_grade_fn
+from tests.live_payload import make_payload
 
 APP = AppConfig()
 
@@ -26,31 +25,27 @@ _TECH_ESSAY = " ".join(["project"] * 200)
 
 
 def _payload_dict(**overrides) -> dict:
-    base = {
-        "ats_mode": "essays",
-        "submission_id": str(uuid.uuid4()),
-        "user_email": "syn@example.com",
-        "student_name": "Syn Thetic",
-        "cohort_name": "su26-cs",
-        "gpa": {"unweighted": "3.8 / 4.0", "weighted": None},
-        "gpa_explanation": "",
-        "relevant_coursework": "",
-        "institution": "High School",
-        "state_of_residence": "California",
-        "required_essays": [
-            {"question": "Why apply?", "answer": _WORDS_150,
-             "min_words": 100, "max_words": 350},
-            {"question": "Research future?", "answer": _WORDS_150 + " indeed",
-             "min_words": 100, "max_words": 350},
-        ],
-        "optional_essays": [],
-    }
+    """Live-shaped payload with two gradeable required essays and no optional essay."""
+    base = make_payload(
+        answers={
+            "institution": "High School",
+            "relevant_coursework": None,
+            "gpa_explanation": None,
+            "essay_motivation": _WORDS_150,
+            "essay_trajectory": _WORDS_150 + " indeed",
+            "essay_research": None,
+        },
+        gpa_unweighted="3.8 / 4.0",
+        gpa_weighted=None,
+    )
     base.update(overrides)
     return base
 
 
 def _applicant(**overrides):
-    return map_essays_payload(EssaysModePayload.model_validate(_payload_dict(**overrides)))
+    return map_application_payload(
+        ApplicationPayload.model_validate(_payload_dict(**overrides))
+    )
 
 
 def _task_d(*, on_topic: bool = True, gibberish: bool = False) -> TaskDOutput:
@@ -96,12 +91,12 @@ def _client(handler=_handler) -> FakeLLMClient:
 
 
 async def test_survivor_ranked_with_composed_score_and_metadata() -> None:
-    optional = [{"question": "Tech topic?", "answer": _TECH_ESSAY, "max_words": 500}]
+    optional = [{"question": "Tech topic?", "answer": _TECH_ESSAY}]
     rec = await grade_webhook_applicant(
         _applicant(optional_essays=optional), _client(), APP
     )
     assert rec.outcome == "RANKED"
-    assert rec.cohort_name == "su26-cs"
+    assert rec.cohort_name == "SP27-CSE"
     assert rec.international is False
     gpa_expected = 40 * (3.8 - 3.3) / (4.0 - 3.3)
     assert rec.scores.gpa_points == pytest.approx(gpa_expected, abs=1e-3)
@@ -129,47 +124,30 @@ async def test_essay3_absence_is_neutral_and_free() -> None:
 
 
 # ------------------------------------------------------------------------------------------------
-# Strict word bounds (v3 Stage 1)
+# Word bounds retired (owner, 2026-07-28) — the site server-validates them at submit
 # ------------------------------------------------------------------------------------------------
 
 
-async def test_required_essay_outside_exact_bounds_rejects_as_contract_drift() -> None:
-    client = _client()
-    short = {"question": "Why apply?", "answer": "ninety nine words missing",
-             "min_words": 100, "max_words": 350}
-    good = {"question": "Research future?", "answer": _WORDS_150,
-            "min_words": 100, "max_words": 350}
-    rec = await grade_webhook_applicant(
-        _applicant(required_essays=[short, good]), client, APP
-    )
-    assert rec.outcome == "REJECTED"
-    assert rec.decided_at_stage == "stage1"
-    assert "tampering or contract drift" in rec.primary_reason
-    assert client.calls == []  # zero tokens past a Stage-1 reject
+async def test_length_never_gates_a_required_essay() -> None:
+    """A too-short and a too-long required essay both still grade — no length rejection.
 
-
-async def test_essay_without_bounds_gets_no_length_check() -> None:
-    no_bounds = {"question": "Why apply?", "answer": "short but unbounded"}
-    good = {"question": "Research future?", "answer": _WORDS_150}
-    rec = await grade_webhook_applicant(
-        _applicant(required_essays=[no_bounds, good]), _client(), APP
-    )
-    assert rec.outcome == "RANKED"  # no bounds delivered -> no length gate
-
-
-async def test_exact_boundary_words_pass() -> None:
-    # Varied tokens so the gibberish unique-word-ratio heuristic (correctly) stays quiet.
-    exactly_100 = " ".join(f"word{i}" for i in range(100))
-    exactly_350 = " ".join(f"term{i}" for i in range(350))
-    rec = await grade_webhook_applicant(
-        _applicant(required_essays=[
-            {"question": "Q1", "answer": exactly_100, "min_words": 100, "max_words": 350},
-            {"question": "Q2", "answer": exactly_350, "min_words": 100, "max_words": 350},
-        ]),
-        _client(),
-        APP,
-    )
-    assert rec.outcome == "RANKED"  # strict means exact: min and max are inclusive
+    The site returns 400 at submit on any bounds violation, so a violation can only reach
+    us from our own stale config; rejecting a real applicant for that is exactly what
+    "never silently reject" forbids.
+    """
+    for answer in ("three words only", " ".join(f"word{i}" for i in range(900))):
+        client = _client()
+        rec = await grade_webhook_applicant(
+            _applicant(required_essays=[
+                {"question": "Why apply?", "answer": answer},
+                {"question": "Research future?", "answer": _WORDS_150},
+            ]),
+            client,
+            APP,
+        )
+        assert rec.outcome == "RANKED"
+        assert rec.gates.essay_length.hard_fail is False
+        assert client.calls  # graded for real, not short-circuited
 
 
 # ------------------------------------------------------------------------------------------------
@@ -179,8 +157,7 @@ async def test_exact_boundary_words_pass() -> None:
 
 async def test_profanity_in_optional_essay_rejects_whole_application() -> None:
     client = _client()
-    optional = [{"question": "Tech?", "answer": "this fucking compiler " + _TECH_ESSAY,
-                 "max_words": 500}]
+    optional = [{"question": "Tech?", "answer": "this fucking compiler " + _TECH_ESSAY}]
     rec = await grade_webhook_applicant(_applicant(optional_essays=optional), client, APP)
     assert rec.outcome == "REJECTED"
     assert rec.decided_at_stage == "stage1"
@@ -195,22 +172,12 @@ async def test_gibberish_optional_essay_zeroes_bonus_never_rejects() -> None:
             return _task_f(gibberish=True)
         return _handler(task, user, schema)
 
-    optional = [{"question": "Tech?", "answer": _TECH_ESSAY, "max_words": 500}]
+    optional = [{"question": "Tech?", "answer": _TECH_ESSAY}]
     rec = await grade_webhook_applicant(
         _applicant(optional_essays=optional), _client(handler), APP
     )
     assert rec.outcome == "RANKED"  # never a rejection from the bonus signal
     assert rec.scores.technical_essay_bonus == 0.0
-
-
-async def test_optional_essay_over_max_voids_bonus_only() -> None:
-    client = _client()
-    optional = [{"question": "Tech?", "answer": " ".join(["word"] * 501), "max_words": 500}]
-    rec = await grade_webhook_applicant(_applicant(optional_essays=optional), client, APP)
-    assert rec.outcome == "RANKED"
-    assert rec.scores.technical_essay_bonus == 0.0
-    assert rec.technical_essay.over_max is True
-    assert all(call[0] != "task_f" for call in client.calls)  # voided without a token
 
 
 # ------------------------------------------------------------------------------------------------
@@ -235,7 +202,7 @@ async def test_weighted_only_gpa_routes_to_task_a_not_fraction_math() -> None:
 
     client = _client(handler)
     rec = await grade_webhook_applicant(
-        _applicant(gpa={"unweighted": None, "weighted": "4.4 / 5.0"}), client, APP
+        _applicant(gpa_unweighted=None, gpa_weighted="4.4 / 5.0"), client, APP
     )
     assert rec.outcome == "RANKED"
     assert "task_a" in rec.llm_calls  # NOT the deterministic /5 path (would be 3.52)
@@ -250,26 +217,11 @@ async def test_weighted_only_gpa_routes_to_task_a_not_fraction_math() -> None:
 async def test_grade_fn_maps_db_row_to_result() -> None:
     payload = _payload_dict()
     grade_fn = make_grade_fn(_client(), APP)
-    result = await grade_fn(
-        {"submission_id": payload["submission_id"], "essays_payload": payload,
-         "resume_payload": None}
-    )
+    result = await grade_fn({"submission_id": payload["submission_id"], "payload": payload})
     assert result.outcome == "RANKED"
     assert result.final_score is not None and result.final_score > 0
     assert result.audit_record["submission_id"] == payload["submission_id"]
-    assert result.audit_record["cohort_name"] == "su26-cs"
-
-
-async def test_grade_fn_resume_only_row_is_needs_review_not_rejected() -> None:
-    grade_fn = make_grade_fn(_client(), APP)
-    result = await grade_fn(
-        {"submission_id": str(uuid.uuid4()), "essays_payload": None,
-         "resume_payload": {"ats_mode": "resume", "submission_id": str(uuid.uuid4())},
-         "student_name": "Syn", "user_email": "s@e.com", "cohort_name": "su26-cs"}
-    )
-    assert result.outcome == "NEEDS_REVIEW"  # never silently rejected
-    assert result.final_score is None
-    assert "essays not yet received" in result.audit_record["primary_reason"]
+    assert result.audit_record["cohort_name"] == "SP27-CSE"
 
 
 async def test_missing_required_essays_needs_review_before_any_gate() -> None:

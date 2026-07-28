@@ -46,15 +46,14 @@ from .ingest import (
     IngestReport,
     ingest_csv,
 )
-from .ingest_webhook import WebhookApplicant, map_essays_payload
+from .ingest_webhook import WebhookApplicant, map_application_payload
 from .llm.client import BaseLLMClient
 from .models import (
+    ApplicationPayload,
     AuditRecord,
-    EssaysModePayload,
     EssayTexts,
     HitGate,
     ProgramChoices,
-    ResumeModePayload,
 )
 from .outputs import (
     build_summary,
@@ -704,8 +703,8 @@ async def grade_webhook_applicant(
                 applicant.e2.question or "(essay question not delivered in payload)",
                 client,
                 cfg,
-                target_range_e1=applicant.e1.target_range,
-                target_range_e2=applicant.e2.target_range,
+                # No per-essay range: the payload carries no bounds, so Task D uses its
+                # module default (the live required essays are both 100-350 anyway).
             )
             record.llm_calls.extend(("task_d_e1", "task_d_e2"))
             record.gates.essay_relevance = stage4.essay_relevance
@@ -731,9 +730,10 @@ async def grade_webhook_applicant(
         stage4b = await score_technical_essay(
             row.essay3,
             applicant.e3.question or "(technical essay prompt not delivered in payload)",
-            applicant.e3.max_words,
             client,
             cfg,
+            # No max_words: the site server-validates the 500-word cap at submit, so the
+            # over-max rung cannot fire from a real applicant.
         )
         record.scores.technical_essay_bonus = stage4b.bonus
         record.technical_essay = stage4b.assessment
@@ -794,37 +794,17 @@ def make_grade_fn(
 ):
     """Bind the v3 runner into the worker's ``GradeFn`` shape (P3 seam).
 
-    The claimed DB row carries the raw stored payloads; they are re-validated here (they
-    were validated at the edge, but the DB is not trusted blindly) and mapped through
-    :func:`~srip_filter.ingest_webhook.map_essays_payload`. A resume-only row (essays not
-    yet delivered — legal, PRD v3 §1.1) grades to ``NEEDS_REVIEW`` with an explanatory
-    reason; the essays-mode delivery later resets it to ``received`` and re-grades fully.
+    The claimed DB row carries the raw stored payload; it is re-validated here (it was
+    validated at the edge, but the DB is not trusted blindly) and mapped through
+    :func:`~srip_filter.ingest_webhook.map_application_payload`. Deliveries that did not
+    request essay grading never reach this seam — they are parked in ``'stored'`` and are
+    never claimed. A corrupt payload raises into the worker's per-row handler, which
+    records ``NEEDS_REVIEW`` + ``status='error'`` (invariant #9).
     """
 
     async def grade_fn(db_row: dict) -> GradeResult:
-        essays_raw = db_row.get("essays_payload")
-        if not essays_raw:
-            record = AuditRecord(
-                submission_id=str(db_row["submission_id"]),
-                name=db_row.get("student_name") or "",
-                email=db_row.get("user_email") or "",
-                cohort_name=db_row.get("cohort_name") or "",
-                outcome="NEEDS_REVIEW",
-                decided_at_stage="ingest",
-                primary_reason="Resume delivered but essays not yet received",
-            )
-            return GradeResult(
-                audit_record=record.model_dump(mode="json"),
-                outcome=record.outcome,
-                final_score=None,
-            )
-
-        payload = EssaysModePayload.model_validate(essays_raw)
-        resume_raw = db_row.get("resume_payload")
-        resume_payload = (
-            ResumeModePayload.model_validate(resume_raw) if resume_raw else None
-        )
-        applicant = map_essays_payload(payload, resume_payload=resume_payload)
+        payload = ApplicationPayload.model_validate(db_row["payload"])
+        applicant = map_application_payload(payload)
         record = await grade_webhook_applicant(applicant, client, cfg, fetcher)
         return GradeResult(
             audit_record=record.model_dump(mode="json"),

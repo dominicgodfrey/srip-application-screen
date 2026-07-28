@@ -1,102 +1,63 @@
-"""P2 webhook receiver tests — signature vectors, contract validation, idempotent ACK.
+"""P2/P10 webhook receiver tests — auth vectors, contract validation, idempotent ACK.
 
 No real database: the store boundary (``db.upsert_application`` / ``db.add_event``) is
 monkeypatched with spies, which is exactly what proves PRD v3 invariant #7 — on every
-4xx path the spies must never fire. HMAC math is exercised for real via ``sign``.
-Synthetic data only.
+4xx path the spies must never fire. Synthetic data only.
 """
 
 from __future__ import annotations
 
 import json
-import time
-import uuid
 
 import pytest
 from api.main import create_app
-from api.webhook_auth import (
-    SIGNATURE_HEADER,
-    TIMESTAMP_HEADER,
-    WebhookAuthError,
-    sign,
-    verify_webhook,
-)
+from api.webhook_auth import SECRET_HEADER, WebhookAuthError, verify_webhook
 from fastapi.testclient import TestClient
 
 from api import webhooks as webhooks_mod
 from srip_filter.config import AppConfig
 from srip_filter.llm.client import FakeLLMClient
+from tests.live_payload import make_payload
 
 SECRET = "test-webhook-secret"
 PREVIOUS = "rotated-out-secret"
 
 
 # ------------------------------------------------------------------------------------------------
-# verify_webhook — pure signature vectors
+# verify_webhook — pure static-secret vectors
 # ------------------------------------------------------------------------------------------------
 
 
-def _headers(body: bytes, *, secret: str = SECRET, ts: float | None = None) -> dict[str, str]:
-    stamp = str(int(time.time() if ts is None else ts))
-    return {TIMESTAMP_HEADER: stamp, SIGNATURE_HEADER: sign(secret, stamp, body)}
+def _headers(body: bytes = b"", *, secret: str = SECRET) -> dict[str, str]:
+    """Body is ignored — the live scheme is a static header, not a body-bound signature."""
+    return {SECRET_HEADER: secret}
 
 
-def test_valid_signature_passes() -> None:
-    body = b'{"x":1}'
-    h = _headers(body)
-    verify_webhook(
-        h[TIMESTAMP_HEADER], h[SIGNATURE_HEADER], body, (SECRET,), max_skew_seconds=300
-    )
+def test_valid_secret_passes() -> None:
+    verify_webhook(SECRET, (SECRET,))
 
 
-@pytest.mark.parametrize(
-    ("ts", "sig", "reason"),
-    [
-        (None, None, "missing_headers"),
-        ("123", None, "missing_headers"),
-        ("not-a-number", "deadbeef", "bad_timestamp"),
-    ],
-)
-def test_missing_or_garbled_headers(ts: str | None, sig: str | None, reason: str) -> None:
-    with pytest.raises(WebhookAuthError) as err:
-        verify_webhook(ts, sig, b"{}", (SECRET,), max_skew_seconds=300)
-    assert err.value.reason == reason
-
-
-def test_stale_and_future_timestamps_rejected() -> None:
-    body = b"{}"
-    for offset in (-301, 301):
-        h = _headers(body, ts=time.time() + offset)
+def test_missing_header_rejected() -> None:
+    for value in (None, ""):
         with pytest.raises(WebhookAuthError) as err:
-            verify_webhook(
-                h[TIMESTAMP_HEADER], h[SIGNATURE_HEADER], body, (SECRET,), max_skew_seconds=300
-            )
-        assert err.value.reason == "stale_timestamp"
+            verify_webhook(value, (SECRET,))
+        assert err.value.reason == "missing_header"
 
 
-def test_tampered_body_rejected() -> None:
-    h = _headers(b'{"gpa":"4.0"}')
+def test_wrong_secret_rejected() -> None:
     with pytest.raises(WebhookAuthError) as err:
-        verify_webhook(
-            h[TIMESTAMP_HEADER], h[SIGNATURE_HEADER], b'{"gpa":"2.0"}', (SECRET,),
-            max_skew_seconds=300,
-        )
-    assert err.value.reason == "bad_signature"
+        verify_webhook("not-the-secret", (SECRET,))
+    assert err.value.reason == "bad_secret"
 
 
-def test_previous_secret_accepted_during_rotation() -> None:
-    body = b"{}"
-    h = _headers(body, secret=PREVIOUS)
-    verify_webhook(
-        h[TIMESTAMP_HEADER], h[SIGNATURE_HEADER], body, (SECRET, PREVIOUS), max_skew_seconds=300
-    )
+def test_previous_secret_still_accepted_during_rotation() -> None:
+    verify_webhook(PREVIOUS, (SECRET, PREVIOUS))
 
 
-def test_no_secrets_configured_never_passes() -> None:
-    body = b"{}"
-    h = _headers(body)
+def test_no_secrets_configured_rejects_everything() -> None:
+    """Fail closed: their dispatcher omits the header entirely when its env var is unset."""
     with pytest.raises(WebhookAuthError) as err:
-        verify_webhook(h[TIMESTAMP_HEADER], h[SIGNATURE_HEADER], body, (), max_skew_seconds=300)
+        verify_webhook(SECRET, ())
     assert err.value.reason == "no_secrets_configured"
 
 
@@ -142,21 +103,7 @@ def client() -> TestClient:
 
 
 def _essays_payload(**overrides) -> dict:
-    base = {
-        "ats_mode": "essays",
-        "submission_id": str(uuid.uuid4()),
-        "user_email": "synthetic@example.com",
-        "student_name": "Syn Thetic",
-        "cohort_name": "su26-cs",
-        "gpa": {"unweighted": "3.8 / 4.0", "weighted": None},
-        "gpa_explanation": "",
-        "required_essays": [
-            {"question": "Why?", "answer": "Because.", "min_words": 100, "max_words": 350}
-        ],
-        "optional_essays": [],
-    }
-    base.update(overrides)
-    return base
+    return make_payload(**overrides)
 
 
 def _post(client: TestClient, payload: dict, *, secret: str = SECRET, headers=None):
@@ -176,7 +123,7 @@ def test_signed_essays_delivery_accepted(client: TestClient, spies: _Spies) -> N
     assert resp.json() == {"status": "accepted"}
     assert len(spies.upserts) == 1
     stored = spies.upserts[0]
-    assert stored["mode"] == "essays"
+    assert stored["grade"] is True  # "essays" in ats_run
     assert stored["submission_id"] == payload["submission_id"]
     assert stored["payload"] == payload  # raw delivered dict is what's persisted
     assert spies.events == [("delivery", payload["submission_id"])]
@@ -189,18 +136,26 @@ def test_unchanged_redelivery_reports_unchanged(client: TestClient, spies: _Spie
     assert resp.json() == {"status": "unchanged"}
 
 
-def test_resume_mode_accepted(client: TestClient, spies: _Spies) -> None:
-    resp = _post(
-        client,
-        {
-            "ats_mode": "resume",
-            "submission_id": str(uuid.uuid4()),
-            "user_email": "synthetic@example.com",
-            "resume_url": "https://r2.example.com/resume/x.pdf",
-        },
-    )
+def test_delivery_without_essays_is_stored_not_queued(
+    client: TestClient, spies: _Spies
+) -> None:
+    """ats_run without "essays" ⇒ stored terminal, so no drain ever spends tokens on it."""
+    resp = _post(client, _essays_payload(ats_run=["resume"]))
     assert resp.status_code == 202
-    assert spies.upserts[0]["mode"] == "resume"
+    assert spies.upserts[0]["grade"] is False
+
+
+def test_finaid_payload_is_accepted_and_stored(client: TestClient, spies: _Spies) -> None:
+    """Finaid is stored, never scored (owner, 2026-07-21) — it must not 422 any more."""
+    resp = _post(client, _essays_payload(
+        is_finaid=True,
+        ats_run=["essays", "finaid"],
+        finaid={"sat_score": "1500/1600",
+                "test_score_scale": {"SAT": 1600, "PSAT": 1600, "ACT": 36},
+                "fin_aid_essays": [{"question": "Need?", "answer": "text"}]},
+    ))
+    assert resp.status_code == 202
+    assert spies.upserts[0]["payload"]["finaid"]["sat_score"] == "1500/1600"
 
 
 def test_unsigned_tampered_stale_all_401_and_touch_nothing(
@@ -208,21 +163,17 @@ def test_unsigned_tampered_stale_all_401_and_touch_nothing(
 ) -> None:
     """PRD v3 invariant #7 — the auth failure matrix writes no row and no event."""
     payload = _essays_payload()
-    body = json.dumps(payload).encode()
 
     cases = [
-        {},  # unsigned
-        {TIMESTAMP_HEADER: str(int(time.time()))},  # signature missing
-        _headers(body, secret="wrong-secret"),  # bad secret
-        _headers(body, ts=time.time() - 3600),  # stale
-        {  # tampered: signed over different bytes
-            **_headers(b'{"other":"bytes"}'),
-        },
+        {},  # no header at all — what their dispatcher sends when the env var is unset
+        {SECRET_HEADER: ""},  # empty header
+        {SECRET_HEADER: "wrong-secret"},
+        {SECRET_HEADER: SECRET + "x"},  # near-miss (constant-time compare)
     ]
     for hdrs in cases:
         resp = _post(client, payload, headers=hdrs)
         assert resp.status_code == 401
-        assert resp.json() == {"detail": "Invalid signature."}  # generic, reason not leaked
+        assert resp.json() == {"detail": "Invalid credentials."}  # generic, reason not leaked
     assert spies.upserts == []
     assert spies.events == []
 
@@ -237,13 +188,6 @@ def test_signed_test_ping_200_and_no_row(client: TestClient, spies: _Spies) -> N
 def test_unsigned_test_ping_is_401(client: TestClient, spies: _Spies) -> None:
     resp = _post(client, {"_test": True}, headers={})
     assert resp.status_code == 401
-    assert spies.upserts == []
-
-
-def test_finaid_mode_rejected_as_unsupported(client: TestClient, spies: _Spies) -> None:
-    resp = _post(client, {"ats_mode": "finaid", "submission_id": str(uuid.uuid4())})
-    assert resp.status_code == 422
-    assert "finaid" in resp.json()["detail"]
     assert spies.upserts == []
 
 
@@ -278,7 +222,21 @@ def test_oversize_body_413(client: TestClient, spies: _Spies) -> None:
     assert spies.upserts == []
 
 
-def test_gpa_tolerates_current_site_string_format(client: TestClient, spies: _Spies) -> None:
-    # Until WEBSITE_ASKS #3 lands the site sends a joined string; the edge must accept it.
-    resp = _post(client, _essays_payload(gpa="3.8 / 4.0"))
+def test_unmodelled_fields_are_ignored_not_rejected(
+    client: TestClient, spies: _Spies
+) -> None:
+    """referral / time_spent_seconds / a legacy ats_mode must never bounce a real payload."""
+    resp = _post(client, _essays_payload(
+        referral="Someone", referral_code="ABC", time_spent_seconds=900, ats_mode="essays",
+    ))
     assert resp.status_code == 202
+
+
+def test_test_ping_short_circuits_before_uuid_validation(
+    client: TestClient, spies: _Spies
+) -> None:
+    """Their Test button sends submission_id="ats-connectivity-test" — not a UUID."""
+    resp = _post(client, {"_test": True, "submission_id": "ats-connectivity-test",
+                          "cohort_name": "TEST", "form_data": {}})
+    assert resp.status_code == 200
+    assert spies.upserts == []

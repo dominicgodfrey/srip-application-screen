@@ -22,18 +22,9 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from srip_filter import db as dbmod
-from srip_filter.models import (
-    EssaysModePayload,
-    UnsupportedModeError,
-    parse_webhook_payload,
-)
+from srip_filter.models import parse_webhook_payload
 
-from .webhook_auth import (
-    SIGNATURE_HEADER,
-    TIMESTAMP_HEADER,
-    WebhookAuthError,
-    verify_webhook,
-)
+from .webhook_auth import SECRET_HEADER, WebhookAuthError, verify_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -74,17 +65,11 @@ def register_webhooks(app: FastAPI) -> None:
             return _error(413, "Payload too large.")
 
         try:
-            verify_webhook(
-                request.headers.get(TIMESTAMP_HEADER),
-                request.headers.get(SIGNATURE_HEADER),
-                body,
-                secrets,
-                max_skew_seconds=cfg.webhook.max_skew_seconds,
-            )
+            verify_webhook(request.headers.get(SECRET_HEADER), secrets)
         except WebhookAuthError as err:
             # Reason to the server log only; generic body out (probes learn nothing).
             logger.warning("webhook auth failed: %s", err.reason)
-            return _error(401, "Invalid signature.")
+            return _error(401, "Invalid credentials.")
 
         try:
             data = json.loads(body)
@@ -93,14 +78,14 @@ def register_webhooks(app: FastAPI) -> None:
         if not isinstance(data, dict):
             return _error(422, "Body must be a JSON object.")
 
-        # The admin panel's connectivity Test button (PRD v3 §2.2): signed ⇒ 200, no row.
+        # The admin panel's connectivity Test button: authenticated ⇒ 200, no row. Must
+        # short-circuit before validation — its `submission_id` is the literal
+        # "ats-connectivity-test", not a UUID, and it carries no application fields.
         if data.get("_test") is True:
             return JSONResponse(status_code=200, content={"ok": True})
 
         try:
             payload = parse_webhook_payload(data)
-        except UnsupportedModeError as err:
-            return _error(422, str(err))
         except ValidationError as err:
             return JSONResponse(
                 status_code=422,
@@ -111,22 +96,26 @@ def register_webhooks(app: FastAPI) -> None:
         if pool is None:
             return _error(503, "Database is not configured.")
 
-        is_essays = isinstance(payload, EssaysModePayload)
+        # Store every delivery; queue for grading only when essays were requested. A
+        # resume-only or finaid-only delivery lands terminal ("stored") so it is not
+        # re-claimed by every drain forever — spending tokens the partner explicitly did
+        # not ask for. A later delivery that does request essays resets it via the normal
+        # changed-hash path.
         result = await dbmod.upsert_application(
             pool,
-            mode="essays" if is_essays else "resume",
             submission_id=str(payload.submission_id),
             payload=data,
+            grade=payload.grades_essays(),
             cohort_name=payload.cohort_name,
             user_email=payload.user_email,
             student_name=payload.student_name or "",
-            sub_track=payload.sub_track if is_essays else "",
+            sub_track=(payload.detected_sub_track or ""),
             submitted_at=payload.submitted_at,
         )
         await dbmod.add_event(
             pool,
             "delivery",
             submission_id=str(payload.submission_id),
-            details={"mode": payload.ats_mode, "result": result},
+            details={"ats_run": payload.ats_run, "result": result},
         )
         return JSONResponse(status_code=202, content={"status": result})

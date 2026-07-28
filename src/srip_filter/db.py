@@ -28,7 +28,6 @@ import asyncpg
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = _PROJECT_ROOT / "db" / "migrations"
 
-PayloadMode = Literal["essays", "resume"]
 UpsertResult = Literal["accepted", "unchanged"]
 
 # Application lifecycle states (the queue). Mirrors the 001_init CHECK constraint.
@@ -36,6 +35,7 @@ STATUS_RECEIVED = "received"
 STATUS_GRADING = "grading"
 STATUS_GRADED = "graded"
 STATUS_ERROR = "error"
+STATUS_STORED = "stored"  # delivered but essay grading not requested — terminal
 
 
 def content_hash(payload: dict[str, Any]) -> str:
@@ -97,9 +97,9 @@ async def apply_migrations(pool: asyncpg.Pool, migrations_dir: Path = MIGRATIONS
 async def upsert_application(
     pool: asyncpg.Pool,
     *,
-    mode: PayloadMode,
     submission_id: str,
     payload: dict[str, Any],
+    grade: bool = True,
     cohort_name: str = "",
     user_email: str = "",
     student_name: str = "",
@@ -108,33 +108,36 @@ async def upsert_application(
 ) -> UpsertResult:
     """Idempotently store one webhook payload for one submission (PRD v3 §2.3).
 
-    Per-mode content hash decides everything:
+    The content hash decides everything:
 
-    * no row → insert, ``status='received'`` → ``"accepted"``;
-    * row exists, this mode's hash identical → nothing touched → ``"unchanged"``;
-    * row exists, hash differs (re-submission, or the other mode arriving) → this mode's
-      payload/hash replaced, identity refreshed, ``status`` reset to ``'received'`` so the
-      worker re-grades → ``"accepted"``.
+    * no row → insert → ``"accepted"``;
+    * row exists, hash identical → nothing touched → ``"unchanged"`` (invariant #8: a
+      re-delivery changes no outcome and re-bills nothing);
+    * row exists, hash differs (re-submission) → payload replaced, identity refreshed,
+      status reset so the worker re-grades → ``"accepted"``.
+
+    ``grade`` comes from ``"essays" in ats_run``. False parks the row in terminal
+    ``'stored'`` so no drain ever claims it; a later delivery that does request essays
+    flips it back through the changed-hash path.
 
     The row lock (``FOR UPDATE``) serializes concurrent deliveries of the same submission
     (admin re-runs / ``untested_only`` races are harmless).
     """
     new_hash = content_hash(payload)
-    payload_col = f"{mode}_payload"
-    hash_col = f"{mode}_hash"
+    status = STATUS_RECEIVED if grade else STATUS_STORED
 
     async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
-            f"SELECT {hash_col} AS h FROM applications WHERE submission_id = $1 FOR UPDATE",
+            "SELECT payload_hash AS h FROM applications WHERE submission_id = $1 FOR UPDATE",
             submission_id,
         )
         if row is None:
             await conn.execute(
-                f"""
+                """
                 INSERT INTO applications
                   (submission_id, cohort_name, user_email, student_name, sub_track,
-                   submitted_at, {payload_col}, {hash_col}, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{STATUS_RECEIVED}')
+                   submitted_at, payload, payload_hash, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 """,
                 submission_id,
                 cohort_name,
@@ -144,22 +147,23 @@ async def upsert_application(
                 submitted_at,
                 json.dumps(payload),
                 new_hash,
+                status,
             )
             return "accepted"
         if row["h"] == new_hash:
             return "unchanged"
         await conn.execute(
-            f"""
+            """
             UPDATE applications
-               SET {payload_col} = $2,
-                   {hash_col}    = $3,
-                   cohort_name   = CASE WHEN $4 <> '' THEN $4 ELSE cohort_name END,
-                   user_email    = CASE WHEN $5 <> '' THEN $5 ELSE user_email END,
-                   student_name  = CASE WHEN $6 <> '' THEN $6 ELSE student_name END,
-                   sub_track     = CASE WHEN $7 <> '' THEN $7 ELSE sub_track END,
-                   submitted_at  = COALESCE($8, submitted_at),
-                   status        = '{STATUS_RECEIVED}',
-                   updated_at    = NOW()
+               SET payload      = $2,
+                   payload_hash = $3,
+                   cohort_name  = CASE WHEN $4 <> '' THEN $4 ELSE cohort_name END,
+                   user_email   = CASE WHEN $5 <> '' THEN $5 ELSE user_email END,
+                   student_name = CASE WHEN $6 <> '' THEN $6 ELSE student_name END,
+                   sub_track    = CASE WHEN $7 <> '' THEN $7 ELSE sub_track END,
+                   submitted_at = COALESCE($8, submitted_at),
+                   status       = $9,
+                   updated_at   = NOW()
              WHERE submission_id = $1
             """,
             submission_id,
@@ -170,6 +174,7 @@ async def upsert_application(
             student_name,
             sub_track,
             submitted_at,
+            status,
         )
         return "accepted"
 
@@ -345,7 +350,7 @@ async def add_event(
 # Helpers
 # ================================================================================================
 
-_JSONB_COLS = ("essays_payload", "resume_payload", "audit_record", "details")
+_JSONB_COLS = ("payload", "audit_record", "details")
 
 
 def _to_dict(row: asyncpg.Record) -> dict[str, Any]:

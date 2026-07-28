@@ -225,14 +225,13 @@ class WorkerConfig(_Strict):
 
 
 class WebhookConfig(_Strict):
-    """Webhook edge knobs (P2, PRD v3 §2.1).
+    """Webhook edge knobs (P2/P10).
 
     ``max_body_bytes`` bounds a single application payload (a few KB in practice — 1 MiB is
-    generous); ``max_skew_seconds`` is the HMAC replay window (|now − X-ATS-Timestamp|).
+    generous). The HMAC replay window retired with the static-secret swap (P10).
     """
 
     max_body_bytes: int = 1_048_576  # 1 MiB
-    max_skew_seconds: float = 300.0  # ±5 min
 
 
 class AppConfig(_Strict):
