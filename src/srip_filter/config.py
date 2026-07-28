@@ -271,8 +271,9 @@ class Secrets(BaseSettings):
     openai_api_key: str | None = None
     database_url: str | None = None
     database_url_test: str | None = None
-    # Webhook HMAC secrets (PRD v3 §2.1). "previous" enables zero-downtime rotation:
-    # both are accepted while the website flips to a new value, then previous is cleared.
+    # Webhook auth (P10): the static shared secret the website sends as X-ATS-Secret.
+    # "previous" enables zero-downtime rotation: both are accepted while the website
+    # flips to a new value, then previous is cleared.
     ats_webhook_secret: str | None = None
     ats_webhook_secret_previous: str | None = None
     # Admin login (P5): PBKDF2 hash only, never plaintext. Generate:
