@@ -14,10 +14,12 @@ audit + 2026-07-27 owner decisions invalidated four built assumptions (contract 
 auth scheme, hosting model, bounds source). P9–P13 below replace the old P8.
 
 ## Active Sub-Task
-Start **P9.1** (unified payload model). **D1–D3 are settled (owner, 2026-07-27)** — the
-gate-semantics and table-count questions that were holding this back are answered, so
-P9→P13 is now unblocked for authorship end to end. What remains blocked is *verification*
-(no Neon project) and the *pilot* (three partner items), not the code.
+**P9 + P10 shipped (44f9d17).** Next is **P11** (serverless port: cron drain, stale-claim
+reaper, migrations out of the lifespan, pooled connection, retire the in-memory
+machinery), then P12 (signed-cookie sessions) and P13.1/13.2 (`vercel.json`, ASGI
+entrypoint, `requirements.txt`) — the two artifacts the partner needs before he can deploy
+anything. Authorship is unblocked end to end; what remains blocked is *verification* (no
+Neon project) and the *pilot* (partner items).
 
 ---
 
@@ -81,6 +83,12 @@ P9→P13 is now unblocked for authorship end to end. What remains blocked is *ve
 - **P7 — Replay tool + E2E**: `scripts/replay.py` (fixtures or v2 CSV → signed POSTs);
         local end-to-end incl. idempotent re-replay; 466-row v2-vs-v3 calibration run
         (local only; every outcome flip explained by an intended rule change).
+- **P9 — Live contract rework** ✔ shipped 2026-07-28 (44f9d17): one `ApplicationPayload`
+        + `ats_run`, `all_answers` mapping, unified `payload`/`payload_hash` column and a
+        terminal `stored` status, finaid accepted-and-stored, word-bounds gate deleted,
+        `tests/live_payload.py` shared builder. 001 amended in place (no DB had run it).
+- **P10 — Auth swap** ✔ shipped 2026-07-28 (44f9d17): `X-ATS-Secret` constant-time
+        compare, fail-closed with no secrets, rotation preserved; HMAC seam kept.
 - **P8 — Deploy + pilot ladder** — **SUPERSEDED by P13** (the always-on/Render premise
         died with the 2026-07-27 Vercel decision).
 
@@ -425,7 +433,9 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
   graceful no-DB 503s) done in-session 2026-07-04.
 - P7 tool: `uv run pytest tests/test_replay.py -q` — 3 passed;
   `uv run python scripts/replay.py --fixtures 3 --dry-run` prints 3 payloads.
-  Full suite 553 passed.
+- P9/P10: `uv run pytest -q` — 550 passed, 11 skipped (the skips are the DB suite,
+  which needs `DATABASE_URL_TEST`). `uv run ruff check .` clean. Live-shaped fixtures
+  live in `tests/live_payload.py` — one builder, used by every suite.
 
 ---
 
@@ -478,6 +488,41 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
   already hold all of it in their own DB), and "separate DB, ATS-only credentials" still
   holds. Mitigations if wanted: a separate Vercel project under their team, or their own
   OpenAI key.
+- **2026-07-28 — LIVE CONTRACT PINNED from the partner repo + the live question config.**
+  Read `thinkNeuroWebsite/lib/ats.ts::buildAtsPayload` (the only payload builder — one call
+  site, so there is exactly ONE shape) and pulled the live **SP27-CSE** question rows from
+  their own applicant-facing endpoint `/api/apply/my-application?track=cs`, which returns
+  `SELECT * FROM questions` unfiltered to any authenticated session — `ats_role` included.
+  **Four earlier beliefs were wrong and are corrected here:**
+  1. **Andrew's 2026-07-21 Slack example matches no live code path.** It shows `ats_mode`,
+     a joined `gpa`, UTC `Z`, finaid-only-when-`is_finaid`, and no `all_answers`. The
+     legacy "standard URL" fallback only swaps the *destination URL*, never the body — an
+     earlier hypothesis that it sent a different shape is disproven.
+  2. **Three tiers, not two.** `cohort.tiers` = Honors/Intensive/Regular and
+     `cohort_choice_1/2/3` all exist on SP27-CSE. The `cse_academics_nsb_fa26` migration
+     that drops Honors targets **FA26-CSE**, a different (older) cohort. `config.yaml`
+     `cohort.tiers: [honors, intensive, regular]` is correct as-is.
+  3. **`programming_languages` / `github_profile` are NOT on the live form** — repo seed
+     only. This reinstates the owner's original 2026-07-06 note and retracts the
+     2026-07-27 retraction of it (that retraction read the seed, not live).
+  4. **The third essay is `essay_research`, not `essay_technical`**, and all three essays
+     carry explicit `ats_role` tags, so `FALLBACK_ATS_ROLE` never applies. It is tagged
+     `optional_essay` — already correct for our Task F bonus path, so no partner ask.
+     It is `required: true` on the form (mandatory to submit) but stays **bonus-only,
+     never rejecting** (owner, 2026-07-28) and keeps its 0–20 weight unchanged.
+  **Word bounds: gate deleted outright** (owner, 2026-07-28), superseding D1's
+  NEEDS_REVIEW. `app/api/apply/submit/route.ts` returns 400 on any violation, so a
+  violating submission never lands — the check could only ever fire on our own stale
+  config. Note their validation skips non-required questions, which is moot here because
+  all three essays are `required: true`.
+  **Other live facts now pinned:** `gpa_explanation` exists, `required: false`, spelled as
+  assumed — and because the question row exists, the key is always present in
+  `all_answers` with `answer: null` when unanswered, so D3's "absent key" case is
+  near-unreachable. `state_of_residence` is a fixed select whose only non-US value is
+  `"Non-U.S. Territory"` (existing `is_international` handles it unchanged). Cohort is
+  **SP27-CSE**. `regular_cohort_acknowledgment` has a `depends_on` pointing at
+  `cohort_preference`, which does not exist on this cohort — a dead dependency on their
+  side (harmless to us; worth telling them).
 - **2026-07-27 — D1–D3 ANSWERED (owner).** The proposals below were put to the owner and
   all three are now settled. **D1: NEEDS_REVIEW — accepted as proposed.** Owner's reasoning
   matches the proposal: length is already validated on the input end, so a violation
