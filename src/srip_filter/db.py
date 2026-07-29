@@ -392,6 +392,20 @@ async def add_event(
 # Helpers
 # ================================================================================================
 
+async def count_recent_events(pool: asyncpg.Pool, kind: str, within_seconds: float) -> int:
+    """How many ``kind`` events landed inside the window (P12.2 login throttle).
+
+    The throttle has to be shared across serverless instances, and ``events`` is already
+    the cross-instance ledger. Safe for this use: a failed login is a structural fact
+    about a single shared credential — no identity, no PII.
+    """
+    return await pool.fetchval(
+        "SELECT COUNT(*) FROM events WHERE kind = $1 AND created_at > NOW() - $2::interval",
+        kind,
+        timedelta(seconds=within_seconds),
+    )
+
+
 _JSONB_COLS = ("payload", "audit_record", "details")
 
 

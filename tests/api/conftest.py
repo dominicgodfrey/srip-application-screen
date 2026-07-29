@@ -9,8 +9,8 @@ barrier: redirects, 401s, throttling, cookies, logout.
 
 from __future__ import annotations
 
+import api.main
 import pytest
-from api.auth import SessionStore
 
 
 @pytest.fixture(autouse=True)
@@ -19,5 +19,7 @@ def _bypass_admin_auth(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
     if request.node.get_closest_marker("real_auth"):
         yield
         return
-    monkeypatch.setattr(SessionStore, "is_valid", lambda self, token, now=None: True)
+    # The middleware resolves this off the module at call time (P12.1 replaced the
+    # SessionStore with the pure `valid_session` verifier).
+    monkeypatch.setattr(api.main, "valid_session", lambda cookie, secret, **kw: True)
     yield

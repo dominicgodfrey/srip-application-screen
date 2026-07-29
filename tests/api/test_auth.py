@@ -1,6 +1,6 @@
 """P5 admin-auth tests — the real barrier (marked ``real_auth`` to skip the conftest bypass).
 
-Covers: password hashing, session store TTL, the global login throttle, the default-deny
+Covers: password hashing, signed-cookie sessions, the global login throttle, the default-deny
 middleware (redirect for browsers, 401 for API callers, allowlist for health/webhook/
 static), the login/logout flow with cookies, and the open-redirect guard on ``next``.
 """
@@ -11,14 +11,16 @@ import pytest
 from api.auth import (
     SESSION_COOKIE,
     LoginThrottle,
-    SessionStore,
     hash_password,
     is_open_path,
+    sign_session,
+    valid_session,
     verify_password,
 )
 from api.main import create_app
 from fastapi.testclient import TestClient
 
+from api import main as main_mod
 from srip_filter.config import AppConfig
 from srip_filter.llm.client import FakeLLMClient
 
@@ -47,23 +49,36 @@ def test_verify_rejects_malformed_or_foreign_hashes() -> None:
     assert not verify_password("x", "pbkdf2_sha256$notanint$zz$zz")
 
 
-def test_session_store_ttl_and_revoke() -> None:
-    store = SessionStore(ttl_seconds=100)
-    token = store.create(now=0.0)
-    assert store.is_valid(token, now=50.0)
-    assert not store.is_valid(token, now=100.0)  # expired exactly at TTL
-    fresh = store.create(now=0.0)
-    store.revoke(fresh)
-    assert not store.is_valid(fresh, now=1.0)
-    assert not store.is_valid(None) and not store.is_valid("unknown")
+def test_signed_session_round_trips_and_expires() -> None:
+    cookie = sign_session("k", 100, now=0.0)
+    assert valid_session(cookie, "k", now=99.0)
+    assert not valid_session(cookie, "k", now=100.0)  # expired exactly at TTL
 
 
-def test_session_sweep_drops_expired_only() -> None:
-    store = SessionStore(ttl_seconds=100)
-    stale, live = store.create(now=0.0), store.create(now=50.0)
-    assert store.sweep(now=120.0) == 1
-    assert not store.is_valid(stale, now=120.0)
-    assert store.is_valid(live, now=120.0)
+@pytest.mark.parametrize(
+    "forged",
+    [
+        None,
+        "",
+        "nomac",
+        "9999999999.deadbeef",  # right shape, wrong mac
+        "9999999999." + sign_session("k", 100, now=0.0).partition(".")[2],  # mac of a
+        # different expiry: extending the deadline must invalidate the signature
+    ],
+)
+def test_forged_or_tampered_cookies_are_rejected(forged: str | None) -> None:
+    assert not valid_session(forged, "k", now=1.0)
+
+
+def test_a_cookie_signed_with_another_key_is_worthless() -> None:
+    """Rotating the admin password rotates the signing key — the only revocation lever
+    a stateless session has (P12.1)."""
+    cookie = sign_session("old-password-hash", 100, now=0.0)
+    assert not valid_session(cookie, "new-password-hash", now=1.0)
+
+
+def test_unconfigured_secret_validates_nothing() -> None:
+    assert not valid_session(sign_session("", 100, now=0.0), "", now=1.0)
 
 
 def test_throttle_locks_after_max_and_slides_open() -> None:
@@ -80,7 +95,7 @@ def test_throttle_locks_after_max_and_slides_open() -> None:
 
 def test_open_path_allowlist() -> None:
     for path in ("/health", "/webhooks/applications", "/login", "/static/css/app.css",
-                 "/logout", "/favicon.ico"):
+                 "/logout", "/favicon.ico", "/api/cron/drain"):
         assert is_open_path(path), path
     for path in ("/", "/api/applications", "/api/exports/decisions", "/audit", "/cohorts",
                  "/healthz", "/webhooksx"):
@@ -92,13 +107,14 @@ def test_open_path_allowlist() -> None:
 # ------------------------------------------------------------------------------------------------
 
 
-def _client(admin_hash: str | None = HASH) -> TestClient:
+def _client(admin_hash: str | None = HASH, *, db_pool: object | None = None) -> TestClient:
     cfg = AppConfig()
     # Local TestClient speaks http://, so the Secure cookie flag must be off to round-trip.
     cfg = cfg.model_copy(update={"auth": cfg.auth.model_copy(update={"cookie_secure": False})})
     app = create_app(
         config=cfg,
         client=FakeLLMClient(cfg),
+        db_pool=db_pool,
         admin_password_hash=admin_hash,
     )
     return TestClient(app, follow_redirects=False)
@@ -152,6 +168,29 @@ def test_wrong_password_401_then_lockout_429() -> None:
         assert resp.status_code == 401
     locked = client.post("/login", data={"password": PASSWORD})  # right pw, still locked
     assert locked.status_code == 429
+
+
+def test_throttle_counts_failures_from_the_events_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P12.2: with a database the lockout is shared across instances, not per-process."""
+    ledger: list[str] = []
+
+    async def add_event(pool, kind, **kwargs):
+        ledger.append(kind)
+
+    async def count_recent_events(pool, kind, within_seconds):
+        return sum(1 for entry in ledger if entry == kind)
+
+    monkeypatch.setattr(main_mod.dbmod, "add_event", add_event)
+    monkeypatch.setattr(main_mod.dbmod, "count_recent_events", count_recent_events)
+
+    client = _client(db_pool=object())  # sentinel: both store calls are patched
+    for _ in range(AppConfig().auth.max_attempts):
+        assert client.post("/login", data={"password": "nope"}).status_code == 401
+    assert ledger == ["login_failed"] * AppConfig().auth.max_attempts
+    # In-process throttle untouched — the lockout came from the ledger.
+    assert client.post("/login", data={"password": PASSWORD}).status_code == 429
 
 
 def test_open_redirect_guard_on_next() -> None:

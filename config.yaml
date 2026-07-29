@@ -148,7 +148,9 @@ worker:
 
 # Admin sessions (P5, PRD v3 §6). ADMIN_PASSWORD_HASH lives in env, never here.
 auth:
-  session_ttl_seconds: 43200.0  # 12 h
+  # 2 h — P12.1 session cookies are stateless (signed, not stored), so nothing but expiry
+  # retires a stolen one. Rotating the admin password invalidates every session at once.
+  session_ttl_seconds: 7200.0
   max_attempts: 5               # failed logins within the window before global lockout
   lockout_seconds: 300.0
   cookie_secure: true           # false only for local http:// development

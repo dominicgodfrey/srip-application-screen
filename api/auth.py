@@ -7,12 +7,20 @@ plus the middleware below. Mechanics:
 * **Password storage:** only a PBKDF2-SHA256 hash lives in the environment
   (``ADMIN_PASSWORD_HASH``, format ``pbkdf2_sha256$<iterations>$<salt_hex>$<hash_hex>``).
   Generate one with ``python -m api.auth 'the-password'``. Never the plaintext.
-* **Sessions:** opaque random tokens in a server-side in-memory store with a TTL —
-  nothing user-derived in the cookie, nothing to forge; a restart simply logs everyone
-  out (fine for a small staff tool). Cookie: HttpOnly, SameSite=Lax, Secure by config.
+* **Sessions (P12, decision D2):** a stateless HMAC-signed cookie — ``<expiry>.<mac>``,
+  signed with the admin password hash as the key. No server-side store, because there is
+  no single server any more: on Vercel every request may hit a different instance, and an
+  in-memory token store would log staff out at random. Cookie: HttpOnly, SameSite=Lax,
+  Secure by config.
+  **Honest tradeoff: no server-side revocation.** Logout clears the cookie, but a stolen
+  cookie stays valid until it expires — hence the short TTL. Changing the admin password
+  changes the signing key, which invalidates every outstanding session at once; that is
+  the revocation lever, and it is why the key is derived rather than a separate secret.
 * **Throttling:** a global sliding lockout — after ``max_attempts`` failed logins within
   the window, ALL logins are refused for ``lockout_seconds`` (single shared credential,
   so per-IP granularity buys nothing against a distributed guesser and complicates ops).
+  Counted from the ``events`` ledger when a database is configured (shared across
+  instances); the in-memory :class:`LoginThrottle` is the local-dev fallback.
 * **Default-deny middleware:** every route requires a session except the explicit
   ``OPEN_PREFIXES`` allowlist (health, HMAC-verified webhook, the login page itself,
   static assets). Browsers get a redirect to ``/login``; API calls get a plain 401.
@@ -74,51 +82,41 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 # ================================================================================================
-# Session store + login throttle (in-memory; single instance by design)
+# Sessions — stateless signed cookies (P12.1; no shared store, no per-request DB read)
 # ================================================================================================
 
 
-@dataclass
-class SessionStore:
-    """Opaque-token sessions with TTL. All methods take ``now`` for clock-free tests."""
+def _mac(secret: str, expires_at: str) -> str:
+    return hmac.new(secret.encode("utf-8"), expires_at.encode("utf-8"), "sha256").hexdigest()
 
-    ttl_seconds: float
-    _sessions: dict[str, float] = field(default_factory=dict)
 
-    def create(self, now: float | None = None) -> str:
-        now = time.time() if now is None else now
-        token = secrets.token_urlsafe(32)
-        self._sessions[token] = now + self.ttl_seconds
-        return token
+def sign_session(secret: str, ttl_seconds: float, *, now: float | None = None) -> str:
+    """Mint a session cookie value: the expiry, and an HMAC over it."""
+    expires_at = str(int((time.time() if now is None else now) + ttl_seconds))
+    return f"{expires_at}.{_mac(secret, expires_at)}"
 
-    def is_valid(self, token: str | None, now: float | None = None) -> bool:
-        if not token:
-            return False
-        now = time.time() if now is None else now
-        expires = self._sessions.get(token)
-        if expires is None:
-            return False
-        if now >= expires:
-            del self._sessions[token]
-            return False
-        return True
 
-    def revoke(self, token: str | None) -> None:
-        if token:
-            self._sessions.pop(token, None)
+def valid_session(cookie: str | None, secret: str, *, now: float | None = None) -> bool:
+    """True when ``cookie`` carries our signature and has not expired.
 
-    def sweep(self, now: float | None = None) -> int:
-        """Drop expired sessions; returns how many were dropped."""
-        now = time.time() if now is None else now
-        dead = [t for t, exp in self._sessions.items() if now >= exp]
-        for token in dead:
-            del self._sessions[token]
-        return len(dead)
+    Fails closed on an empty secret (an unconfigured server grants nothing) and compares
+    the MAC in constant time before trusting any part of the value.
+    """
+    if not cookie or not secret:
+        return False
+    expires_at, _, mac = cookie.partition(".")
+    if not mac or not hmac.compare_digest(mac, _mac(secret, expires_at)):
+        return False
+    return (time.time() if now is None else now) < int(expires_at)
 
 
 @dataclass
 class LoginThrottle:
-    """Global sliding-window lockout for the single shared credential."""
+    """Global sliding-window lockout for the single shared credential.
+
+    In-memory, therefore per-instance: the local-dev fallback for when no database is
+    configured. With a pool the same window is counted over ``events`` (P12.2).
+    """
 
     max_attempts: int
     lockout_seconds: float

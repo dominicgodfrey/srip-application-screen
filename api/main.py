@@ -38,8 +38,9 @@ from .admin_api import register_admin_api
 from .auth import (
     SESSION_COOKIE,
     LoginThrottle,
-    SessionStore,
     is_open_path,
+    sign_session,
+    valid_session,
     verify_password,
     wants_html,
 )
@@ -203,17 +204,38 @@ def create_app(
         if admin_password_hash is not None
         else get_secrets().admin_password_hash
     )
-    app.state.sessions = SessionStore(ttl_seconds=cfg.auth.session_ttl_seconds)
+    # P12.1: the session cookie is signed with the admin password hash — no separate
+    # secret to deploy, and changing the password invalidates every live session, which is
+    # the only revocation lever a stateless scheme has.
+    app.state.session_secret = app.state.admin_password_hash or ""
     app.state.login_throttle = LoginThrottle(
         max_attempts=cfg.auth.max_attempts, lockout_seconds=cfg.auth.lockout_seconds
     )
+
+    # P12.2: with a database the lockout window is counted over `events`, so it holds
+    # across serverless instances; the in-memory throttle is the local-dev fallback.
+    async def locked_out() -> bool:
+        pool = app.state.db_pool
+        if pool is None:
+            return app.state.login_throttle.locked_out()
+        failures = await dbmod.count_recent_events(
+            pool, "login_failed", cfg.auth.lockout_seconds
+        )
+        return failures >= cfg.auth.max_attempts
+
+    async def record_login_failure() -> None:
+        pool = app.state.db_pool
+        if pool is None:
+            app.state.login_throttle.record_failure()
+        else:
+            await dbmod.add_event(pool, "login_failed")
 
     @app.middleware("http")
     async def require_admin(request, call_next):  # type: ignore[no-untyped-def]
         path = request.url.path
         if is_open_path(path):
             return await call_next(request)
-        if app.state.sessions.is_valid(request.cookies.get(SESSION_COOKIE)):
+        if valid_session(request.cookies.get(SESSION_COOKIE), app.state.session_secret):
             return await call_next(request)
         if wants_html(request.headers.get("accept")):
             from fastapi.responses import RedirectResponse
@@ -250,7 +272,7 @@ def create_app(
         stored = app.state.admin_password_hash
         if not stored:
             return _page("Login is not configured on this server.", 503)
-        if app.state.login_throttle.locked_out():
+        if await locked_out():
             return _page("Too many failed attempts. Try again in a few minutes.", 429)
 
         form = await request.form()
@@ -259,11 +281,11 @@ def create_app(
         if not next_path.startswith("/") or next_path.startswith("//"):
             next_path = "/"  # open-redirect guard: same-origin paths only
         if not verify_password(password, stored):
-            app.state.login_throttle.record_failure()
+            await record_login_failure()
             return _page("Incorrect password.", 401)
 
         app.state.login_throttle.reset()
-        token = app.state.sessions.create()
+        token = sign_session(app.state.session_secret, cfg.auth.session_ttl_seconds)
         response = RedirectResponse(url=next_path, status_code=303)
         # The dev/demo flag (never set in production — see its declaration) also drops the
         # Secure cookie flag so the local http:// demo can hold a session.
@@ -280,9 +302,11 @@ def create_app(
 
     @app.post("/logout", tags=["auth"])
     async def logout(request: Request):  # type: ignore[no-untyped-def]
+        """Clear the cookie. Stateless sessions cannot be revoked server-side (P12.1) —
+        a copy taken before logout stays valid until it expires; rotating the admin
+        password is the lever that kills every session at once."""
         from fastapi.responses import RedirectResponse
 
-        app.state.sessions.revoke(request.cookies.get(SESSION_COOKIE))
         response = RedirectResponse(url="/login", status_code=303)
         response.delete_cookie(SESSION_COOKIE)
         return response

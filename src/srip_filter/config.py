@@ -212,7 +212,9 @@ class DbConfig(_Strict):
 class AuthConfig(_Strict):
     """Admin-session knobs (P5, PRD v3 §6). The password hash itself is a secret (env)."""
 
-    session_ttl_seconds: float = 43_200.0  # 12 h — one working day, then re-login
+    # 2 h. Short because P12.1 sessions are stateless: there is no server-side revocation,
+    # so expiry is the only thing that retires a stolen cookie on its own.
+    session_ttl_seconds: float = 7_200.0
     max_attempts: int = 5  # failed logins within the window before lockout
     lockout_seconds: float = 300.0  # sliding lockout window
     cookie_secure: bool = True  # set False only for local http:// development
