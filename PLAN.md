@@ -22,6 +22,13 @@ execute for the first time and pass.
 known-red tests along with the machinery they covered; the suite is fully green for the
 first time since the DB was connected.
 
+**⚠️ Not yet exercised for real: the OpenAI boundary.** Every suite to date ran on
+`FakeLLMClient`, and until 2026-07-29 `.env` held a 16-char placeholder key, so no live
+model call has *ever* been made by this codebase. Pinned model IDs, Structured-Outputs
+schemas, and prompt wiring are therefore unvalidated against the real API. A real key is
+now in (owner's personal, temporary, strict budget) — the first real run should be a
+handful of fixtures, not the 466-row calibration.
+
 ## Active Sub-Task
 **P11.5 ✔ shipped.** Next: the rest of P11 (11.1 cron drain, 11.2 stale-claim reaper,
 11.3 migrations out of the lifespan, 11.4 pooled connection + `statement_cache_size=0`),
@@ -381,18 +388,26 @@ close-cycle · flow-back (#9) → post-v3.
 
 ## Blocked (owner / external)
 - [ ] P7 (E2E half): local end-to-end + idempotent re-replay + 466-row v2-vs-v3
-      calibration — **needs the Neon DB** (owner input: create project + dev branch,
-      set DATABASE_URL / DATABASE_URL_TEST; then run `uv run pytest tests/test_db.py`
-      first). Run: server with secrets set → `scripts/replay.py --fixtures 20` →
-      dashboard shows graded rows → re-replay changes nothing.
-- [ ] P13 deploy: needs the Vercel Pro confirm + the shared secret value from the partner
-      (WEBSITE_ASKS #12/#1), and the Neon DB from the owner.
-- [ ] Contract freeze: **unblocked for implementation.** The 2026-07-26 repo audit plus
-      the 2026-07-27 decisions settled the shape; P9 executes it. One residual accuracy
-      risk (not a blocker): the `all_answers` `field_key` strings were read from their
-      repo *seeds* (`lib/questions-default.ts`), and WEBSITE_ASKS #6 records that seeds
-      differ from the live form. **One real sample payload would retire this risk** — it
-      is the single highest-value remaining ask.
+      calibration. **No longer blocked on the DB** (Neon connected 2026-07-29) — the
+      remaining prerequisites are two self-generated local secrets, not external answers:
+      `ATS_WEBHOOK_SECRET` (any string; `replay.py --secret` and the server must match, and
+      the verifier fails closed so an unset secret 401s everything) and a local
+      `ADMIN_PASSWORD_HASH` (`uv run python -m api.auth '<pw>'`; without it login 503s and
+      every UI route is shut). Neither needs the partner — production values are separate.
+      Run: server with secrets set → `scripts/replay.py --fixtures N` → dashboard shows
+      graded rows → re-replay changes nothing.
+- [ ] P13 deploy: needs the Vercel Pro confirm and confirmation the partner will actually
+      set `ATS_WEBHOOK_SECRET` (WEBSITE_ASKS #12/#1). The *value* is ours to generate and
+      send, not theirs to supply.
+- [x] Contract freeze — **the residual `field_key` risk is retired.** An earlier version of
+      this entry called one real sample payload "the single highest-value remaining ask" on
+      the grounds that the `all_answers` field keys came from their repo *seeds*
+      (`lib/questions-default.ts`). That was superseded on 2026-07-28: the live **SP27-CSE**
+      question rows were pulled from their own `/api/apply/my-application?track=cs`
+      endpoint, so the keys are pinned against the live form, not the seeds (see the
+      2026-07-28 Notes entry). A real dispatch body would still confirm serialization
+      details — offset format, null-vs-absent, exact tier strings — but it is now a
+      nice-to-have, not a blocker.
 
 ## Load-bearing decisions still open
 
@@ -408,19 +423,27 @@ Ordered by how expensive they are to reverse once P9–P13 start.
       (2026-07-29); shipped.
 
 **Owner (blocking verification, not authorship):**
-- [ ] **Neon project + `DATABASE_URL`/`DATABASE_URL_TEST`** — still the top blocker; the
-      P1 db suite has never executed. Everything DB-backed in P9–P12 is unverifiable until
-      this exists.
-- [ ] `OPENAI_API_KEY`; the live form's actual essay word bounds (P13/D1); curated BLOCK
-      slur list (carried from v2).
+- [x] **Neon project + `DATABASE_URL`/`DATABASE_URL_TEST`** — done 2026-07-29; the P1 db
+      suite executes and passes (11).
+- [x] `OPENAI_API_KEY` — real key in as of 2026-07-29 (owner's personal, temporary; see
+      "Owner inputs needed").
+- [ ] Two **self-generated local** secrets, the only thing standing between here and the
+      first real E2E: a throwaway `ATS_WEBHOOK_SECRET` and a local `ADMIN_PASSWORD_HASH`.
+      Neither involves the partner.
+- [ ] Curated BLOCK slur list (carried from v2).
+- ~~the live form's actual essay word bounds (P13/D1)~~ — **dead item.** The word-bounds
+      gate was deleted outright (owner, 2026-07-28) because the site 400s any violation at
+      submit, so there are no bounds left to supply.
 
 **Partner (Andrew) — blocking the pilot, not the code:**
-- [ ] One real sample payload (synthetic values, real shape) — validates every `field_key`,
-      the GPA string format, tier values, `submitted_at` offset, and the finaid block at once.
 - [ ] Vercel Pro confirmed + willingness to host a Python service in the project (and who
       holds the env vars — see the secrets-governance note in the Notes log).
-- [ ] The `ATS_WEBHOOK_SECRET` value, and confirmation they will actually set it (their
-      dispatcher omits the header entirely when the env var is unset ⇒ we 401).
+- [ ] Confirmation they will actually set `ATS_WEBHOOK_SECRET` (their dispatcher omits the
+      header entirely when the env var is unset ⇒ we 401 everything). **We generate and send
+      the value**; it is not theirs to supply.
+- [ ] *(nice-to-have, no longer a blocker)* One real sample payload — would confirm
+      serialization details (offset format, null-vs-absent, exact tier strings). The
+      `field_key` risk this used to carry was retired on 2026-07-28; see "Blocked".
 
 **Deferred (explicitly not blocking):** HMAC re-hardening before production (ask #1);
 R2 account id (#4, resume off); per-essay bounds in the payload (#5); retention (#13);
@@ -442,14 +465,30 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
       throwaway `srip_test_<pid>` schema, but a separate `dev` branch is still the better
       end state (the branch existed; its compute endpoint was not provisioned, so it had
       no connection string). **Both use the DIRECT host, not `-pooler`** — see P11.4.
-- [x] `OPENAI_API_KEY` set.
+- [x] `OPENAI_API_KEY` — **real key present as of 2026-07-29.** Correcting the record: this
+      was marked done earlier while `.env` still held a 16-char `sk-` placeholder, so no
+      LLM call could ever have succeeded; every suite to date ran on `FakeLLMClient`. The
+      current value is the **owner's personal key, in temporarily for testing under a
+      strict budget** — it is not the production key and should come back out before
+      handover. Spend discipline: run `SRIP_DEV_FAKE_LLM=1` first (zero tokens), keep real
+      runs to a handful of fixtures, and rely on the persistent `llm_cache` (re-running
+      identical content re-bills nothing). Per row the live cost is 2× `task_d` (gpt-4.1)
+      + optionally 1× `task_f` (gpt-4.1) + 1× `task_c` (gpt-4.1-mini); Task E is off at
+      `resume.bonus_max: 0`.
 - [ ] Generate `ATS_WEBHOOK_SECRET` (a random UUID is fine) and send it to the website
-      team — now a static shared secret, not an HMAC key.
+      team — now a static shared secret, not an HMAC key. **Also needed locally before any
+      E2E run**, and it does not have to be the production value — pick a throwaway for
+      local testing and generate the real one at handover.
 - [ ] Curated BLOCK slur list (carried from v2) — feeds the profanity gate, a rejection
-      path, and is still empty.
-- [ ] `ADMIN_PASSWORD_HASH` — decided the partner generates and holds it
-      (`uv run python -m api.auth '<password>'`); he already holds the OpenAI key, so the
-      secrets-governance tradeoff is accepted.
+      path, and is still empty (`resources/profanity.txt` has the format header and zero
+      BLOCK terms; the `better-profanity` default list is all that is live). Settle it
+      **before** the 466-row calibration, or the calibration measures a gate that is about
+      to change.
+- [ ] `ADMIN_PASSWORD_HASH` — decided the partner generates and holds the **production**
+      one (`uv run python -m api.auth '<password>'`); he already holds the OpenAI key, so
+      the secrets-governance tradeoff is accepted. **The owner still needs a local hash of
+      their own to test** — the admin UI is default-deny, so with no hash configured
+      `/login` returns 503 and every page 401s or redirects. Unrelated to the partner's.
 - [ ] Optional: provision a compute endpoint on the `dev` Neon branch and point
       `DATABASE_URL_TEST` at it, restoring defence in depth.
 
@@ -483,6 +522,23 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
 
 ## Notes / Decisions Log
 
+- **2026-07-29 — PLAN.md accuracy pass; three stale claims corrected.** Found while scoping
+  the run-up to handover. Recording them because each one had been sitting in this file
+  asserting that work was done or blocked when it was not.
+  1. **`OPENAI_API_KEY` was ticked done while `.env` held a placeholder** (16-char `sk-`).
+     No live model call has ever been made by this codebase; the "no API spend" testing
+     posture quietly became "no API capability". Corrected, and the Current Phase section
+     now carries the caveat explicitly so it is not re-lost.
+  2. **The "one real sample payload is the highest-value ask" entry was 8 days stale.** It
+     rested on the field keys having come from repo *seeds*; the 2026-07-28 live-question-
+     config pull retired that. Downgraded to nice-to-have. The two entries had been
+     contradicting each other in the same document.
+  3. **"the live form's actual essay word bounds" was listed as an owner input** for a gate
+     that was deleted outright on 2026-07-28. Struck.
+  **Also clarified, because it was costing time:** `ATS_WEBHOOK_SECRET` and
+  `ADMIN_PASSWORD_HASH` were both filed under partner/handover items, which made local E2E
+  look externally blocked. Both are self-generated, the local values need no relationship
+  to the production ones, and neither involves Andrew.
 - **2026-07-29 — P11.5: what deletion left behind, and one thing deliberately kept.**
   Two judgement calls worth carrying forward.
   1. **`POST /cohorts` (re-uploaded `decisions.jsonl`) was kept**, though it is v2-era and
