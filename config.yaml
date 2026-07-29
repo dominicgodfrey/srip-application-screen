@@ -2,7 +2,11 @@
 # Every magic number in the pipeline lives here; logic reads these, never hard-codes them.
 # Secrets (OPENAI_API_KEY) are NOT in this file — they come from .env (see .env.example).
 
-# Essay length gate (Stage 1) — units are words
+# Essay length gate — units are words.
+# ⚠️ DEAD for v3: the length gate was deleted (the site 400s violations at submit and sends
+# no bounds). run_essay_gates_v3 pins hard_fail=False and zero penalty; word counts are audit
+# data only. These knobs are still read by the v2 CSV-batch path, which survives only to keep
+# tests/test_pipeline.py's gate coverage alive. Changing them affects nothing in production.
 essay_length:
   target_min: 100
   target_max: 350
