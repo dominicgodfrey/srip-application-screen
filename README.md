@@ -54,6 +54,13 @@ migrations under an advisory lock — there is no release phase, so the drain ow
 4. Fire the website admin panel's ATS **Test** button — expect 200 and no row created.
 5. Send one real application, confirm it appears on the dashboard as `graded`.
 
+**Monitoring.** Point an uptime check at `GET /health` (unauthenticated, no PII, no counts).
+It returns 200 `{"status":"ok"}` normally and **503** `{"status":"degraded"}` when the oldest
+ungraded application is older than `worker.queue_alert_seconds` (1 h) or the database is
+unreachable. That covers the failure mode with no other symptom: the cron drain silently
+stopping, which otherwise goes unnoticed until someone opens the dashboard. A backlog being
+worked through is healthy — the threshold is set above the ~40 min a full cohort burst needs.
+
 Environment variables to set in the Vercel project:
 
 | Name | Purpose |

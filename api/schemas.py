@@ -9,12 +9,6 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
-class HealthResponse(BaseModel):
-    """Liveness probe payload."""
-
-    status: str = "ok"
-
-
 class ErrorResponse(BaseModel):
     """Uniform error envelope for graceful 4xx responses (never a 500 / stack trace)."""
 

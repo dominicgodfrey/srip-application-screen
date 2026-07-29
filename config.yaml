@@ -143,6 +143,10 @@ worker:
   drain_budget_seconds: 600.0
   drain_max_rows: 50
   stale_grading_seconds: 900.0
+  # /health goes "degraded" (503) once the oldest ungraded application is older than this.
+  # Sized off drain throughput: at 50 rows/min a ~2000-application burst needs ~40 min to
+  # clear, so a shorter window would false-alarm at the busiest moment of the cycle.
+  queue_alert_seconds: 3600.0
 
 # Admin sessions (P5, PRD v3 §6). ADMIN_PASSWORD_HASH lives in env, never here.
 auth:

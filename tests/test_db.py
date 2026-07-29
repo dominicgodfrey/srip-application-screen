@@ -29,6 +29,7 @@ from srip_filter.db import (
     get_application,
     list_applications,
     mark_error,
+    oldest_pending_seconds,
     reap_stale_claims,
     upsert_application,
 )
@@ -216,6 +217,29 @@ async def test_error_row_leaves_queue_and_is_tombstoned(pool):
     assert await claim_next(pool) is None
     kinds = [r["kind"] for r in await pool.fetch("SELECT kind FROM events")]
     assert "grading_error" in kinds
+
+
+async def test_oldest_pending_seconds_tracks_only_ungraded_rows(pool):
+    """Feeds /health. None on an empty queue so an idle service never reads as broken."""
+    assert await oldest_pending_seconds(pool) is None
+
+    sid = _sid()
+    await upsert_application(pool, submission_id=sid, payload=_payload())
+    fresh = await oldest_pending_seconds(pool)
+    assert fresh is not None and 0 <= fresh < 60
+    # Must be a float, not the Decimal EXTRACT hands back: /health JSON-encodes it, and a
+    # Decimal 500s the degraded path only — invisible to any test that fakes this value.
+    assert isinstance(fresh, float)
+
+    await pool.execute(
+        "UPDATE applications SET updated_at = NOW() - INTERVAL '2 hours' WHERE submission_id = $1",
+        uuid.UUID(sid),
+    )
+    assert await oldest_pending_seconds(pool) > 7000
+
+    # Grading it clears the signal: only 'received' rows count as waiting.
+    await claim_next(pool)
+    assert await oldest_pending_seconds(pool) is None
 
 
 async def test_reaper_requeues_only_claims_older_than_the_window(pool):

@@ -240,6 +240,11 @@ class WorkerConfig(_Strict):
     drain_budget_seconds: float = 600.0
     drain_max_rows: int = 50
     stale_grading_seconds: float = 900.0
+    # /health reports "degraded" once the oldest ungraded row is older than this. Sized off
+    # the drain's own throughput: at drain_max_rows 50/min a full ~2 000-application cohort
+    # burst takes ~40 min to clear, so anything under an hour would cry wolf at the busiest
+    # moment of the cycle. Raise this if drain_max_rows drops.
+    queue_alert_seconds: float = 3600.0
 
 
 class WebhookConfig(_Strict):

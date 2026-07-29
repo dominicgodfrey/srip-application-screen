@@ -120,4 +120,4 @@ def test_static_unknown_is_404_not_500(client: TestClient) -> None:
 def test_health_still_ok_with_ui_mounted(client: TestClient) -> None:
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    assert resp.json()["status"] == "ok"  # queue detail is covered by tests/api/test_health.py

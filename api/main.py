@@ -2,7 +2,7 @@
 
 The core stays HTTP-free — everything web lives here. Routes:
 
-  * ``GET  /health``  — liveness probe
+  * ``GET  /health``  — liveness + grading-queue health (503 when the queue is not draining)
   * ``POST /webhooks/applications`` — the partner's per-application delivery (``api.webhooks``)
   * ``/api/*``        — DB-backed admin/review endpoints (``api.admin_api``)
   * ``POST /cohorts`` — what-if cohort assignment from a re-uploaded ``decisions.jsonl``
@@ -47,7 +47,7 @@ from .auth import (
 from .cohorts import CohortFormat, cohort_response, parse_decisions_jsonl
 from .cron import register_cron
 from .jobs import read_upload_capped
-from .schemas import ErrorResponse, HealthResponse
+from .schemas import ErrorResponse
 from .web import register_pages
 from .webhooks import register_webhooks
 
@@ -311,10 +311,42 @@ def create_app(
         response.delete_cookie(SESSION_COOKIE)
         return response
 
-    @app.get("/health", response_model=HealthResponse, tags=["meta"])
-    async def health() -> HealthResponse:
-        """Liveness probe. Returns 200 with no dependency on the LLM client or any upload."""
-        return HealthResponse()
+    @app.get("/health", response_model=None, tags=["meta"])
+    async def health() -> Response:
+        """Liveness **and** grading-queue health — the one thing an external monitor watches.
+
+        200 ``{"status": "ok"}`` while applications are being graded; **503**
+        ``{"status": "degraded"}`` when the oldest ungraded row is older than
+        ``worker.queue_alert_seconds``, or when the database cannot be reached. A non-2xx is
+        what makes any off-the-shelf uptime check alert, which is the whole point: the cron
+        drain failing silently is otherwise invisible until someone opens the dashboard.
+
+        An empty queue is healthy — an idle service must not look broken. Reports an age, not
+        a count: this route is unauthenticated and a count would leak application volume.
+        """
+        from fastapi.responses import JSONResponse
+
+        pool = app.state.db_pool
+        if pool is None or not hasattr(pool, "fetchval"):
+            # No database configured (local dev, or a test sentinel): liveness only.
+            return JSONResponse(content={"status": "ok", "queue": "not_configured"})
+        try:
+            age = await dbmod.oldest_pending_seconds(pool)
+        except Exception:
+            logger.exception("health: queue probe failed")
+            return JSONResponse(
+                status_code=503, content={"status": "degraded", "reason": "database_unreachable"}
+            )
+
+        stalled = age is not None and age > cfg.worker.queue_alert_seconds
+        body: dict[str, object] = {
+            "status": "degraded" if stalled else "ok",
+            "oldest_pending_seconds": round(age, 1) if age is not None else None,
+        }
+        if stalled:
+            body["reason"] = "queue_not_draining"
+            logger.error("health: queue not draining; oldest pending row is %.0fs old", age)
+        return JSONResponse(status_code=503 if stalled else 200, content=body)
 
     # -- Cohort assignment (Phase 11, PRD §11) ---------------------------------------------------
     # Capacities are per-request staff knobs (None/omitted = unlimited), so they ride as query

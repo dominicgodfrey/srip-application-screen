@@ -248,6 +248,26 @@ async def reap_stale_claims(pool: asyncpg.Pool, stale_seconds: float) -> int:
     return int(result.split()[-1])
 
 
+async def oldest_pending_seconds(pool: asyncpg.Pool) -> float | None:
+    """Age in seconds of the oldest row still waiting to be graded; None if none are.
+
+    The one number that reveals a dead grading path. If the cron stops firing, the drain
+    starts erroring, or claims keep failing, this climbs without bound — and it stays
+    ``None`` when there is simply nothing to do, so an idle service never looks broken.
+    Deliberately an age and not a count: ``/health`` is public, and an age leaks no
+    information about application volume.
+    """
+    age = await pool.fetchval(
+        f"""
+        SELECT EXTRACT(EPOCH FROM (NOW() - MIN(updated_at)))
+          FROM applications WHERE status = '{STATUS_RECEIVED}'
+        """
+    )
+    # EXTRACT returns Postgres `numeric`, which asyncpg hands back as `Decimal` — and
+    # Decimal is not JSON-serializable, so /health would 500 on the degraded path only.
+    return None if age is None else float(age)
+
+
 async def finish_graded(
     pool: asyncpg.Pool,
     submission_id: str,
