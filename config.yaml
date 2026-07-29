@@ -125,9 +125,12 @@ llm:
 
 # Persistence (P1, PRD v3 §1.1) — asyncpg pool sizing only. The DATABASE_URL DSN is a
 # secret (credentials inside) and comes from .env / the host's env store, never this file.
+# P11.4: sized for serverless — many short-lived instances against Neon's POOLED
+# (-pooler) endpoint. create_pool also pins statement_cache_size=0, without which
+# asyncpg breaks intermittently against PgBouncer's transaction mode.
 db:
-  pool_min_size: 1
-  pool_max_size: 5
+  pool_min_size: 0
+  pool_max_size: 2
 
 # Webhook edge (P2/P10). Secrets (ATS_WEBHOOK_SECRET[_PREVIOUS]) come from env and are
 # compared constant-time against the partner's static X-ATS-Secret header.

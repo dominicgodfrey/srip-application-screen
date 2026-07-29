@@ -199,10 +199,14 @@ class ApiConfig(_Strict):
 
 
 class DbConfig(_Strict):
-    """asyncpg pool sizing (P1). The DSN itself is a secret and lives in the env, not here."""
+    """asyncpg pool sizing (P1). The DSN itself is a secret and lives in the env, not here.
 
-    pool_min_size: int = 1
-    pool_max_size: int = 5
+    Sized for serverless (P11.4): many short-lived instances, each holding as little as
+    possible. ``min_size: 0`` means a cold start pays for no connection it never uses.
+    """
+
+    pool_min_size: int = 0
+    pool_max_size: int = 2
 
 
 class AuthConfig(_Strict):

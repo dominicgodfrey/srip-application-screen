@@ -54,9 +54,18 @@ def content_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-async def create_pool(dsn: str, *, min_size: int = 1, max_size: int = 5) -> asyncpg.Pool:
-    """Create the asyncpg pool. One pool per process, closed at shutdown (lifespan)."""
-    return await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
+async def create_pool(dsn: str, *, min_size: int = 0, max_size: int = 2) -> asyncpg.Pool:
+    """Create the asyncpg pool. One pool per process, closed at shutdown (lifespan).
+
+    ``statement_cache_size=0`` is mandatory against Neon's **pooled** (``-pooler``)
+    endpoint (P11.4): PgBouncer in transaction mode hands each transaction a different
+    server connection, so asyncpg's cached prepared statements go missing — and they fail
+    intermittently under load, not cleanly. Harmless on a direct endpoint, so it is set
+    unconditionally rather than sniffed from the DSN.
+    """
+    return await asyncpg.create_pool(
+        dsn, min_size=min_size, max_size=max_size, statement_cache_size=0
+    )
 
 
 # ================================================================================================
