@@ -188,18 +188,14 @@ class LlmConfig(_Strict):
 
 
 class ApiConfig(_Strict):
-    """Edge caps for the stateless FastAPI shell (Phase 9).
+    """Edge caps for the FastAPI shell's one remaining upload route (``POST /cohorts``).
 
     These are magic numbers and belong in config, not the request handlers. ``max_upload_bytes``
-    bounds the multipart body; ``max_rows`` caps the parsed CSV (~2000, PRD §12 scale target);
-    ``job_ttl_seconds`` is how long a finished job (with its in-memory PII-bearing results) lives
-    before the sweeper evicts it — a download evicts it immediately regardless.
+    bounds the multipart body; ``max_rows`` caps the parsed records (~2000, PRD §12 scale target).
     """
 
-    max_upload_bytes: int = 26_214_400  # 25 MiB — comfortably fits ~2000 rows with long essays
+    max_upload_bytes: int = 26_214_400  # 25 MiB — comfortably fits ~2000 records
     max_rows: int = 2000
-    job_ttl_seconds: float = 3600.0  # 1 hour; results are discarded on download or at TTL
-    job_sweep_seconds: float = 300.0  # how often the background sweeper evicts expired jobs
 
 
 class DbConfig(_Strict):

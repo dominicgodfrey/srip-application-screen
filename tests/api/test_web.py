@@ -2,8 +2,8 @@
 
 TestClient cannot run browser JS, so these cover what the server controls — each page renders
 (200, html, expected markers) and the static assets serve with sane content types. The
-interactive flows (upload/poll/sort/what-if) are verified manually per the PLAN.md checklist.
-Zero LLM spend: no grading job is ever started here.
+interactive flows (sort/what-if) are verified manually per the PLAN.md checklist.
+Zero LLM spend: nothing is graded here.
 """
 
 from __future__ import annotations
@@ -35,12 +35,9 @@ def test_index_renders_live_dashboard(client: TestClient) -> None:
     assert "/static/css/app.css" in resp.text
 
 
-def test_legacy_upload_page_still_reachable_unlinked(client: TestClient) -> None:
-    # Kept for the dev/demo flow until the replay tool replaces it (PLAN P6b).
-    resp = client.get("/upload")
-    assert resp.status_code == 200
-    assert 'type="file"' in resp.text
-    # The navbar no longer links to it.
+def test_retired_upload_page_is_gone(client: TestClient) -> None:
+    # P11.5 deleted the v2 CSV upload screen with the rest of the in-memory job machinery.
+    assert client.get("/upload").status_code == 404
     assert 'data-nav="upload">' not in client.get("/").text
 
 
@@ -57,12 +54,6 @@ def test_audit_page_renders(client: TestClient) -> None:
     assert 'id="audit-table"' in resp.text
     assert 'id="audit-search"' in resp.text
     assert 'id="audit-detail"' in resp.text
-
-
-def test_audit_page_bootstraps_job_param(client: TestClient) -> None:
-    resp = client.get("/audit", params={"job": "abc123"})
-    assert resp.status_code == 200
-    assert 'data-job="abc123"' in resp.text
 
 
 def test_cohort_page_renders(client: TestClient) -> None:
@@ -99,7 +90,6 @@ def test_static_css_serves(client: TestClient) -> None:
     "path",
     [
         "/static/js/common.js",
-        "/static/js/upload.js",
         "/static/js/audit.js",
         "/static/js/cohort.js",
         "/static/js/dashboard.js",

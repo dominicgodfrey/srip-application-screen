@@ -2,8 +2,6 @@
 (function () {
   "use strict";
 
-  const JOB_KEY = "srip_job_id";
-
   // ----- Toast ----------------------------------------------------------------
   let toastTimer = null;
   function toast(message, kind) {
@@ -13,20 +11,6 @@
     el.className = "toast show" + (kind ? " " + kind : "");
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { el.className = "toast" + (kind ? " " + kind : ""); }, 4200);
-  }
-
-  // ----- Job id (URL ?job= first, then sessionStorage) ------------------------
-  function getJobId() {
-    const fromUrl = new URLSearchParams(window.location.search).get("job");
-    if (fromUrl) {
-      try { sessionStorage.setItem(JOB_KEY, fromUrl); } catch (e) { /* ignore */ }
-      return fromUrl;
-    }
-    try { return sessionStorage.getItem(JOB_KEY) || ""; } catch (e) { return ""; }
-  }
-  function setJobId(id) {
-    try { id ? sessionStorage.setItem(JOB_KEY, id) : sessionStorage.removeItem(JOB_KEY); }
-    catch (e) { /* ignore */ }
   }
 
   // ----- Fetch wrapper: throws an Error carrying {status, detail} --------------
@@ -68,7 +52,7 @@
   // ----- Highlight the active nav link ---------------------------------------
   function markActiveNav() {
     const path = window.location.pathname;
-    const map = { "/": "dashboard", "/upload": "upload", "/audit": "audit", "/cohorts": "cohorts" };
+    const map = { "/": "dashboard", "/audit": "audit", "/cohorts": "cohorts" };
     const key = map[path];
     if (!key) return;
     const link = document.querySelector('.nav-links a[data-nav="' + key + '"]');
@@ -76,5 +60,5 @@
   }
   document.addEventListener("DOMContentLoaded", markActiveNav);
 
-  window.SRIP = { toast, getJobId, setJobId, api, fmtNum, esc, badge, bool, JOB_KEY };
+  window.SRIP = { toast, api, fmtNum, esc, badge, bool };
 })();

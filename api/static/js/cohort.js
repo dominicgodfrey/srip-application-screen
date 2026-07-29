@@ -1,5 +1,5 @@
 /* Screen 3 — cohort what-if. Two sources, one render path:
-   - an active job:        POST /jobs/{id}/cohorts?honors=&intensive=&regular=
+   - the live DB ranking:     POST /api/cohorts?honors=&intensive=&regular=
    - a saved decisions.jsonl: POST /cohorts (multipart) + same params
    Capacity inputs recompute live (debounced). CSV export uses the same call with format=csv. */
 (function () {
@@ -7,7 +7,6 @@
 
   const S = window.SRIP;
   const DEBOUNCE_MS = 300;
-  const app = document.getElementById("cohort-app");
 
   const els = {
     capHonors: document.getElementById("cap-honors"),
@@ -31,9 +30,7 @@
     unassignableBody: document.querySelector("#unassignable-table tbody"),
   };
 
-  // Source state: a job id, or an uploaded decisions.jsonl File. Job takes effect until a file
-  // is chosen; choosing a file switches the source to the upload.
-  const jobId = (app.dataset.job || "").trim() || S.getJobId();
+  // Source state: the live DB ranking until a decisions.jsonl File is chosen, then that file.
   let sourceFile = null;
   let debounceTimer = null;
 
@@ -59,11 +56,7 @@
       fd.append("file", sourceFile, sourceFile.name || "decisions.jsonl");
       return S.api("/cohorts?" + params.toString(), { method: "POST", body: fd });
     }
-    if (jobId) {
-      return S.api("/jobs/" + encodeURIComponent(jobId) + "/cohorts?" + params.toString(),
-        { method: "POST" });
-    }
-    // v3 default: the LIVE ranking straight from the database (recomputed per call).
+    // Default: the LIVE ranking straight from the database (recomputed per call).
     return S.api("/api/cohorts?" + params.toString(), { method: "POST" });
   }
 
@@ -73,7 +66,6 @@
       render(await res.json());
     } catch (err) {
       const msg = err.status === 409 ? "Results are not ready yet — grading is still running."
-        : err.status === 404 ? "This job has expired or was discarded. Re-upload a saved decisions.jsonl below."
         : (err.detail || "Could not compute the assignment.");
       hide(els.results);
       if (err.status !== 0) S.toast(msg, "danger");
@@ -224,19 +216,7 @@
   }
 
   // ----- Initial load ---------------------------------------------------------------
-  if (jobId) {
-    els.sourceNote.textContent = "Source: results from the current grading run.";
-    // Name the uploaded CSV so it's unambiguous which file these results came from.
-    S.api("/jobs/" + encodeURIComponent(jobId)).then((res) => res.json()).then((job) => {
-      if (!sourceFile && job.filename) {
-        els.sourceNote.textContent =
-          "Source: results from the current grading run of “" + job.filename + "”.";
-      }
-    }).catch(() => {});
-    recompute();
-  } else {
-    // v3 default: live database ranking (always current as applications arrive).
-    els.sourceNote.textContent = "Source: the live ranking from the database.";
-    recompute();
-  }
+  // Live database ranking (always current as applications arrive).
+  els.sourceNote.textContent = "Source: the live ranking from the database.";
+  recompute();
 })();

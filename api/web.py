@@ -6,15 +6,10 @@ PII). Registered onto the app by :func:`register_pages` from ``api.main``, keepi
 clean JSON-API surface.
 
 * ``GET /``         → live cohort dashboard over the database (v3 screen 1)
-* ``GET /audit``    → per-applicant audit-record browser (live DB by default; ``?job=<id>``
-  keeps the legacy job-scoped view during the transition)
-* ``GET /cohorts``  → cohort what-if tool (live DB by default; ``?job=`` legacy)
-* ``GET /upload``   → the retired v2 CSV upload screen (kept unlinked for the dev/demo
-  flow until the replay tool fully replaces it — PLAN P6b)
+* ``GET /audit``    → per-applicant audit-record browser over the live DB
+* ``GET /cohorts``  → cohort what-if tool over the live DB
 
-``tags=["pages"]`` keeps them out of the JSON OpenAPI groupings. The ``job`` query param is echoed
-into the template purely so the page's JS knows which in-memory job to fetch; it is not validated
-server-side (the subsequent artifact/cohort fetch returns 404/409 and the JS handles it).
+``tags=["pages"]`` keeps them out of the JSON OpenAPI groupings.
 """
 
 from __future__ import annotations
@@ -41,21 +36,15 @@ def register_pages(app: FastAPI, templates: Jinja2Templates) -> None:
         """Screen 1 (v3) — live cohort dashboard over the database."""
         return templates.TemplateResponse(request, "dashboard.html", _ctx())
 
-    @app.get("/upload", response_class=HTMLResponse, tags=["pages"])
-    async def upload_page(request: Request) -> HTMLResponse:
-        """Legacy v2 CSV upload screen — unlinked; dev/demo only until the replay tool
-        replaces it entirely (then this route and its templates are deleted)."""
-        return templates.TemplateResponse(request, "upload.html", _ctx())
-
     @app.get("/audit", response_class=HTMLResponse, tags=["pages"])
-    async def audit_page(request: Request, job: str | None = None) -> HTMLResponse:
-        """Screen 2 — browse every applicant's audit record for a completed job."""
-        return templates.TemplateResponse(request, "audit.html", _ctx(job=job or ""))
+    async def audit_page(request: Request) -> HTMLResponse:
+        """Screen 2 — browse every applicant's audit record in the live cohort."""
+        return templates.TemplateResponse(request, "audit.html", _ctx())
 
     @app.get("/cohorts", response_class=HTMLResponse, tags=["pages"])
-    async def cohort_page(request: Request, job: str | None = None) -> HTMLResponse:
-        """Screen 3 — live cohort what-if over a job (or a re-uploaded decisions.jsonl)."""
-        return templates.TemplateResponse(request, "cohort.html", _ctx(job=job or ""))
+    async def cohort_page(request: Request) -> HTMLResponse:
+        """Screen 3 — cohort what-if over the live ranking (or a re-uploaded decisions.jsonl)."""
+        return templates.TemplateResponse(request, "cohort.html", _ctx())
 
 
 __all__ = ["register_pages", "BRAND", "APP_TITLE"]

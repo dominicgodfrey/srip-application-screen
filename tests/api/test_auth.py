@@ -82,7 +82,7 @@ def test_open_path_allowlist() -> None:
     for path in ("/health", "/webhooks/applications", "/login", "/static/css/app.css",
                  "/logout", "/favicon.ico"):
         assert is_open_path(path), path
-    for path in ("/", "/jobs", "/jobs/abc/results/decisions.jsonl", "/audit", "/cohorts",
+    for path in ("/", "/api/applications", "/api/exports/decisions", "/audit", "/cohorts",
                  "/healthz", "/webhooksx"):
         assert not is_open_path(path), path
 
@@ -113,7 +113,7 @@ def test_browser_without_session_redirects_to_login() -> None:
 
 def test_api_without_session_gets_401_json() -> None:
     client = _client()
-    resp = client.get("/jobs/some-id")  # fetch-style caller, no text/html accept
+    resp = client.get("/api/applications")  # fetch-style caller, no text/html accept
     assert resp.status_code == 401
     assert resp.json() == {"detail": "Authentication required."}
 
@@ -176,4 +176,4 @@ def test_unconfigured_hash_fails_closed() -> None:
     client = _client(admin_hash=None)
     # Login refuses (503) and protected routes stay locked — never silently open.
     assert client.post("/login", data={"password": "anything"}).status_code == 503
-    assert client.get("/jobs/x").status_code == 401
+    assert client.get("/api/applications").status_code == 401

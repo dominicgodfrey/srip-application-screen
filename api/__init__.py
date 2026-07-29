@@ -1,6 +1,7 @@
-"""Thin stateless FastAPI shell over the transport-agnostic core (Phase 9).
+"""Thin FastAPI shell over the transport-agnostic core.
 
-The core (``srip_filter``) knows nothing about HTTP; this package uploads a CSV, schedules a
-background ``grade_batch`` run, polls progress, and streams the in-memory artifacts back —
-persisting nothing. An interrupted run is abandoned (no DB, no queue).
+The core (``srip_filter``) knows nothing about HTTP; this package receives the partner's
+signed per-application webhook, upserts it into Postgres, and serves the session-gated review
+UI + export endpoints over the same store. Grading itself is the worker's job, never a request
+handler's.
 """

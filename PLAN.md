@@ -18,32 +18,20 @@ model → P11–P13, bounds source → resolved by deleting the gate entirely).
 therefore **frozen** — further schema changes need `002_*.sql`. The 11 P1 persistence tests
 execute for the first time and pass.
 
-**Suite state:** `uv run pytest -q` → 556 passed, 5 failed. The 5 are
-`tests/api/test_promote.py`, and they are *expected*: see "Known red" below.
+**Suite state:** `uv run pytest -q` → **517 passed, 0 failed.** P11.5 deleted the 5
+known-red tests along with the machinery they covered; the suite is fully green for the
+first time since the DB was connected.
 
 ## Active Sub-Task
-**Start P11.5 — retire the v2 in-memory machinery** (`JobRegistry`, `sweeper_loop`,
-`/jobs*` routes, the upload screen, and their tests). Pure deletion, and it is *also* the
-fix for the only red in the suite (see "Known red"). Doing it first shrinks the codebase
-before the serverless port rather than porting code we are about to delete.
+**P11.5 ✔ shipped.** Next: the rest of P11 (11.1 cron drain, 11.2 stale-claim reaper,
+11.3 migrations out of the lifespan, 11.4 pooled connection + `statement_cache_size=0`),
+then P12 (signed-cookie sessions), then P13.1/13.2 (`vercel.json`, ASGI entrypoint,
+`requirements.txt` — the two artifacts the partner needs before he can deploy anything).
 
-Then the rest of P11 (cron drain, stale-claim reaper, migrations out of the lifespan,
-pooled connection), P12 (signed-cookie sessions), and P13.1/13.2 (`vercel.json`, ASGI
-entrypoint, `requirements.txt` — the two artifacts the partner needs before he can deploy
-anything).
-
-## Known red — expected, do not "fix" by patching
-`tests/api/test_promote.py` — 5 failures, and they only appear when `DATABASE_URL` is set.
-Bisected: 9 pass with the DB disabled, 5 fail with it enabled. `create_app`'s lifespan now
-auto-creates a pool from `.env` and applies migrations on every app construction
-(`api/main.py:113`), which shifts timing enough that these tests' 200-iteration poll loop
-gives up before grading finishes; the endpoint then correctly answers 409 "results not
-ready". Verified benign: no exception logged, and `llm_cache`/`applications` stay empty
-because these tests never touch the DB. They cover the v2 `/jobs` + CSV-upload machinery,
-which **P11.5 deletes** — the tests go with it. Do not patch the poll loop.
-
-(It is also live evidence for P11.3: migrations running on every app startup is wrong, and
-P11.3 is what moves them behind an advisory lock.)
+**Start with P11.3** (migrations out of the lifespan): it is the one remaining *defect*
+rather than a port — `create_app`'s lifespan applies migrations on every app construction,
+which is wrong on a single host and actively unsafe across concurrent serverless cold
+starts. It was also the root cause of the 5 tests P11.5 just deleted.
 
 ---
 
@@ -230,10 +218,7 @@ the state that port breaks, P13 the deploy.
          `max_size=2`, against Neon's **pooled** (`-pooler`) endpoint. **Gotcha:** asyncpg
          against PgBouncer transaction mode requires `statement_cache_size=0` — without it
          prepared-statement reuse fails intermittently under load.
-  - 11.5 **Retire the in-memory machinery** (already a P6 leftover, now load-bearing):
-         `JobRegistry`, `sweeper_loop`, the `/jobs*` routes, the upload screen, and their
-         tests. All are single-process state that is meaningless on serverless. `/cohorts`
-         what-if is already DB-backed (P6a/b) — keep.
+  - 11.5 ✔ **Retire the in-memory machinery** — shipped, see Completed.
   - 11.6 `run_worker` is kept for local `uvicorn` dev only, started behind
          `SRIP_LOCAL_WORKER=1` so it never runs on Vercel. Its two loop tests survive;
          the two `process_one` tests are untouched by the whole phase.
@@ -375,6 +360,22 @@ close-cycle · flow-back (#9) → post-v3.
       (contract round-trip through the real edge models, id determinism, fixture
       variety) + CLI dry-run smoke.
 
+- [x] P11.5 — **v2 in-memory machinery retired** (2026-07-29). Deleted `api/registry.py`
+      (`Job`/`JobRegistry`/`JobState`), `sweeper_loop`, `run_job`, `validate_csv`, the
+      `BatchResult`-based `artifact_response`, all six `/jobs*` routes, `JobCreated`/
+      `JobStatus`, the `/upload` page + `upload.html` + `upload.js`, and the `?job=` legacy
+      branches in `audit.js`/`cohort.js`/`common.js` (`getJobId`/`setJobId`/`JOB_KEY` are
+      gone; both screens are unconditionally live-DB now). `api.jobs` survives as just
+      `read_upload_capped` + `ArtifactName` + `artifact_response_from_records` — the two
+      things `POST /cohorts` and `/api/exports/{artifact}` still need. `ApiConfig`
+      `job_ttl_seconds`/`job_sweep_seconds` removed from `config.py` **and** `config.yaml`
+      (`extra="forbid"` couples them). Tests: deleted `test_api.py`, `test_upload.py`,
+      `test_status.py`, `test_download.py`, `test_promote.py` (the 5 known-red) and the
+      `POST /jobs/{id}/cohorts` half of `test_cohorts.py`; re-pointed `test_auth.py`'s
+      closed-path assertions at `/api/*`. **–684/+86 lines; suite 517 passed, 0 failed;
+      ruff clean.** Verified live in the preview browser (login → dashboard → audit →
+      cohorts, `POST /api/cohorts` 200, zero console errors, navbar has no upload link).
+
 ## In Progress
 - [ ] (none — everything remaining is blocked on owner inputs / website-team answers)
 
@@ -402,8 +403,9 @@ Ordered by how expensive they are to reverse once P9–P13 start.
 - [x] **D2 — stateless signed cookies** (P12.1 as written).
 - [x] **D3 — absent `gpa_explanation` = no explanation ⇒ REJECTED.** Owner overrode the
       NEEDS_REVIEW recommendation; treat missing exactly like blank.
-- [ ] Confirm no Neon DB has ever run `001_init.sql` (decides amend-in-place vs `002_`).
-- [ ] Confirm retiring `/jobs` + the upload screen now (P11.5). Rec: yes.
+- [x] Confirm no Neon DB has ever run `001_init.sql` (decides amend-in-place vs `002_`).
+- [x] **Confirm retiring `/jobs` + the upload screen now (P11.5)** — owner said go
+      (2026-07-29); shipped.
 
 **Owner (blocking verification, not authorship):**
 - [ ] **Neon project + `DATABASE_URL`/`DATABASE_URL_TEST`** — still the top blocker; the
@@ -426,8 +428,8 @@ results flow-back (#9); cohort allocation ownership (#10). **Resume engine (#11)
 longer here — decided in-house 2026-07-27; only the *build* is deferred to post-pilot.**
 
 ## P6 leftovers (do during/after P7)
-- [ ] Retire the v2 `/jobs` routes + registry + upload screen + their tests once the
-      replay tool covers the dev/demo flow end-to-end.
+- [x] Retire the v2 `/jobs` routes + registry + upload screen + their tests — done as
+      P11.5 (2026-07-29).
 - [ ] Close-cycle action (export → typed confirmation → purge + tombstone) once
       WEBSITE_ASKS #13 settles the retention policy.
 - [ ] Audit browser: surface the new v3 blocks (technical_essay, international,
@@ -468,6 +470,11 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
   graceful no-DB 503s) done in-session 2026-07-04.
 - P7 tool: `uv run pytest tests/test_replay.py -q` — 3 passed;
   `uv run python scripts/replay.py --fixtures 3 --dry-run` prints 3 payloads.
+- P11.5: `uv run pytest -q` — **517 passed, 0 failed** (down from 561 collected: 44 tests
+  deleted with the machinery). `uv run ruff check .` clean. Surface check:
+  `uv run python -c "from api.main import create_app; print([r.path for r in create_app().routes])"`
+  → no `/jobs*`, no `/upload`. `grep -rn "JobRegistry\|sweeper_loop\|getJobId" api/ tests/`
+  → nothing.
 - P9/P10: `uv run pytest -q` — 550 passed, 11 skipped (the skips are the DB suite,
   which needs `DATABASE_URL_TEST`). `uv run ruff check .` clean. Live-shaped fixtures
   live in `tests/live_payload.py` — one builder, used by every suite.
@@ -476,6 +483,24 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
 
 ## Notes / Decisions Log
 
+- **2026-07-29 — P11.5: what deletion left behind, and one thing deliberately kept.**
+  Two judgement calls worth carrying forward.
+  1. **`POST /cohorts` (re-uploaded `decisions.jsonl`) was kept**, though it is v2-era and
+     the only surviving upload route. It is not in-memory state — it is a pure function
+     over an uploaded artifact, so it survives serverless intact, and it is the *only* way
+     to run an allocation after a cohort is closed out and purged (PRD v3 §9 deletes the
+     rows; the exported artifacts are the durable record). `ApiConfig.max_upload_bytes` /
+     `max_rows` stay alive solely for it.
+  2. **`grade_batch` / `promote_record` / `demote_record` in `pipeline.py` now have no
+     non-test callers.** `/jobs` was their only production caller; the v3 admin API uses
+     `grade_webhook_applicant(bypass_gates=...)` instead. They were *not* deleted: they are
+     the spine of `tests/test_pipeline.py`, which is where a large share of the v2 gate and
+     invariant coverage still lives, and gutting that suite to delete unused code is a bad
+     trade during a re-architecture. **Revisit after P13** — the honest options are to
+     delete them together with the CSV-batch tests, or to re-point those tests at the
+     webhook path. Same question applies to `srip_filter.ingest`'s CSV reader
+     (`read_csv_records`/`validate_headers`), now reachable only via `grade_batch` and
+     `scripts/replay.py`'s CSV mode.
 - **2026-07-04 — v3 replan approved (owner grill session, 13 forks).** Full decision
   record lives in PRD v3; headlines:
   1. Stateless → **persistent** (separate Neon Postgres, plain SQL, no ORM). The v2

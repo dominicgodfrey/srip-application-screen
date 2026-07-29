@@ -5,7 +5,6 @@
   "use strict";
 
   const S = window.SRIP;
-  const app = document.getElementById("audit-app");
   const els = {
     empty: document.getElementById("audit-empty"),
     list: document.getElementById("audit-list"),
@@ -29,14 +28,10 @@
   function hide(el) { el.classList.add("hidden"); }
 
   // ----- Load -----------------------------------------------------------------
-  // v3: with no ?job= param this screen browses the LIVE database (the continuous
-  // service's normal mode) via /api/exports/decisions; a job id keeps the legacy
-  // job-scoped behavior for the transition period.
-  const jobId = (app.dataset.job || "").trim() || S.getJobId();
-  const LIVE = !jobId;
+  // This screen browses the LIVE database via /api/exports/decisions.
   refresh();
 
-  function refresh() { return LIVE ? loadFrom("/api/exports/decisions") : loadFrom("/jobs/" + encodeURIComponent(jobId) + "/results/decisions"); }
+  function refresh() { return loadFrom("/api/exports/decisions"); }
 
   async function loadFrom(url) {
     try {
@@ -48,7 +43,6 @@
       applyView();
     } catch (err) {
       const msg = err.status === 409 ? "Results are not ready yet — grading is still running."
-        : err.status === 404 ? "This job has expired or was discarded. Upload the CSV again."
         : (err.detail || "Could not load records.");
       els.empty.querySelector("p").textContent = msg;
       S.toast(msg, "danger");
@@ -56,9 +50,7 @@
   }
 
   function actionUrl(sid, action) {
-    return LIVE
-      ? "/api/applications/" + encodeURIComponent(sid) + "/" + action
-      : "/jobs/" + encodeURIComponent(jobId) + "/records/" + encodeURIComponent(sid) + "/" + action;
+    return "/api/applications/" + encodeURIComponent(sid) + "/" + action;
   }
 
   // ----- Filter + sort + render -----------------------------------------------

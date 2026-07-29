@@ -6,7 +6,7 @@
 <p class="muted">Set per-tier seat caps and watch the assignment recompute live. Tiers fill
 strictly by rank; no one is placed above their first-choice (cost-ceiling) tier.</p>
 
-<div id="cohort-app" data-job="{{ job }}">
+<div id="cohort-app">
   <div class="section" id="capacity-section">
     <h2 class="section-title">Capacities</h2>
     <div class="row-3">
@@ -28,8 +28,7 @@ strictly by rank; no one is placed above their first-choice (cost-ceiling) tier.
 
   <div class="section" id="reupload-section">
     <h2 class="section-title">Source</h2>
-    <p class="muted small" id="cohort-source-note">No results loaded — upload a saved
-    <code>decisions.jsonl</code> below to run an allocation without an active grading run.</p>
+    <p class="muted small" id="cohort-source-note">Loading the live ranking from the database…</p>
     <h3 class="subhead">Use a different decisions.jsonl</h3>
     <form id="reupload-form" class="btn-row">
       <input class="form-input" type="file" id="decisions-file" accept=".jsonl,application/x-ndjson" style="max-width: 24rem;">
