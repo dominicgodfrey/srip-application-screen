@@ -19,6 +19,7 @@ from replay import (  # noqa: E402
     to_submission_uuid,
 )
 
+from srip_filter.db import content_hash
 from srip_filter.ingest import ApplicantRow
 from srip_filter.ingest_webhook import map_application_payload
 from srip_filter.models import ApplicationPayload
@@ -84,3 +85,21 @@ def test_synthetic_fixtures_are_contract_valid_and_varied() -> None:
     # Deterministic: a second call produces identical ids (stable replays).
     again = synthetic_payloads(8, "replay-cs")
     assert [p["submission_id"] for p in again] == [p["submission_id"] for p in payloads]
+
+
+def test_replayed_payloads_are_byte_stable_so_re_replay_never_re_bills() -> None:
+    """The whole payload — not just the ids — must hash identically across calls.
+
+    ``content_hash`` covers every field, so any wall-clock value (``submitted_at`` was one)
+    changes ``payload_hash`` on every replay, which re-grades the batch and silently
+    re-bills it. This is the guard on that: a 466-row calibration re-replay must be free.
+    """
+    first = synthetic_payloads(6, "replay-cs")
+    second = synthetic_payloads(6, "replay-cs")
+    assert [content_hash(p) for p in first] == [content_hash(p) for p in second]
+
+    # ...and submitted_at is really populated, in the partner's Pacific-offset shape,
+    # so the timestamp parse path is exercised rather than skipped via None.
+    stamps = [p["submitted_at"] for p in first]
+    assert all(s and s.endswith("-07:00") for s in stamps), stamps
+    assert len(set(stamps)) == len(stamps)  # distinct per row, still deterministic

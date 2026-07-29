@@ -173,7 +173,11 @@ def test_logout_revokes_session() -> None:
 
 
 def test_unconfigured_hash_fails_closed() -> None:
-    client = _client(admin_hash=None)
+    # "" (not None) is how create_app spells *unconfigured*: None means "fall back to the
+    # environment", so passing it here made this test silently depend on whether the
+    # developer's .env happened to be empty — it started failing the moment
+    # ADMIN_PASSWORD_HASH was set locally.
+    client = _client(admin_hash="")
     # Login refuses (503) and protected routes stay locked — never silently open.
     assert client.post("/login", data={"password": "anything"}).status_code == 503
     assert client.get("/api/applications").status_code == 401

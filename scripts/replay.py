@@ -28,6 +28,7 @@ import argparse
 import json
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -67,7 +68,25 @@ def _answers(pairs: dict[str, str | None]) -> list[dict]:
     ]
 
 
-def payload_from_row(row: ApplicantRow, cohort_name: str) -> dict:
+# The partner stamps submitted_at in U.S. Pacific with an offset, not UTC "Z" (WEBSITE_ASKS
+# repo audit 2026-07-26). Replays carry a real one so that parse path is actually exercised.
+#
+# It MUST be deterministic, not wall-clock: `content_hash` covers the whole payload, so a
+# timestamp that moves between runs changes payload_hash, which re-grades every row on a
+# re-replay — silently re-billing the whole batch. A fixed base + per-row offset keeps
+# replays byte-identical, which is what makes the idempotency check meaningful.
+_PACIFIC = timezone(timedelta(hours=-7))
+_REPLAY_EPOCH = datetime(2026, 7, 6, 11, 20, tzinfo=_PACIFIC)
+
+
+def _submitted_at(index: int) -> str:
+    """Deterministic Pacific-offset timestamp for replay row ``index``."""
+    return (_REPLAY_EPOCH + timedelta(minutes=index)).isoformat(timespec="seconds")
+
+
+def payload_from_row(
+    row: ApplicantRow, cohort_name: str, *, submitted_at: str | None = None
+) -> dict:
     """Convert one canonical CSV row to the LIVE combined payload (lib/ats.ts shape)."""
     return {
         "submission_id": to_submission_uuid(row.submission_id),
@@ -75,7 +94,7 @@ def payload_from_row(row: ApplicantRow, cohort_name: str) -> dict:
         "student_name": f"{row.first_name} {row.last_name}".strip(),
         "cohort_name": cohort_name,
         "cohort_display_name": cohort_name,
-        "submitted_at": None,
+        "submitted_at": submitted_at,
         "ed": False,
         "is_finaid": False,
         "ats_run": ["essays"],
@@ -110,7 +129,10 @@ def payloads_from_csv(path: Path, cohort_name: str) -> list[dict]:
     headers, records = read_csv_records(path)
     resolution = validate_headers(headers)
     rows = [ApplicantRow.from_record(record, resolution) for record in records]
-    return [payload_from_row(r, cohort_name) for r in rows if r.submission_id]
+    return [
+        payload_from_row(r, cohort_name, submitted_at=_submitted_at(i))
+        for i, r in enumerate(r for r in rows if r.submission_id)
+    ]
 
 
 def synthetic_payloads(count: int, cohort_name: str) -> list[dict]:
@@ -137,6 +159,7 @@ def synthetic_payloads(count: int, cohort_name: str) -> list[dict]:
                 essay2=essay + " extra",
             ),
             cohort_name,
+            submitted_at=_submitted_at(n),
         )
         if n % 4 == 3:  # add an optional technical essay to exercise Task F
             payload["optional_essays"] = [
