@@ -18,27 +18,71 @@ model → P11–P13, bounds source → resolved by deleting the gate entirely).
 therefore **frozen** — further schema changes need `002_*.sql`. The 11 P1 persistence tests
 execute for the first time and pass.
 
-**Suite state:** `uv run pytest -q` → **517 passed, 0 failed.** P11.5 deleted the 5
-known-red tests along with the machinery they covered; the suite is fully green for the
-first time since the DB was connected.
+**Suite state:** `uv run pytest -q` → **518 passed, 0 failed.** P11.5 deleted the 5
+known-red tests along with the machinery they covered; the suite is fully green.
 
-**⚠️ Not yet exercised for real: the OpenAI boundary.** Every suite to date ran on
-`FakeLLMClient`, and until 2026-07-29 `.env` held a 16-char placeholder key, so no live
-model call has *ever* been made by this codebase. Pinned model IDs, Structured-Outputs
-schemas, and prompt wiring are therefore unvalidated against the real API. A real key is
-now in (owner's personal, temporary, strict budget) — the first real run should be a
-handful of fixtures, not the 466-row calibration.
+**Stage 1 E2E is DONE** (2026-07-29, zero tokens — see the Notes log). The full path
+webhook → DB → worker → audit record → dashboard → exports ran on 12 synthetic
+applications under `SRIP_DEV_FAKE_LLM=1`, including the idempotency invariant.
 
-## Active Sub-Task
-**P11.5 ✔ shipped.** Next: the rest of P11 (11.1 cron drain, 11.2 stale-claim reaper,
-11.3 migrations out of the lifespan, 11.4 pooled connection + `statement_cache_size=0`),
-then P12 (signed-cookie sessions), then P13.1/13.2 (`vercel.json`, ASGI entrypoint,
-`requirements.txt` — the two artifacts the partner needs before he can deploy anything).
+**⚠️ Still not exercised for real: the OpenAI boundary.** Every suite and the Stage 1 E2E
+ran on `FakeLLMClient`, and until 2026-07-29 `.env` held a 16-char placeholder key, so no
+live model call has *ever* been made by this codebase. Pinned model IDs, Structured-Outputs
+schemas, and prompt wiring are unvalidated against the real API. A real key is in now
+(owner's personal, **temporary, strict budget** — pull it before handover).
 
-**Start with P11.3** (migrations out of the lifespan): it is the one remaining *defect*
-rather than a port — `create_app`'s lifespan applies migrations on every app construction,
-which is wrong on a single host and actively unsafe across concurrent serverless cold
-starts. It was also the root cause of the 5 tests P11.5 just deleted.
+---
+
+# ▶ START HERE (handoff, 2026-07-29)
+
+**Owner's stated goal: finish as much as possible locally BEFORE contacting Andrew.**
+Everything in "Do now" below is unblocked — no partner input, no owner decision, and
+**nothing here is blocked by the profanity list** (see "What the profanity list blocks").
+
+### Do now, in this order
+1. **P11.3 — migrations out of the lifespan.** The one remaining *defect* rather than a
+   port: `create_app`'s lifespan applies migrations on every app construction, wrong on one
+   host and unsafe across concurrent cold starts. Move behind `pg_try_advisory_lock` +
+   a guarded `POST /api/admin/migrate`.
+2. **P11.6 — gate `run_worker` behind `SRIP_LOCAL_WORKER=1`.** Today it starts whenever a
+   pool exists. On Vercel that is a polling loop per instance. `SKIP LOCKED` keeps it
+   *correct*, but it is constant DB churn and unbounded LLM concurrency. Do it before 11.1
+   so the drain is the only driver.
+3. **P11.2 — stale-claim reaper**, then **P11.1 — cron drain** (reaper first so the drain
+   ships with it, not after).
+4. **P11.4 — pooled endpoint.** `.env` still points at Neon's **direct** host; needs
+   `-pooler` + `statement_cache_size=0` (asyncpg vs PgBouncer transaction mode).
+5. **P12 — signed-cookie sessions** (D2, already decided; P12.1 as written).
+6. **P13.1 `vercel.json` + ASGI entrypoint, P13.2 `requirements.txt`** — neither exists;
+   they are literally what Andrew needs in hand.
+
+### Two small items to fold in anywhere
+- **Stage 2 LLM smoke, ~9 real calls.** Drop `SRIP_DEV_FAKE_LLM`, replay **3** fixtures.
+  Purpose is narrow: confirm the pinned model IDs exist, Structured Outputs parse into the
+  pydantic models, and the prompts don't error. **Not** a quality check. Do it before
+  handover — shipping a system whose OpenAI wiring never ran is a bad trade for a few cents.
+- **Audit panel omits `technical_essay_bonus`** (found 2026-07-29). `api/static/js/audit.js`
+  renders GPA / essays / coursework / school / resume but not Task F, which is live and
+  worth 0–20. It renders "Resume bonus" (permanently 0) while hiding a real one, so the
+  staff-facing breakdown will not add up to `final_score` whenever the optional essay was
+  written. "Every subscore explainable" is a stated principle — fix before handover.
+  (This is the standing P6 leftover; `international` / `cohort_name` / `finaid` are missing
+  from the panel too, but Task F is the one that breaks the arithmetic.)
+
+### What the profanity list blocks
+Only **the 466-row calibration run** — outcomes shift under a changed gate, so calibrating
+first measures something about to be replaced. It must also be settled before **real
+applicants** hit the system (it is a rejection path), but that is go-live, not handover.
+`resources/profanity.txt` is a data file loaded live; adding terms changes no code, no
+schema, no tests. Treat it as a parallel track.
+
+### Then, and only then: the Andrew handover
+Owner-only steps first — **generate a REAL `ATS_WEBHOOK_SECRET`** (the one in `.env` is a
+local throwaway that leaked into a chat transcript), and **remove the owner's personal
+`OPENAI_API_KEY`**, deciding whose key production uses. Andrew generates and holds
+`ADMIN_PASSWORD_HASH`. Re-read the secrets-governance note in the Notes log before sending:
+deployed in his Vercel project, his team can read our env vars and function logs.
+Then send the three asks in "Partner (Andrew)" below.
 
 ---
 
@@ -383,8 +427,21 @@ close-cycle · flow-back (#9) → post-v3.
       ruff clean.** Verified live in the preview browser (login → dashboard → audit →
       cohorts, `POST /api/cohorts` 200, zero console errors, navbar has no upload link).
 
+- [x] **Local secrets provisioned + Stage 1 E2E green** (2026-07-29, 560f30e). `.env` now
+      carries a real `OPENAI_API_KEY` (owner's personal, temporary), a **local throwaway**
+      `ATS_WEBHOOK_SECRET`, and a local `ADMIN_PASSWORD_HASH`. Both local secrets are
+      self-generated and unrelated to the production values — they were never partner
+      blockers. `.claude/launch.json` no longer hardcodes an admin hash (falls through to
+      `.env`). Verified at zero token cost: signed `_test` ping 200 + no row; wrong/missing
+      secret 401; login/logout/session round-trip; 12 fixtures graded (8 RANKED /
+      4 REJECTED / 0 error); re-delivery all `unchanged` with `llm_cache` unmoved; all five
+      exports generate; `events` carries structural data only.
+- [x] **P7 replay fix — deterministic `submitted_at`** (2026-07-29, 560f30e). Also fixed
+      `test_unconfigured_hash_fails_closed`, which depended on an empty ambient `.env`.
+      See the Notes log for the re-billing trap this avoided.
+
 ## In Progress
-- [ ] (none — everything remaining is blocked on owner inputs / website-team answers)
+- [ ] (none — the "Do now" list in ▶ START HERE is all unblocked local work)
 
 ## Blocked (owner / external)
 - [ ] P7 (E2E half): local end-to-end + idempotent re-replay + 466-row v2-vs-v3
@@ -455,8 +512,11 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
       P11.5 (2026-07-29).
 - [ ] Close-cycle action (export → typed confirmation → purge + tombstone) once
       WEBSITE_ASKS #13 settles the retention policy.
-- [ ] Audit browser: surface the new v3 blocks (technical_essay, international,
-      cohort_name) in the detail panel — currently rendered fields are the v2 set.
+- [ ] **Audit browser: surface the v3 blocks** (`technical_essay_bonus`, `international`,
+      `cohort_name`, finaid) in the detail panel — rendered fields are still the v2 set.
+      **Promoted to a before-handover item 2026-07-29**: `technical_essay_bonus` is live and
+      worth 0–20, so the panel's breakdown does not sum to `final_score` whenever the
+      optional essay was written. See the Notes log entry.
 
 ## Owner inputs needed (v3)
 - [x] **Neon project created and connected** (2026-07-29). `DATABASE_URL` +
@@ -509,8 +569,19 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
   graceful no-DB 503s) done in-session 2026-07-04.
 - P7 tool: `uv run pytest tests/test_replay.py -q` — 3 passed;
   `uv run python scripts/replay.py --fixtures 3 --dry-run` prints 3 payloads.
-- P11.5: `uv run pytest -q` — **517 passed, 0 failed** (down from 561 collected: 44 tests
-  deleted with the machinery). `uv run ruff check .` clean. Surface check:
+- **Stage 1 E2E (zero tokens) — repeat any time.** Start the server
+  (`.claude/launch.json` → `srip-api-demo`, sets `SRIP_DEV_FAKE_LLM=1`, port 8321), then:
+  ```
+  SECRET=$(grep '^ATS_WEBHOOK_SECRET=' .env | cut -d= -f2)
+  uv run python scripts/replay.py --fixtures 12 --secret "$SECRET" --cohort su27-cs
+  uv run python scripts/replay.py --fixtures 12 --secret "$SECRET" --cohort su27-cs --no-test-ping
+  ```
+  First run → twelve `202 accepted`; second → twelve `202 unchanged` with `llm_cache`
+  unchanged (invariant #8). UI at http://localhost:8321, password in `.env`'s hash — the
+  local one set 2026-07-29. Expected: 8 RANKED / 4 REJECTED, ranks 1–8, all five exports
+  200. `--dry-run` prints payloads and sends nothing.
+- P11.5: `uv run pytest -q` — **518 passed, 0 failed** (down from 561 collected: 44 tests
+  deleted with the machinery, 1 added). `uv run ruff check .` clean. Surface check:
   `uv run python -c "from api.main import create_app; print([r.path for r in create_app().routes])"`
   → no `/jobs*`, no `/upload`. `grep -rn "JobRegistry\|sweeper_loop\|getJobId" api/ tests/`
   → nothing.
@@ -522,6 +593,52 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
 
 ## Notes / Decisions Log
 
+- **2026-07-29 — Stage 1 E2E green, and the two defects it exposed.** First run of the
+  full path against a live DB, at zero token cost (`SRIP_DEV_FAKE_LLM=1`). Twelve synthetic
+  applications: 12 `graded`, 0 `error`, 0 stuck in `grading`; 8 RANKED / 4 REJECTED;
+  read-time per-cohort ranks with stable ties; all five exports 200; `events` carried
+  `{"result":"accepted","ats_run":["essays"]}` — structural only, no applicant text.
+  Invariants spot-checked in SQL: no REJECTED row carries a score, every REJECTED names its
+  gate. **Two real defects surfaced, both fixed in 560f30e:**
+  1. **`replay.py` sent `submitted_at: None`** — so replays stored NULL timestamps (the
+     dashboard's Submitted column was blank) and the partner's **Pacific-offset** parse
+     path, a flagged contract delta, was never exercised end to end.
+     **The trap in fixing it, and the reason this is a Notes entry:** the obvious fix is
+     `datetime.now()`, and it is *wrong and expensive*. `db.content_hash` canonicalizes and
+     hashes the **whole payload**, so any wall-clock field changes `payload_hash` on every
+     delivery ⇒ every re-replay re-grades ⇒ **the 466-row calibration re-bills in full every
+     run**. Fixed as `_REPLAY_EPOCH + index minutes`, byte-stable across calls, with
+     `test_replayed_payloads_are_byte_stable_so_re_replay_never_re_bills` guarding it.
+     Verified live: content-changed → `accepted`, identical → `unchanged`, and the
+     intervening re-grade re-billed **nothing** because the essay text had not moved (the
+     `llm_cache` key is per-field, not per-payload). **Rule for anyone touching the replay
+     tool or the payload builders: replayed payloads must be deterministic, or re-runs cost
+     real money.**
+  2. **`test_unconfigured_hash_fails_closed` depended on an empty ambient `.env`.** It
+     passed `admin_hash=None` to mean "unconfigured", but in `create_app` `None` means
+     "fall back to the environment" — so it broke the moment `ADMIN_PASSWORD_HASH` was set
+     locally. Now passes `""`. **Same class as the db-isolation bug two entries down:
+     populating real config keeps exposing latent test coupling to ambient env.** Verified
+     green both with `.env` populated and with the vars stripped.
+- **2026-07-29 — audit panel hides Task F (open, fix before handover).**
+  `api/static/js/audit.js` renders GPA / Essay 1 / Essay 2 / coursework / school / **resume**
+  but never `scores.technical_essay_bonus`. So it displays a subscore that is permanently 0
+  (resume, stage disabled) while omitting one that is live and worth **0–20** — 13% of the
+  150 ceiling. Consequence: whenever an applicant wrote the optional essay, the staff-facing
+  breakdown does not sum to `final_score`, against the "every subscore explainable" premise
+  of the audit record. Not caught by tests because the UI is verified by hand, and not
+  visible in the Stage 1 data because the fake handler scored Task F at 0. `international`,
+  `cohort_name` and `finaid` are missing from the panel too (the standing P6 leftover), but
+  Task F is the one that breaks the arithmetic.
+- **2026-07-29 — local secrets are self-generated; they were never partner blockers.**
+  Recorded because it cost time: `ATS_WEBHOOK_SECRET` and `ADMIN_PASSWORD_HASH` were filed
+  under partner/handover items, which made local E2E look externally blocked. Neither
+  involves Andrew. The webhook secret is a shared static string — `replay.py --secret` and
+  the server only have to match *each other*, and the verifier fails closed, so an unset
+  secret 401s everything and no application can enter the system. The admin hash gates a
+  default-deny UI — unset means `/login` 503s and every page is shut, so results exist but
+  cannot be looked at. **The values now in `.env` are local throwaways** (the secret leaked
+  into a chat transcript); generate fresh ones at handover.
 - **2026-07-29 — PLAN.md accuracy pass; three stale claims corrected.** Found while scoping
   the run-up to handover. Recording them because each one had been sitting in this file
   asserting that work was done or blocked when it was not.
