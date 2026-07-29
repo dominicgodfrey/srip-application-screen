@@ -209,6 +209,7 @@
         ["Essay 1", S.fmtNum(essay.e1)],
         ["Essay 2", S.fmtNum(essay.e2)],
         ["Essay total", S.fmtNum(essay.total)],
+        ["Technical essay bonus", S.fmtNum(sc.technical_essay_bonus)],
         ["Coursework bonus", S.fmtNum(sc.coursework_bonus)],
         ["School bonus", S.fmtNum(sc.school_bonus)],
         ["Resume bonus", S.fmtNum(sc.resume_bonus)],
@@ -223,11 +224,14 @@
       ]);
 
     const courseworkHtml = renderCoursework(r.coursework_breakdown || []);
+    const technicalHtml = renderTechnicalEssay(r.technical_essay || {});
     const resumeHtml = renderResume(r.resume || {});
 
     const metaPairs = [
       ["Submission", S.esc(r.submission_id)],
       ["Email", S.esc(r.email)],
+      ["Cohort", S.esc(r.cohort_name)],
+      ["International", S.bool(r.international, false)],
       ["Choices", S.esc([choices.first, choices.second, choices.third].filter(Boolean).join(" → "))],
       ["Duplicate email", S.bool(dedup.is_duplicate_email, false)],
       ["Duplicate name", S.bool(dedup.is_duplicate_name, false)],
@@ -257,7 +261,7 @@
     els.detailBody.innerHTML =
       '<div class="detail-grid">' +
         "<div>" + metaHtml + gatesHtml + "</div>" +
-        "<div>" + gpaHtml + scoresHtml + schoolHtml + resumeHtml + "</div>" +
+        "<div>" + gpaHtml + scoresHtml + schoolHtml + technicalHtml + resumeHtml + "</div>" +
       "</div>" + renderEssays(r) + courseworkHtml + listsHtml + promoteHtml(r);
     show(els.detail);
     els.detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -424,6 +428,31 @@
       S.toast(err.detail || "Promotion failed.", "danger");
     }
   });
+
+  function renderTechnicalEssay(te) {
+    // Stage 4b (Task F, v3) — a bonus worth 0-20. Rendered whenever the block exists so the
+    // Scores breakdown always adds up; records written before v3 have no block.
+    if (te.present === undefined) return "";
+    let pairs = [
+      ["Essay 3 present", S.bool(te.present)],  // optional: present is neutral-good, absent is fine
+      ["Word count", S.esc(te.word_count)],
+      ["Bonus", S.fmtNum(te.bonus)],
+    ];
+    if (te.over_max) pairs.push(["Over max (bonus voided)", S.bool(true)]);
+    if (te.skipped_reason) pairs.push(["Not graded", S.esc(te.skipped_reason)]);
+    if (te.signals) {
+      const sig = te.signals;
+      pairs = pairs.concat([
+        ["On topic", S.bool(sig.on_topic)],
+        ["Gibberish", S.bool(sig.gibberish, false)],
+        ["Technical depth", S.esc(sig.technical_depth_0_10)],
+        ["Exploration", S.esc(sig.exploration_level_0_10)],
+        ["Impact", S.esc(sig.impact_0_10)],
+        ["Rationale", S.esc(sig.rationale)],
+      ]);
+    }
+    return '<h3 class="subhead">Technical essay (optional)</h3>' + kv(pairs);
+  }
 
   function renderResume(res) {
     // Stage 6 (Phase 12). Older decisions.jsonl files have no resume block — show nothing.

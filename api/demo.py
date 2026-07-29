@@ -33,6 +33,7 @@ from srip_filter.models import (
     TaskCOutput,
     TaskDOutput,
     TaskEOutput,
+    TaskFOutput,
 )
 
 _OFFTOPIC = "[[OFFTOPIC]]"
@@ -186,6 +187,25 @@ def _task_e(user: str) -> TaskEOutput:
     )
 
 
+def _task_f(user: str) -> TaskFOutput:
+    """Score the optional technical essay mid-range (demo only).
+
+    Deliberately not full marks: a demo where every bonus maxes out hides the arithmetic.
+    Honors the same two sentinels as Task D, which here only zero the bonus — Stage 4b can
+    never reject.
+    """
+    off_topic = _OFFTOPIC in user
+    gibberish = _GIBBERISH in user
+    return TaskFOutput(
+        on_topic=not off_topic,
+        gibberish=gibberish,
+        technical_depth_0_10=0 if (off_topic or gibberish) else 6,
+        exploration_level_0_10=0 if (off_topic or gibberish) else 7,
+        impact_0_10=0 if (off_topic or gibberish) else 5,
+        rationale="Demo handler output — not a real assessment.",
+    )
+
+
 def demo_handler(task: str, user: str, schema: type[BaseModel]) -> BaseModel:
     """Route a faked LLM call to the matching optimistic builder.
 
@@ -199,6 +219,7 @@ def demo_handler(task: str, user: str, schema: type[BaseModel]) -> BaseModel:
         "task_c": _task_c,
         "task_d": _task_d,
         "task_e": _task_e,
+        "task_f": _task_f,
     }
     builder = builders.get(task)  # type: ignore[arg-type]
     if builder is None:  # unknown task — should never happen
