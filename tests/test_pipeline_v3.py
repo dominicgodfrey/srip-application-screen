@@ -155,15 +155,86 @@ async def test_length_never_gates_a_required_essay() -> None:
 # ------------------------------------------------------------------------------------------------
 
 
-async def test_profanity_in_optional_essay_rejects_whole_application() -> None:
+async def test_profanity_in_optional_essay_flags_whole_application_for_review() -> None:
+    """Profanity anywhere still stops the application — but as NEEDS_REVIEW, not REJECTED
+    (owner, 2026-07-29): the gate is a word list, so a human confirms every flag. Still
+    token-free, and still scoped to the whole application even from the optional essay."""
     client = _client()
     optional = [{"question": "Tech?", "answer": "this fucking compiler " + _TECH_ESSAY}]
     rec = await grade_webhook_applicant(_applicant(optional_essays=optional), client, APP)
-    assert rec.outcome == "REJECTED"
+    assert rec.outcome == "NEEDS_REVIEW"
     assert rec.decided_at_stage == "stage1"
     assert "profanity" in rec.primary_reason.lower()
     assert any(t.startswith("e3:") for t in rec.gates.profanity.terms)
+    assert rec.final_score is None
     assert client.calls == []
+
+
+async def test_profanity_in_a_required_essay_also_only_needs_review() -> None:
+    client = _client()
+    rec = await grade_webhook_applicant(
+        _applicant(
+            required_essays=[
+                {"question": "Why?", "answer": "this fucking compiler " + _WORDS_150},
+                {"question": "How?", "answer": _WORDS_150},
+            ]
+        ),
+        client,
+        APP,
+    )
+    assert rec.outcome == "NEEDS_REVIEW"
+    assert rec.gates.profanity.hit
+    assert client.calls == []  # still fail-fast: no tokens spent on a flagged row
+
+
+async def test_gibberish_still_rejects_outright() -> None:
+    """Only profanity was softened. Gibberish stays a deterministic rejection — it is a
+    positive finding about the text itself, not a word-list guess about intent."""
+    mash = "asdfasdf " * 40
+    rec = await grade_webhook_applicant(
+        _applicant(
+            required_essays=[
+                {"question": "Why?", "answer": mash},
+                {"question": "How?", "answer": mash + "qq"},
+            ]
+        ),
+        _client(),
+        APP,
+    )
+    assert rec.outcome == "REJECTED"
+    assert "gibberish" in rec.primary_reason.lower()
+
+
+async def test_when_profanity_and_gibberish_both_fire_the_rejection_wins() -> None:
+    """PRD §0.7: a definite verdict outranks a review, and primary_reason must name the
+    gate that actually decided — otherwise a REJECTED record cites a non-rejecting gate."""
+    mash = "asdfasdf " * 40 + " fucking "
+    rec = await grade_webhook_applicant(
+        _applicant(
+            required_essays=[
+                {"question": "Why?", "answer": mash},
+                {"question": "How?", "answer": mash + "qq"},
+            ]
+        ),
+        _client(),
+        APP,
+    )
+    assert rec.outcome == "REJECTED"
+    assert "gibberish" in rec.primary_reason.lower()
+    assert rec.gates.profanity.hit and rec.gates.gibberish.hit
+
+
+async def test_promoting_a_profanity_flag_scores_the_application() -> None:
+    """The resolution path for a false positive: a reviewer promotes and the row scores,
+    with the bypassed flag preserved in the audit trail."""
+    optional = [{"question": "Tech?", "answer": "this fucking compiler " + _TECH_ESSAY}]
+    rec = await grade_webhook_applicant(
+        _applicant(optional_essays=optional), _client(), APP, bypass_gates=True
+    )
+    assert rec.outcome == "RANKED"
+    assert rec.manual_override is True
+    assert any("profanity flag bypassed" in r for r in rec.reasons)
+    assert rec.gates.profanity.hit  # verdict still recorded, just not terminal
 
 
 async def test_gibberish_optional_essay_zeroes_bonus_never_rejects() -> None:

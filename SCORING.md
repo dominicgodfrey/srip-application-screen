@@ -28,9 +28,18 @@ Outcomes: `REJECTED` (failed a hard gate) · `RANKED` (scored, ranked per cohort
 **Required core = 70** (GPA 40 + essays 30). **Bonuses = up to 80.** Theoretical max **150**
 (125 while resume is disabled).
 
-## Hard gates (any ⇒ REJECTED, in fail-fast order, zero LLM spend after the first hit)
+## Hard gates (in fail-fast order, zero LLM spend after the first hit)
 
-1. **Profanity in ANY essay** — including the optional Essay 3 (good-faith violation).
+Most gates reject; two do not, and both exceptions exist because the check cannot be trusted
+to be *right* on its own — see each entry. A gate that fires always stops the application.
+
+1. ~~**Profanity in ANY essay**~~ — **⇒ NEEDS_REVIEW, not REJECTED** (owner, 2026-07-29).
+   Still evaluated across every essay including the optional Essay 3, and still fail-fast
+   (zero LLM spend on a flagged row), but the outcome is a human review. Rationale: the gate
+   is `better-profanity`'s word list, which cannot distinguish a slur from ordinary
+   vocabulary in context — a curated 1101-term list was tried and reverted for exactly that
+   reason. A reviewer promotes a false positive (the row then scores normally, flagged as a
+   manual override) or demotes a real violation to REJECTED.
 2. **Gibberish in a required essay** (deterministic heuristics, ≥2 signals; ESL-safe) —
    Task D backstops this. Gibberish in Essay 3 ⇒ 0 bonus only.
 3. ~~**Word bounds**~~ — **the length gate was deleted** (owner, 2026-07-28). The site

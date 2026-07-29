@@ -302,18 +302,23 @@ def gibberish_gate(text: str, cfg: GibberishConfig) -> GibberishResult:
 class Stage1Result:
     """Reduced outcome of Stage 1 for one application.
 
-    ``rejected``/``primary_reason`` drive the pipeline; the three audit blocks
+    ``rejected``/``needs_review``/``primary_reason`` drive the pipeline; the three audit blocks
     (``length_gate``/``profanity``/``gibberish``) drop straight into ``AuditRecord.gates``; the
     two ``length_penalty_*`` floats are the soft penalties handed to Stage 4 scoring.
+
+    ``needs_review`` is v3-only (owner, 2026-07-29): a profanity hit no longer rejects on its
+    own, it routes to a human. It defaults False so the frozen v2 path is unaffected. Where
+    both fire, ``rejected`` wins — a definite reject outranks a review (PRD §0.7).
     """
 
     rejected: bool
-    primary_reason: str  # "" unless rejected; names the failing gate (PRD §12 invariant)
+    primary_reason: str  # "" unless flagged; names the deciding gate (PRD §12 invariant)
     length_gate: EssayLengthGate
     profanity: HitGate
     gibberish: HitGate
     length_penalty_e1: float
     length_penalty_e2: float
+    needs_review: bool = False
 
 
 def _stage1_reason(
@@ -423,6 +428,11 @@ def run_essay_gates_v3(
 
     Returns the same :class:`Stage1Result` shape the pipeline already consumes; length
     penalties are always 0 and the length gate never fails (bounds live upstream).
+
+    **Verdicts differ from v2** (owner, 2026-07-29): gibberish in a required essay still
+    ``rejected``, but a profanity hit sets ``needs_review`` instead — the matcher is a word
+    list, and a word list cannot tell "the transatlantic slave trade" from an insult. A human
+    confirms every flag, so a false positive costs a review, not an application.
     """
     row = applicant.row
     b1_wc, b2_wc = word_count(row.essay1), word_count(row.essay2)
@@ -457,15 +467,19 @@ def run_essay_gates_v3(
         if fired
     ]
 
-    if profanity_hit:
-        reason = "Profanity detected in an essay"
-    elif gibberish_hit:
+    # Gibberish is checked first because it is the only Stage-1 gate that still rejects
+    # outright; profanity routes to a human (owner, 2026-07-29), so where both fire the
+    # rejection is the deciding verdict and must be the one named.
+    if gibberish_hit:
         reason = "Essay flagged as gibberish by deterministic heuristics"
+    elif profanity_hit:
+        reason = "Profanity flagged in an essay — needs human confirmation"
     else:
         reason = ""
 
     return Stage1Result(
-        rejected=profanity_hit or gibberish_hit,
+        rejected=gibberish_hit,
+        needs_review=profanity_hit,
         primary_reason=reason,
         # Word counts are audit data only — ok/hard_fail are pinned True/False because the
         # length gate retired (bounds are enforced by the site at submit).

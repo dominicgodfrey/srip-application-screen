@@ -93,8 +93,13 @@ No o-series reasoning models. Verify exact IDs against OpenAI's catalog; swap in
 - **Three outcomes only:** `REJECTED`, `RANKED`, `NEEDS_REVIEW`.
 - **GPA rules (owner-settled):** threshold 3.3; hard floor 2.0 (no Task B below it); blank
   GPA + blank explanation ⇒ REJECTED (non-answer); unresolvable scale ⇒ NEEDS_REVIEW.
-- **Profanity in ANY essay rejects** (incl. the optional technical essay). Gibberish/
-  off-topic in the optional essay only zeroes its bonus.
+- **Profanity in ANY essay ⇒ NEEDS_REVIEW** (incl. the optional technical essay) — owner,
+  2026-07-29. It stops the application, but a human confirms the flag: the gate is a word
+  list, and a word list cannot tell a slur from ordinary vocabulary in context ("the
+  transatlantic slave trade", "flange coupling", a surname). A false positive must cost a
+  review, not an application. Gibberish in a required essay still **rejects** — that is a
+  positive finding about the text, not a guess about intent. Gibberish/off-topic in the
+  optional essay only zeroes its bonus.
 - **Auditability is a feature.** Every applicant has a structured audit record explaining
   every gate and subscore; manual overrides carry `decided_by`.
 - **Idempotent ingest.** Same `submission_id` + same content hash ⇒ no-op; changed content

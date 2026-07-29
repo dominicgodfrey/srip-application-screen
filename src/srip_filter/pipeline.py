@@ -663,7 +663,10 @@ async def grade_webhook_applicant(
                 "Payload delivered fewer than two required essays (contract drift)",
             )
 
-        # Stage 1 — strict bounds + profanity (ALL essays) + gibberish (required essays).
+        # Stage 1 — profanity (ALL essays) + gibberish (required essays). Gibberish rejects;
+        # profanity routes to a human (owner, 2026-07-29) because the gate is a word list and
+        # cannot distinguish a slur from ordinary vocabulary in context. Rejection is checked
+        # first: where both fire, the definite verdict wins (PRD §0.7).
         stage1 = run_essay_gates_v3(applicant, cfg)
         record.gates.essay_length = stage1.length_gate
         record.gates.profanity = stage1.profanity
@@ -672,6 +675,10 @@ async def grade_webhook_applicant(
             if not bypass_gates:
                 return _terminal(record, "REJECTED", _STAGE_1, stage1.primary_reason)
             record.reasons.append(f"OVERRIDE: stage1 gate bypassed ({stage1.primary_reason})")
+        elif stage1.needs_review:
+            if not bypass_gates:
+                return _terminal(record, "NEEDS_REVIEW", _STAGE_1, stage1.primary_reason)
+            record.reasons.append(f"OVERRIDE: profanity flag bypassed ({stage1.primary_reason})")
 
         # Stage 2-3 — GPA (structured input; weighted-only forces Task A).
         gpa = await assess_gpa(row, client, cfg, force_task_a=applicant.force_task_a)

@@ -21,6 +21,7 @@ where they conflict, v3 wins.
 > | §2.2, §2.3 | `ats_mode`-discriminated essays/resume payloads | **One combined payload** carrying every sector + an `ats_run: ("essays"\|"resume"\|"finaid")[]` selector. Extra fields: `all_answers[]` (the only place `field_key` appears), `gpa_unweighted`/`gpa_weighted` as separate `"value/max"` strings, `tier_*_choice`, `detected_sub_track`. A delivery whose `ats_run` omits `"essays"` is stored in a terminal `stored` status and never graded |
 > | §2.3 | Per-mode content hashes | **One `payload` column + one `payload_hash`**; the per-mode split existed only for "resume may arrive before essays", which the combined payload kills |
 > | §0, §11 | finaid out of scope (422) | **Stored, never scored** — accepted and persisted, no gate or subscore |
+> | §4 Stage 1, §8, SCORING §hard-gates | Profanity in any essay ⇒ REJECTED | **⇒ NEEDS_REVIEW** (owner, 2026-07-29). The gate is a word list and cannot tell a slur from ordinary vocabulary in context, so a human confirms every flag. Still fail-fast — no LLM spend on a flagged row. Gibberish still rejects |
 > | §4 Stage 1 | Word bounds from payload `min_words`/`max_words` | **The length gate is deleted.** The site 400s violations at submit and sends no bounds, so a config-sourced check could only fire on a stale local config |
 > | §6 | Server-side admin sessions | **Stateless HMAC-signed cookies** keyed on `ADMIN_PASSWORD_HASH` (no shared store; changing the password revokes every session), and the login throttle counts `events` rows so it holds across instances |
 >
@@ -159,7 +160,8 @@ audit record, never a stuck queue). Progress and completions go to `events`.
 
 ```
 Gate 0  Payload validation           (at the edge; malformed ⇒ 422, never stored)
-Stage 1 Essay deterministic gates    profanity (ANY essay) · gibberish (required essays)
+Stage 1 Essay deterministic gates    profanity (ANY essay ⇒ NEEDS_REVIEW) · gibberish
+                                     (required essays ⇒ REJECTED)
                                      · strict word bounds ── fail ⇒ REJECTED, STOP
 Stage 2 GPA normalization            structured input; Task A only for odd/weighted-only
 Stage 3 GPA gate                     unchanged v2 logic (3.3 / 2.0 / Task B)  ⇒ REJECTED?
@@ -192,7 +194,8 @@ Stage-by-stage deltas from v2:
   `{on_topic, gibberish, technical_depth_0_10, exploration_level_0_10, impact_0_10,
   rationale}` — deterministic config-priced math maps signals to 0–20 (model judges,
   config prices — the Task C pattern). `on_topic=false` or `gibberish=true` ⇒ 0 bonus.
-  Absent essay ⇒ 0, no LLM call. Profanity in this essay was already a Stage-1 reject.
+  Absent essay ⇒ 0, no LLM call. Profanity in this essay already stopped the application at
+  Stage 1 (as NEEDS_REVIEW — see the corrections banner).
 - **Stage 6 resume:** engine **decided in-house** (owner, 2026-07-27; a third-party hiring
   agent was rejected — black box, an agent framework in a minors'-PII path, and it bypasses
   the fetch-and-discard guardrails). Task E extracts signals,
