@@ -13,6 +13,7 @@ Routes (all under ``/api``):
 * ``DELETE /api/applications/{sid}``         — hard delete (individual removal requests)
 * ``GET    /api/exports/{artifact}``         — decisions.jsonl / CSVs / summary from the DB
 * ``POST   /api/cohorts``                    — cohort what-if over the live ranking
+* ``POST   /api/admin/migrate``              — apply pending migrations (P11.3 bootstrap)
 
 Manual overrides append a non-PII ``events`` entry with ``decided_by`` (PRD v3 §1.1);
 under the shared-password model that is the literal ``"admin"``.
@@ -106,6 +107,16 @@ def register_admin_api(app: FastAPI) -> None:
         if row is None:
             raise HTTPException(status_code=404, detail="No application with that id.")
         return row
+
+    @app.post("/api/admin/migrate", response_model=None, tags=["admin"])
+    async def migrate() -> dict:
+        """Apply pending migrations (P11.3) — the manual first run on a new database.
+
+        Session-gated like everything else under ``/api``. The cron drain runs the same
+        advisory-locked pass every minute, so this is only needed to bootstrap a database
+        before any cron has fired.
+        """
+        return {"applied": await dbmod.apply_migrations(_pool())}
 
     @app.get("/api/applications", response_model=None, tags=["admin"])
     async def list_applications(cohort: str | None = None) -> dict:

@@ -44,6 +44,7 @@ from .auth import (
     wants_html,
 )
 from .cohorts import CohortFormat, cohort_response, parse_decisions_jsonl
+from .cron import register_cron
 from .jobs import read_upload_capped
 from .schemas import ErrorResponse, HealthResponse
 from .web import register_pages
@@ -113,8 +114,11 @@ def create_app(
                     min_size=app.state.config.db.pool_min_size,
                     max_size=app.state.config.db.pool_max_size,
                 )
-                await dbmod.apply_migrations(app.state.db_pool)
                 owns_pool = True
+                # P11.3: migrations do NOT run here. On a serverless host the lifespan is
+                # a cold start — it fires per instance, concurrently, with no release
+                # phase to own DDL. The advisory-locked pass lives in the cron drain, with
+                # POST /api/admin/migrate for the manual first run.
         # Build the client once, only if a test hasn't injected one. Done in the lifespan (not at
         # import) so importing this module never needs an API key. The dev/demo flag swaps in a
         # zero-spend FakeLLMClient; the default path is the real OpenAI client.
@@ -175,7 +179,11 @@ def create_app(
         app.state.webhook_secrets = tuple(
             s for s in (env.ats_webhook_secret, env.ats_webhook_secret_previous) if s
         )
+    # P11.1: the cron drain authenticates itself with a bearer token (Vercel sets it on
+    # scheduled invocations), so it carries no session — see auth.OPEN_PREFIXES.
+    app.state.cron_secret = get_secrets().cron_secret
     register_webhooks(app)
+    register_cron(app)
     register_admin_api(app)  # v3 (P6): DB-backed review endpoints, session-gated by P5
 
     # -- Server-rendered UI shell (Phase 10; created before auth so /login can render) -----------

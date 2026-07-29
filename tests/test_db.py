@@ -29,6 +29,7 @@ from srip_filter.db import (
     get_application,
     list_applications,
     mark_error,
+    reap_stale_claims,
     upsert_application,
 )
 
@@ -215,6 +216,25 @@ async def test_error_row_leaves_queue_and_is_tombstoned(pool):
     assert await claim_next(pool) is None
     kinds = [r["kind"] for r in await pool.fetch("SELECT kind FROM events")]
     assert "grading_error" in kinds
+
+
+async def test_reaper_requeues_only_claims_older_than_the_window(pool):
+    """P11.2: a killed serverless invocation leaves a row in 'grading' with nobody on it."""
+    fresh, stale = _sid(), _sid()
+    await upsert_application(pool, submission_id=fresh, payload=_payload())
+    await upsert_application(pool, submission_id=stale, payload=_payload(extra="s"))
+    await claim_next(pool)
+    await claim_next(pool)
+
+    assert await reap_stale_claims(pool, 900) == 0  # both claims are seconds old
+    await pool.execute(
+        "UPDATE applications SET updated_at = NOW() - INTERVAL '1 hour' WHERE submission_id = $1",
+        uuid.UUID(stale),
+    )
+    assert await reap_stale_claims(pool, 900) == 1
+    assert (await get_application(pool, stale))["status"] == dbmod.STATUS_RECEIVED
+    assert (await get_application(pool, fresh))["status"] == dbmod.STATUS_GRADING
+    assert str((await claim_next(pool))["submission_id"]) == stale
 
 
 # ------------------------------------------------------------------------------------------------

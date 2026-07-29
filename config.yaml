@@ -137,6 +137,11 @@ webhook:
 # Grading worker (P3, PRD v3 §3) — drains the applications status queue.
 worker:
   poll_seconds: 2.0         # idle sleep between queue polls; stop wakes it immediately
+  # Cron drain (P11.1/11.2) — the serverless driver. Budget sits inside Vercel's 800 s
+  # maxDuration; stale_grading_seconds must exceed the slowest realistic single-row grade.
+  drain_budget_seconds: 600.0
+  drain_max_rows: 50
+  stale_grading_seconds: 900.0
 
 # Admin sessions (P5, PRD v3 §6). ADMIN_PASSWORD_HASH lives in env, never here.
 auth:

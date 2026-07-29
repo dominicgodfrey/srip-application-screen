@@ -215,9 +215,14 @@ class AuthConfig(_Strict):
 
 
 class WorkerConfig(_Strict):
-    """Grading-worker loop knobs (P3)."""
+    """Grading-worker knobs (P3 loop, P11 cron drain)."""
 
     poll_seconds: float = 2.0  # idle sleep between queue polls (stop wakes it immediately)
+    # Cron drain (P11.1/11.2). The budget sits well inside Vercel's 800 s maxDuration;
+    # stale_grading_seconds must exceed the slowest realistic single-row grade.
+    drain_budget_seconds: float = 600.0
+    drain_max_rows: int = 50
+    stale_grading_seconds: float = 900.0
 
 
 class WebhookConfig(_Strict):
@@ -275,6 +280,9 @@ class Secrets(BaseSettings):
     # Admin login (P5): PBKDF2 hash only, never plaintext. Generate:
     #   uv run python -m api.auth '<password>'
     admin_password_hash: str | None = None
+    # Cron drain (P11.1): Vercel sends this as `Authorization: Bearer <CRON_SECRET>` on
+    # scheduled invocations. Unset ⇒ the drain endpoint 503s (fail closed).
+    cron_secret: str | None = None
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:

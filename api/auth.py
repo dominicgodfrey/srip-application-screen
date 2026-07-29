@@ -37,7 +37,8 @@ SESSION_COOKIE = "srip_session"
 # Default-deny allowlist: exact paths or prefixes (trailing "/") open without a session.
 OPEN_PREFIXES: tuple[str, ...] = (
     "/health",
-    "/webhooks/",  # HMAC-verified separately (PRD v3 §2.1)
+    "/webhooks/",  # static-secret verified separately (P10)
+    "/api/cron/",  # bearer-token verified separately (P11.1) — cron has no cookie
     "/login",
     "/logout",
     "/static/",

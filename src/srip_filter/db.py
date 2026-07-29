@@ -19,14 +19,20 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 import asyncpg
 
+logger = logging.getLogger(__name__)
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = _PROJECT_ROOT / "db" / "migrations"
+
+# Arbitrary but stable key for the pg advisory lock that serializes migrations (P11.3).
+_MIGRATION_LOCK_KEY = 3_771_020_301
 
 UpsertResult = Literal["accepted", "unchanged"]
 
@@ -63,30 +69,40 @@ async def apply_migrations(pool: asyncpg.Pool, migrations_dir: Path = MIGRATIONS
 
     Tracks applied filenames in ``schema_migrations`` (created here on first run).
     Returns the filenames applied this call. Idempotent: re-running applies nothing.
+
+    Serverless-safe (P11.3): the whole pass runs under a session-level advisory lock, so
+    concurrent cold starts / drains cannot race the same DDL. A caller that loses the race
+    returns ``[]`` immediately rather than waiting — the winner is doing the work.
     """
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-              filename   TEXT PRIMARY KEY,
-              applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            """
-        )
-        done = {
-            r["filename"] for r in await conn.fetch("SELECT filename FROM schema_migrations")
-        }
-        applied: list[str] = []
-        for path in sorted(migrations_dir.glob("*.sql")):
-            if path.name in done:
-                continue
-            async with conn.transaction():
-                await conn.execute(path.read_text(encoding="utf-8"))
-                await conn.execute(
-                    "INSERT INTO schema_migrations (filename) VALUES ($1)", path.name
+        if not await conn.fetchval("SELECT pg_try_advisory_lock($1)", _MIGRATION_LOCK_KEY):
+            logger.info("migrations: another instance holds the lock; skipping")
+            return []
+        try:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                  filename   TEXT PRIMARY KEY,
+                  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
-            applied.append(path.name)
-        return applied
+                """
+            )
+            done = {
+                r["filename"] for r in await conn.fetch("SELECT filename FROM schema_migrations")
+            }
+            applied: list[str] = []
+            for path in sorted(migrations_dir.glob("*.sql")):
+                if path.name in done:
+                    continue
+                async with conn.transaction():
+                    await conn.execute(path.read_text(encoding="utf-8"))
+                    await conn.execute(
+                        "INSERT INTO schema_migrations (filename) VALUES ($1)", path.name
+                    )
+                applied.append(path.name)
+            return applied
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock($1)", _MIGRATION_LOCK_KEY)
 
 
 # ================================================================================================
@@ -203,6 +219,23 @@ async def claim_next(pool: asyncpg.Pool) -> dict[str, Any] | None:
             row["submission_id"],
         )
         return _to_dict(row)
+
+
+async def reap_stale_claims(pool: asyncpg.Pool, stale_seconds: float) -> int:
+    """Return rows stuck in ``grading`` to ``received``; returns how many (P11.2).
+
+    An always-on worker drained gracefully on shutdown. A serverless invocation killed
+    mid-row cannot — without this, one timeout parks that application in ``grading``
+    forever and no drain ever looks at it again.
+    """
+    result = await pool.execute(
+        f"""
+        UPDATE applications SET status = '{STATUS_RECEIVED}', updated_at = NOW()
+         WHERE status = '{STATUS_GRADING}' AND updated_at < NOW() - $1::interval
+        """,
+        timedelta(seconds=stale_seconds),
+    )
+    return int(result.split()[-1])
 
 
 async def finish_graded(
