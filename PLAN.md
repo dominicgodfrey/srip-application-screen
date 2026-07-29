@@ -8,18 +8,42 @@ on the **`v2-fillout-batch`** branch together with its PLAN.md history. v3 resta
 phase numbering as P0–P8.
 
 ## Current Phase
-**v3.1 re-architecture — planning complete, implementation not started.** P0–P7 (tool
-half) shipped against the *proposed* contract and an always-on host; the 2026-07-26 repo
-audit + 2026-07-27 owner decisions invalidated four built assumptions (contract shape,
-auth scheme, hosting model, bounds source). P9–P13 below replace the old P8.
+**v3.1 re-architecture — in progress. P9 + P10 shipped; P11–P13 remain.** P0–P7 built the
+tool half against a *proposed* contract and an always-on host. The 2026-07-26 repo audit
+and the 2026-07-27/28 owner decisions invalidated four built assumptions; **two of the four
+are now fixed in code** (contract shape → P9, auth scheme → P10) and two remain (hosting
+model → P11–P13, bounds source → resolved by deleting the gate entirely).
+
+**A Neon database now exists and is connected** (2026-07-29). `001_init.sql` is applied and
+therefore **frozen** — further schema changes need `002_*.sql`. The 11 P1 persistence tests
+execute for the first time and pass.
+
+**Suite state:** `uv run pytest -q` → 556 passed, 5 failed. The 5 are
+`tests/api/test_promote.py`, and they are *expected*: see "Known red" below.
 
 ## Active Sub-Task
-**P9 + P10 shipped (44f9d17).** Next is **P11** (serverless port: cron drain, stale-claim
-reaper, migrations out of the lifespan, pooled connection, retire the in-memory
-machinery), then P12 (signed-cookie sessions) and P13.1/13.2 (`vercel.json`, ASGI
-entrypoint, `requirements.txt`) — the two artifacts the partner needs before he can deploy
-anything. Authorship is unblocked end to end; what remains blocked is *verification* (no
-Neon project) and the *pilot* (partner items).
+**Start P11.5 — retire the v2 in-memory machinery** (`JobRegistry`, `sweeper_loop`,
+`/jobs*` routes, the upload screen, and their tests). Pure deletion, and it is *also* the
+fix for the only red in the suite (see "Known red"). Doing it first shrinks the codebase
+before the serverless port rather than porting code we are about to delete.
+
+Then the rest of P11 (cron drain, stale-claim reaper, migrations out of the lifespan,
+pooled connection), P12 (signed-cookie sessions), and P13.1/13.2 (`vercel.json`, ASGI
+entrypoint, `requirements.txt` — the two artifacts the partner needs before he can deploy
+anything).
+
+## Known red — expected, do not "fix" by patching
+`tests/api/test_promote.py` — 5 failures, and they only appear when `DATABASE_URL` is set.
+Bisected: 9 pass with the DB disabled, 5 fail with it enabled. `create_app`'s lifespan now
+auto-creates a pool from `.env` and applies migrations on every app construction
+(`api/main.py:113`), which shifts timing enough that these tests' 200-iteration poll loop
+gives up before grading finishes; the endpoint then correctly answers 409 "results not
+ready". Verified benign: no exception logged, and `llm_cache`/`applications` stay empty
+because these tests never touch the DB. They cover the v2 `/jobs` + CSV-upload machinery,
+which **P11.5 deletes** — the tests go with it. Do not patch the poll loop.
+
+(It is also live evidence for P11.3: migrations running on every app startup is wrong, and
+P11.3 is what moves them behind an advisory lock.)
 
 ---
 
@@ -410,19 +434,30 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
       cohort_name) in the detail panel — currently rendered fields are the v2 set.
 
 ## Owner inputs needed (v3)
-- [ ] **Create the Neon project/database** (separate from the website's) + a dev branch;
-      put `DATABASE_URL` and `DATABASE_URL_TEST` in `.env`. Unblocks executing the P1 db
-      suite and P3 worker integration tests. **Use the pooled (`-pooler`) host** for the
-      Vercel runtime DSN (P11.4).
-- [ ] Generate `ATS_WEBHOOK_SECRET` (share with website team per WEBSITE_ASKS #1) — now a
-      static shared secret, not an HMAC key. A random UUID is fine.
-- [ ] (carried from v2) `OPENAI_API_KEY`; curated BLOCK slur list.
-- [ ] See "Load-bearing decisions still open" above for D1–D3.
+- [x] **Neon project created and connected** (2026-07-29). `DATABASE_URL` +
+      `DATABASE_URL_TEST` in `.env`; `001_init.sql` applied to `public`. **Currently both
+      DSNs point at the same branch** — safe, because the db suite isolates into a
+      throwaway `srip_test_<pid>` schema, but a separate `dev` branch is still the better
+      end state (the branch existed; its compute endpoint was not provisioned, so it had
+      no connection string). **Both use the DIRECT host, not `-pooler`** — see P11.4.
+- [x] `OPENAI_API_KEY` set.
+- [ ] Generate `ATS_WEBHOOK_SECRET` (a random UUID is fine) and send it to the website
+      team — now a static shared secret, not an HMAC key.
+- [ ] Curated BLOCK slur list (carried from v2) — feeds the profanity gate, a rejection
+      path, and is still empty.
+- [ ] `ADMIN_PASSWORD_HASH` — decided the partner generates and holds it
+      (`uv run python -m api.auth '<password>'`); he already holds the OpenAI key, so the
+      secrets-governance tradeoff is accepted.
+- [ ] Optional: provision a compute endpoint on the `dev` Neon branch and point
+      `DATABASE_URL_TEST` at it, restoring defence in depth.
 
 ## How to Verify Completed Work
 - P0: `git show v2-fillout-batch --stat`; docs present; `uv run pytest -q` green.
-- P1: `uv run pytest tests/test_db.py -q` — 11 skipped without `DATABASE_URL_TEST`,
-  11 passed with it. `uv run ruff check .` clean.
+- P1: `uv run pytest tests/test_db.py -q` — **11 passed** against the live Neon branch
+  (skips cleanly to 11 skipped if `DATABASE_URL_TEST` is absent). `uv run ruff check .`
+  clean. Schema check:
+  `SELECT tablename FROM pg_tables WHERE schemaname='public'` →
+  applications · events · llm_cache · schema_migrations.
 - P2: `uv run pytest tests/api/test_webhook.py -q` — 19 passed, no DB needed.
 - P3: `uv run pytest tests/test_worker.py -q` — 7 passed, no DB needed.
 - P4: `uv run pytest tests/test_pipeline_v3.py tests/test_ingest_webhook.py
@@ -488,6 +523,21 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
   already hold all of it in their own DB), and "separate DB, ATS-only credentials" still
   holds. Mitigations if wanted: a separate Vercel project under their team, or their own
   OpenAI key.
+- **2026-07-29 — Neon connected; the db suite's isolation was never real.** Connecting a
+  database immediately exposed a bug that had been latent since P1. The `pool` fixture
+  bound its throwaway schema with asyncpg's `init=`, which runs **once per connection at
+  creation**. asyncpg runs `RESET ALL` when a connection is *released back to the pool*,
+  wiping that `search_path` — so only the very first acquire was isolated and every one
+  after it silently operated on `public`. Symptom: migrations built the real tables in
+  `public` and 16 synthetic rows accumulated there; no `srip_test_*` schema ever held
+  anything. **Fix: `setup=` (runs on every acquire), not `init=`.** Verified directly —
+  search_path holds across three consecutive acquires and migrations land in the throwaway
+  schema. `server_settings={"search_path": ...}` was tried first and does **not** work; it
+  does not survive the reset. Stray rows truncated (all synthetic, `a@example.com` /
+  `su26-cs` — no real data has ever existed). Commit 0bf9821.
+  **Carry-forward:** `001_init.sql` is now applied to a real database and is therefore
+  **frozen** — amending it in place was only defensible while no database had run it. Any
+  further schema change needs `002_*.sql`.
 - **2026-07-28 — LIVE CONTRACT PINNED from the partner repo + the live question config.**
   Read `thinkNeuroWebsite/lib/ats.ts::buildAtsPayload` (the only payload builder — one call
   site, so there is exactly ONE shape) and pulled the live **SP27-CSE** question rows from
