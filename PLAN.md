@@ -26,11 +26,10 @@ the 5 known-red tests along with the machinery they covered; P11–P13 added 16)
 webhook → DB → worker → audit record → dashboard → exports ran on 12 synthetic
 applications under `SRIP_DEV_FAKE_LLM=1`, including the idempotency invariant.
 
-**⚠️ Still not exercised for real: the OpenAI boundary.** Every suite and the Stage 1 E2E
-ran on `FakeLLMClient`, and until 2026-07-29 `.env` held a 16-char placeholder key, so no
-live model call has *ever* been made by this codebase. Pinned model IDs, Structured-Outputs
-schemas, and prompt wiring are unvalidated against the real API. A real key is in now
-(owner's personal, **temporary, strict budget** — pull it before handover).
+**The OpenAI boundary is now exercised for real** (2026-07-29, ~15 calls). Tasks A, B, C, D
+and F all resolved their pinned model IDs, returned Structured Outputs that parsed into the
+pydantic contracts, and produced sane values — see the Notes entry. The key in `.env` is the
+owner's personal one (**temporary, strict budget — pull it before handover**).
 
 ---
 
@@ -41,14 +40,11 @@ P11.6, P12, P13.1–13.2, plus the audit-panel fix). Commits `0c5ab20 · c286868
 0accfd2 · b246978 · 53323f8`. Nothing below is blocked by the profanity list.
 
 ### Do now, in this order
-1. **Stage 2 LLM smoke — ~9 real calls, the last unproven boundary.** Drop
-   `SRIP_DEV_FAKE_LLM`, replay **3** fixtures against the real API. Narrow purpose: confirm
-   the pinned model IDs exist, Structured Outputs parse into the pydantic models, and the
-   prompts don't error. **Not** a quality check. `llm_cache` means a repeat costs nothing.
-   Shipping a system whose OpenAI wiring has never run is a bad trade for a few cents.
-2. **Curated profanity BLOCK list** (owner input) — then the 466-row calibration, which is
+1. **Curated profanity BLOCK list** (owner input) — then the 466-row calibration, which is
    only blocked by this.
-3. **Owner-only handover steps**, then the three asks to Andrew (see below).
+2. **Owner-only handover steps**, then the three asks to Andrew (see below).
+
+*(The Stage 2 LLM smoke is done — 2026-07-29, see the Notes entry.)*
 
 ### Left deliberately undone, with reasons
 - **P13.2 `requirements.txt` — not created.** Vercel's Python runtime accepts
@@ -527,7 +523,7 @@ Ordered by how expensive they are to reverse once P9–P13 start.
 - [x] **Neon project + `DATABASE_URL`/`DATABASE_URL_TEST`** — done 2026-07-29; the P1 db
       suite executes and passes (11).
 - [x] `OPENAI_API_KEY` — real key in as of 2026-07-29 (owner's personal, temporary; see
-      "Owner inputs needed").
+      "Owner inputs needed"). **Live smoke run 2026-07-29: all five enabled tasks work.**
 - [ ] Two **self-generated local** secrets, the only thing standing between here and the
       first real E2E: a throwaway `ATS_WEBHOOK_SECRET` and a local `ADMIN_PASSWORD_HASH`.
       Neither involves the partner.
@@ -646,6 +642,25 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
 
 ## Notes / Decisions Log
 
+- **2026-07-29 — Stage 2 LLM smoke: the OpenAI boundary works, and the cache nearly hid it.**
+  ~15 real calls across three synthetic applications chosen to reach every enabled task.
+  Result: **all five tasks resolved their pinned model IDs, parsed into their pydantic
+  contracts, and returned sane values** — zero `LLM_PARSE_FAILURE`, zero prompt errors.
+  * Task A: weighted-only `4.4/5.0` → normalized **3.52**, `source=llm` (the `force_task_a`
+    route fires as designed).
+  * Task B: hospitalisation explanation at GPA 3.10 → approved, ranked at **33.4** with
+    **zero GPA points** — invariant #4 (never above the gradient bottom) holds live.
+  * Tasks C/D: coursework decomposed, both essays graded, `RANKED 83.9` on the clean row.
+  * Task F: bonus **13.33** from depth 8 / exploration 8 / impact 4, with a rationale that
+    correctly separated real technical depth from lack of external impact — the calibration
+    the owner specified (interest ⇒ low, sustained exploration ⇒ mid, real impact ⇒ high) is
+    behaving.
+  **The trap, and the reason this is a Notes entry:** running this through the normal path
+  would have made **zero** real calls and looked like a pass. `llm_cache` is keyed
+  `(task, sha256(input))` and already held **FakeLLMClient** output under those exact keys
+  from the Stage 1 E2E, so the real client would have been served fake rows. The smoke had to
+  build an `OpenAILLMClient` with **no `cache_backend`**. Anyone re-running a "real" check
+  after a fake run must do the same, or clear the affected `llm_cache` rows.
 - **2026-07-29 (late) — P11–P13.2 shipped; five things worth carrying forward.**
   1. **The Vercel deploy story is simpler than P13 assumed, because the docs moved.** Two
      planned items evaporated on reading the current runtime docs: `pyproject.toml` is a
