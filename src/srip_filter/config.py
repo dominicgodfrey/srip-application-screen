@@ -17,7 +17,20 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+def project_root() -> Path:
+    """Where the repo's data files (config.yaml, db/migrations, resources) live.
+
+    Normally two levels above this file. On a host that *installs* the package the source
+    sits in site-packages instead, so fall back to the process working directory — which
+    is the project base on Vercel. ponytail: a two-branch guess beats a config knob;
+    if a third layout ever shows up, make it an env var then.
+    """
+    here = Path(__file__).resolve().parents[2]
+    return here if (here / "config.yaml").exists() else Path.cwd()
+
+
+_PROJECT_ROOT = project_root()
 DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config.yaml"
 DEFAULT_ENV_PATH = _PROJECT_ROOT / ".env"
 

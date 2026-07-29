@@ -21,15 +21,14 @@ import json
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
 
 from rapidfuzz import fuzz
 
-from ..config import AppConfig, SchoolConfig
+from ..config import AppConfig, SchoolConfig, project_root
 from ..ingest import ApplicantRow
 from ..models import SchoolListName, SchoolMatch
 
-_RESOURCES_DIR = Path(__file__).resolve().parents[3] / "resources"
+_RESOURCES_DIR = project_root() / "resources"
 _SCHOOLS_PATH = _RESOURCES_DIR / "schools.json"
 
 # The two ranked lists in schools.json, in canonical order.

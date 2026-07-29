@@ -27,15 +27,16 @@ from typing import TYPE_CHECKING
 
 from better_profanity import Profanity
 
-from ..config import AppConfig, EssayLengthConfig, GibberishConfig
+from ..config import AppConfig, EssayLengthConfig, GibberishConfig, project_root
 from ..ingest import ApplicantRow
 from ..models import EssayLengthGate, HitGate
 
 if TYPE_CHECKING:  # circular-import guard: ingest_webhook is a pure-mapping consumer
     from ..ingest_webhook import WebhookApplicant
 
-# resources/profanity.txt lives at the project root (this file is src/srip_filter/gates/...).
-DEFAULT_PROFANITY_PATH = Path(__file__).resolve().parents[3] / "resources" / "profanity.txt"
+# resources/profanity.txt lives at the project root (see config.project_root — the source
+# tree and an installed package resolve it differently).
+DEFAULT_PROFANITY_PATH = project_root() / "resources" / "profanity.txt"
 _ALLOW_PREFIX = "ALLOW:"
 
 # PRD §2 word-count rule: tokens are runs of word chars, apostrophes, and hyphens. This is the

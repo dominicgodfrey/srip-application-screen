@@ -26,10 +26,11 @@ from typing import Any, Literal
 
 import asyncpg
 
+from .config import project_root
+
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MIGRATIONS_DIR = _PROJECT_ROOT / "db" / "migrations"
+MIGRATIONS_DIR = project_root() / "db" / "migrations"
 
 # Arbitrary but stable key for the pg advisory lock that serializes migrations (P11.3).
 _MIGRATION_LOCK_KEY = 3_771_020_301

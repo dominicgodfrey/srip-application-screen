@@ -995,21 +995,17 @@ source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },
     { name = "better-profanity" },
+    { name = "fastapi" },
     { name = "httpx" },
+    { name = "jinja2" },
     { name = "openai" },
     { name = "pandas" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pypdf" },
+    { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "rapidfuzz" },
-]
-
-[package.optional-dependencies]
-api = [
-    { name = "fastapi" },
-    { name = "jinja2" },
-    { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1024,20 +1020,19 @@ dev = [
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "better-profanity", specifier = ">=0.7" },
-    { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.111" },
+    { name = "fastapi", specifier = ">=0.111" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "jinja2", marker = "extra == 'api'", specifier = ">=3.1" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "openai", specifier = ">=1.50" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
     { name = "pypdf", specifier = ">=4.2" },
-    { name = "python-multipart", marker = "extra == 'api'", specifier = ">=0.0.9" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pyyaml", specifier = ">=6.0.1" },
     { name = "rapidfuzz", specifier = ">=3.9" },
-    { name = "uvicorn", extras = ["standard"], marker = "extra == 'api'", specifier = ">=0.30" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["api"]
 
 [package.metadata.requires-dev]
 dev = [
