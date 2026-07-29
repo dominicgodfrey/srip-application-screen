@@ -6,7 +6,7 @@
       "runtimeExecutable": "cmd",
       "runtimeArgs": [
         "/c",
-        "set SRIP_DEV_FAKE_LLM=1&&C:\\Users\\dsolg\\.local\\bin\\uv.exe run uvicorn api.main:app --port 8321"
+        "set SRIP_DEV_FAKE_LLM=1&&set SRIP_LOCAL_WORKER=1&&C:\\Users\\dsolg\\.local\\bin\\uv.exe run uvicorn api.main:app --port 8321"
       ],
       "port": 8321,
       "autoPort": false

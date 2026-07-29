@@ -72,6 +72,11 @@ class _RevalidatedStaticFiles(StaticFiles):
 # set this in production — it does not call any model.
 _DEV_FAKE_LLM_ENV = "SRIP_DEV_FAKE_LLM"
 
+# Local dev only (P11.6): start the in-process grading loop. Unset on Vercel, where the
+# per-minute cron drain (POST /api/cron/drain) is the sole driver — a polling loop per
+# serverless instance is constant DB churn for no gain.
+_LOCAL_WORKER_ENV = "SRIP_LOCAL_WORKER"
+
 # Per-tier seat cap as a query param (Phase 11.4): omitted/None = unlimited. Module-level so the
 # stringified annotation (PEP 563) resolves when FastAPI builds the route signature.
 _Capacity = Annotated[int | None, Query(ge=0, description="Seat cap; omit for unlimited.")]
@@ -124,12 +129,16 @@ def create_app(
                 app.state.llm_client = FakeLLMClient(app.state.config, demo_handler)
             else:
                 app.state.llm_client = OpenAILLMClient(app.state.config)
-        # v3 (P4): with a real pool, wire the durable LLM cache and start the grading
-        # worker. `hasattr acquire` guards against test sentinels injected as db_pool.
+        # v3 (P4): with a real pool, wire the durable LLM cache. `hasattr acquire` guards
+        # against test sentinels injected as db_pool.
         worker_stop = asyncio.Event()
         worker_task: asyncio.Task | None = None
-        if app.state.db_pool is not None and hasattr(app.state.db_pool, "acquire"):
+        has_pool = app.state.db_pool is not None and hasattr(app.state.db_pool, "acquire")
+        if has_pool:
             app.state.llm_client.cache_backend = dbmod.PgCacheBackend(app.state.db_pool)
+        # P11.6: the in-process loop is local-dev only. On Vercel every instance would run
+        # its own polling loop; POST /api/cron/drain is the one driver there.
+        if has_pool and os.getenv(_LOCAL_WORKER_ENV) == "1":
             worker_task = asyncio.create_task(
                 run_worker(
                     app.state.db_pool,
