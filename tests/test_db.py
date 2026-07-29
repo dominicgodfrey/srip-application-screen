@@ -51,10 +51,18 @@ def schema_name() -> str:
 
 @pytest.fixture
 async def pool(schema_name: str):
-    """Fresh pool bound to a throwaway schema; migrations applied; dropped on teardown."""
+    """Fresh pool bound to a throwaway schema; migrations applied; dropped on teardown.
+
+    ``setup=`` (per acquire), NOT ``init=`` (once per connection): asyncpg runs ``RESET
+    ALL`` when a connection is released back to the pool, which wipes a search_path set
+    in ``init``. With ``init`` only the very first acquire was isolated and every one
+    after silently operated on ``public`` — which is how a "throwaway schema" suite
+    ended up writing to the real tables. ``server_settings={"search_path": ...}`` does
+    not work here either; it does not survive the reset.
+    """
     import asyncpg
 
-    async def _init(conn: asyncpg.Connection) -> None:
+    async def _bind_schema(conn: asyncpg.Connection) -> None:
         await conn.execute(f"SET search_path TO {schema_name}")
 
     setup = await asyncpg.connect(DSN)
@@ -62,7 +70,7 @@ async def pool(schema_name: str):
     await setup.execute(f"CREATE SCHEMA {schema_name}")
     await setup.close()
 
-    p = await asyncpg.create_pool(DSN, min_size=1, max_size=4, init=_init)
+    p = await asyncpg.create_pool(DSN, min_size=1, max_size=4, setup=_bind_schema)
     await apply_migrations(p)
     try:
         yield p
@@ -80,7 +88,8 @@ def _sid() -> str:
 def _payload(**overrides) -> dict:
     base = {
         "submission_id": "x",
-        "gpa": {"unweighted": "3.8 / 4.0", "weighted": None},
+        "gpa_unweighted": "3.8 / 4.0",
+        "gpa_weighted": None,
         "required_essays": [{"question": "Q1", "answer": "synthetic essay text"}],
     }
     base.update(overrides)
