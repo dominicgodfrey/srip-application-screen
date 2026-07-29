@@ -2,7 +2,7 @@
 
 TestClient cannot run browser JS, so these cover what the server controls — each page renders
 (200, html, expected markers) and the static assets serve with sane content types. The
-interactive flows (sort/what-if) are verified manually per the PLAN.md checklist.
+interactive flows (sort/what-if) are verified manually in a browser.
 Zero LLM spend: nothing is graded here.
 """
 

@@ -13,7 +13,7 @@ the v2→v3 calibration run:
     uv run python scripts/replay.py --csv path/to/export.csv --dry-run
 
 Signing matches `api/webhook_auth.py` exactly (same module — the single source of the
-rule), so a replayed POST is indistinguishable from the website's once WEBSITE_ASKS #1
+rule), so a replayed POST is indistinguishable from the website's once request signing
 lands. CSV rows are converted to the PRD v3 §2.2 PROPOSED essays-mode contract;
 Fillout's non-UUID submission ids are mapped deterministically via uuid5 so re-replays
 hit the same rows (idempotency exercises for free).
@@ -68,8 +68,9 @@ def _answers(pairs: dict[str, str | None]) -> list[dict]:
     ]
 
 
-# The partner stamps submitted_at in U.S. Pacific with an offset, not UTC "Z" (WEBSITE_ASKS
-# repo audit 2026-07-26). Replays carry a real one so that parse path is actually exercised.
+# The partner stamps submitted_at in U.S. Pacific with an offset, not UTC "Z" (verified
+# verified against their dispatcher). Replays carry a real offset so that parse path is
+# actually exercised.
 #
 # It MUST be deterministic, not wall-clock: `content_hash` covers the whole payload, so a
 # timestamp that moves between runs changes payload_hash, which re-grades every row on a

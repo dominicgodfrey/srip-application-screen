@@ -3,12 +3,17 @@
 .env.*
 !.env.example
 
+# --- Internal working notes — kept locally, deliberately not published ---
+# Planning, owner to-do lists, and the partner-coordination log. They carry candid
+# assessments and correspondence detail that has no place in a repo other people read.
+PLAN.md
+openissue.md
+WEBSITE_ASKS.md
+
 # --- Applicant data & generated results (PII) — never commit ---
 data/
 *.csv
 !tests/**/*.csv
-# The demo fixture is synthetic (no real applicant content) — the one committed CSV exception.
-!resources/demo/sample_applications.csv
 decisions.jsonl
 summary.json
 

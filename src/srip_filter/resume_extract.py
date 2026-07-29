@@ -5,7 +5,7 @@ download layer (:mod:`srip_filter.resume_fetch`) and Task E. Mirrors the fetch l
 bonus-only discipline: :func:`extract_resume_text` **never raises** — every failure becomes a
 typed reason the Stage 6 aggregator turns into a 0 bonus plus an audit note, never a block.
 
-Design points (PLAN.md Phase 12):
+Design points:
 
 * ``pypdf`` over the PRD's ``pdfplumber`` — a much lighter dependency tree for text-only
   extraction on small hosts (documented deviation).

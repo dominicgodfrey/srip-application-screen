@@ -141,25 +141,23 @@ class SchoolConfig(_Strict):
 
 
 class ResumeConfig(_Strict):
-    """Stage 6 resume bonus (Phase 12, PRD §7.2 — in scope).
+    """Stage 6 resume bonus (PRD §7.2).
 
     ``bonus_max`` is the kill switch: at 0 the stage performs **zero fetches and zero LLM
-    calls** (exact stub behavior). The download knobs implement the hosting design rules
-    (PLAN.md Phase 12): peak transient memory = ``download_concurrency × max_download_bytes``,
-    and ``allowed_url_hosts`` is the https-only SSRF allowlist — resume URLs arrive in an
-    uploaded CSV, so only pinned hosts are ever fetched (empty list = nothing fetchable).
-    The ``weight_*`` knobs price the Task E signals deterministically — the model counts and
-    classifies, config prices (the Task C pattern).
+    calls**. Peak transient memory is ``download_concurrency × max_download_bytes``.
+    ``allowed_url_hosts`` is the https-only SSRF allowlist — only pinned hosts are ever
+    fetched (empty list = nothing fetchable). The ``weight_*`` knobs price the Task E signals
+    deterministically: the model counts and classifies, config prices (the Task C pattern).
     """
 
-    # v3: 0 = shipping default until the engine decision (WEBSITE_ASKS #11); 25 once
-    # decided (SCORING.md). At 0 the stage performs zero fetches and zero LLM calls.
+    # 0 = shipping default (zero fetches, zero LLM calls); 25 once the in-house rubric is
+    # calibrated post-pilot (SCORING.md).
     bonus_max: float = 0.0
     max_download_bytes: int = 10_485_760  # 10 MiB streaming cap per resume; abort above this
     download_timeout_s: float = 20.0
     download_concurrency: int = 4  # own semaphore, separate from the LLM one
     allowed_url_hosts: list[str] = Field(
-        # The Fillout S3 bucket host observed in the real export (openissue #5).
+        # Frozen v2 value (the Fillout S3 bucket); re-pin to the R2 host before enabling.
         default_factory=lambda: ["prod-fillout-oregon-s3.s3.us-west-2.amazonaws.com"]
     )
     max_text_chars: int = 15_000  # extracted-text cap; bounds Task E token spend

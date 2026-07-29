@@ -103,7 +103,7 @@ def length_gate(text: str, cfg: EssayLengthConfig) -> LengthResult:
 # CHARS_MAPPING). The matcher = better-profanity's DEFAULT list + our curated BLOCK terms − our
 # medical/anatomical ALLOW terms, so clinical vocabulary in a good-faith extenuating-circumstances
 # explanation never trips the gate. The curated lists currently live as an inert placeholder in
-# resources/profanity.txt (openissue.md #3); until filled, the gate behaves as the default list.
+# resources/profanity.txt; until it is filled, the gate behaves as the default list.
 
 
 @dataclass(frozen=True)

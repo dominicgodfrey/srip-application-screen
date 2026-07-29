@@ -27,16 +27,16 @@ def test_defaults_match_prd() -> None:
     assert cfg.school.bonus_us_top20 == 20.0
     assert cfg.school.bonus_intl_top50 == 16.0
     assert cfg.school.fuzzy_match_threshold == 88
-    assert cfg.resume.bonus_max == 0.0  # v3: disabled until the engine decision (WEBSITE_ASKS #11)
+    assert cfg.resume.bonus_max == 0.0  # v3: stage disabled until calibrated post-pilot
 
 
 def test_resume_config_defaults() -> None:
-    """Phase 12.1: the Stage-6 download/extraction/pricing knobs (PLAN.md Phase 12)."""
+    """The Stage-6 download/extraction/pricing knobs."""
     cfg = AppConfig()
     assert cfg.resume.max_download_bytes == 10_485_760
     assert cfg.resume.download_timeout_s == 20.0
     assert cfg.resume.download_concurrency == 4
-    # SSRF allowlist: the pinned Fillout S3 bucket host (openissue #5), https-only.
+    # SSRF allowlist: the pinned host, https-only.
     assert cfg.resume.allowed_url_hosts == ["prod-fillout-oregon-s3.s3.us-west-2.amazonaws.com"]
     assert cfg.resume.max_text_chars == 15_000
     # Signal pricing is config-owned (the model never prices) and never negative.

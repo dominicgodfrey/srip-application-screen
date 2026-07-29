@@ -1,28 +1,28 @@
 # PRD v3 — SRIP ATS: Continuous Webhook-Receiver Application Filter (CS Track)
 
-**Owner:** Dominic
-**Consumer of this doc:** Claude Code (implementation agent)
+**Consumer of this doc:** the implementation agent
 **Supersedes:** `SRIP_Application_Filter_PRD.md` (v2, Fillout CSV batch — frozen on the
 `v2-fillout-batch` branch). Where this document is silent, v2 semantics carry over;
 where they conflict, v3 wins.
 **Approved:** owner grill session, 2026-07-04.
 
-> ### ⚠️ Partially superseded by v3.1 (2026-07-26 / 2026-07-27)
-> This document is still authoritative for **scoring, gates, pipeline order, ranking,
-> retention, and the audit record**. It is **out of date** wherever it describes the
-> transport, auth, hosting, or the payload shape — the partner's live implementation and
-> two owner decisions reversed those. **PLAN.md → "Phase Map (v3.1)" wins over this file**
-> in the sections listed below; read it before implementing any of them.
+> ### ⚠️ Corrections layer — read this before implementing the transport, auth, or hosting
+> This document is authoritative for **scoring, gates, pipeline order, ranking, retention,
+> and the audit record**, and those sections are built exactly as written. It is **out of
+> date** wherever it describes the transport, auth, hosting, or payload shape: it was written
+> against a *proposed* contract and an always-on host, and both changed before launch. **The
+> table below is the built reality and wins over the body text.**
 >
-> | Section | Says | Actually |
+> | Section | Says | Actually built |
 > |---|---|---|
-> | §1 diagram, §2.1 | Always-on host, no serverless | **Vercel serverless** (partner's project); worker → per-minute cron drain over the same Postgres queue |
-> | §2.1, §8 | HMAC-SHA256 (`X-ATS-Timestamp`/`X-ATS-Signature`), ±300 s replay window | **Static `X-ATS-Secret` header.** HMAC deferred as pre-production hardening |
-> | §2.1 | Website aborts at 15 s | Their dispatcher allows **60 s** (`AbortSignal.timeout(60_000)`) + 3 retries |
-> | §2.2, §2.3 | `ats_mode`-discriminated essays/resume payloads | **One combined payload** + `ats_run: ("essays"\|"resume"\|"finaid")[]` selector; extra fields incl. `all_answers[]`, `gpa_unweighted`/`gpa_weighted`, `tier_*_choice`, `detected_sub_track` |
+> | §1 diagram, §2.1 | Always-on host, no serverless | **Vercel serverless**, in the partner team's project and managed by them. The grading worker is a per-minute cron drain (`POST /api/cron/drain`) over the same Postgres queue, with a stale-claim reaper; migrations run there under an advisory lock, not at startup |
+> | §2.1, §8 | HMAC-SHA256 (`X-ATS-Timestamp`/`X-ATS-Signature`), ±300 s replay window | **Static `X-ATS-Secret` header**, constant-time compared, current+previous rotation, fail-closed when unset. HMAC is deferred pre-production hardening; `api/webhook_auth.py` is the seam |
+> | §2.1 | Website aborts at 15 s | Their dispatcher allows **60 s** plus retries. The fast-ACK discipline is unchanged regardless |
+> | §2.2, §2.3 | `ats_mode`-discriminated essays/resume payloads | **One combined payload** carrying every sector + an `ats_run: ("essays"\|"resume"\|"finaid")[]` selector. Extra fields: `all_answers[]` (the only place `field_key` appears), `gpa_unweighted`/`gpa_weighted` as separate `"value/max"` strings, `tier_*_choice`, `detected_sub_track`. A delivery whose `ats_run` omits `"essays"` is stored in a terminal `stored` status and never graded |
+> | §2.3 | Per-mode content hashes | **One `payload` column + one `payload_hash`**; the per-mode split existed only for "resume may arrive before essays", which the combined payload kills |
 > | §0, §11 | finaid out of scope (422) | **Stored, never scored** — accepted and persisted, no gate or subscore |
-> | §4 Stage 1 | Word bounds from payload `min_words`/`max_words` | Owner-maintained in `config.yaml`; REJECTED-on-violation is under review (PLAN.md decision **D1**) |
-> | §6 | Admin session auth | Unchanged in intent, but session state moves off-process (PLAN.md **D2**) |
+> | §4 Stage 1 | Word bounds from payload `min_words`/`max_words` | **The length gate is deleted.** The site 400s violations at submit and sends no bounds, so a config-sourced check could only fire on a stale local config |
+> | §6 | Server-side admin sessions | **Stateless HMAC-signed cookies** keyed on `ADMIN_PASSWORD_HASH` (no shared store; changing the password revokes every session), and the login throttle counts `events` rows so it holds across instances |
 >
 > Everything not in this table — §4 stages 2–8, §5 LLM tasks, §7 ranking, §9 retention,
 > §10 invariants — carries over unchanged.
@@ -119,7 +119,7 @@ Discriminated by `ats_mode`:
   ⇒ 200 `{ok: true}`, **no row created**. Unsigned ⇒ 401 (that *is* the connectivity
   answer).
 - **`essays` mode** — the primary application record. Expected fields (pinned against
-  the PROPOSED contract; final field list = website-team ask list, `WEBSITE_ASKS.md`):
+  the PROPOSED contract — see the corrections banner for the live shape):
   `submission_id`, `user_email`, `student_name`, `cohort_name`, `cohort_display_name`,
   `submitted_at`, `ed`, `is_finaid`, `ats_mode`,
   `gpa: {unweighted, weighted|null}` (structured — ask #3),
@@ -193,9 +193,9 @@ Stage-by-stage deltas from v2:
   rationale}` — deterministic config-priced math maps signals to 0–20 (model judges,
   config prices — the Task C pattern). `on_topic=false` or `gibberish=true` ⇒ 0 bonus.
   Absent essay ⇒ 0, no LLM call. Profanity in this essay was already a Stage-1 reject.
-- **Stage 6 resume:** engine **decided in-house** (owner, 2026-07-27 — `WEBSITE_ASKS.md`
-  #11; HackerRank hiring-agent rejected: black box, third-party agent framework in a
-  minors'-PII path, bypasses the fetch-and-discard guardrails). Task E extracts signals,
+- **Stage 6 resume:** engine **decided in-house** (owner, 2026-07-27; a third-party hiring
+  agent was rejected — black box, an agent framework in a minors'-PII path, and it bypasses
+  the fetch-and-discard guardrails). Task E extracts signals,
   `config.yaml` prices them — the Task C/F pattern. The stage is a
   seam: `payload → {score_0_25, signals, audit_notes}`. Ships with
   `resume.bonus_max: 0` (zero fetches, zero tokens). When enabled: fetch from the R2
@@ -263,7 +263,7 @@ gpa_points → essay total → submission_id; rank 1..N assigned at read time (a
 a new application can shift ranks until the cycle closes). No acceptance cutoff — the
 ranked list is the deliverable; the cohort what-if tool simulates capacities.
 Acceptance/payment/onboarding live on the website side; results move by export handoff
-until the flow-back discussion (`WEBSITE_ASKS.md` #9) says otherwise.
+until a results flow-back API is agreed with the website team (not planned for v3).
 
 ---
 
@@ -281,7 +281,7 @@ until the flow-back discussion (`WEBSITE_ASKS.md` #9) says otherwise.
 
 ## 9. Data retention
 
-Design supports (final policy pending `WEBSITE_ASKS.md` #13):
+Design supports (final policy still to be settled with the programme owner):
 
 - **Per-submission delete** — hard delete + tombstone.
 - **Close-cycle** — admin action: export final artifacts → typed confirmation → delete
@@ -314,6 +314,9 @@ replay tool covers dev needs).
 
 ## 12. External dependencies
 
-Everything the website team must change/answer lives in **`WEBSITE_ASKS.md`** (asks
-1–7, discussions 8–14). Build against the §2.2 proposed contract with fixtures until
-asks 2/3/5/6 are confirmed; freeze the contract at P2.
+The contract is frozen against the live question config, so nothing here blocks the code.
+Two items remain owned by the website team and are tracked outside this repo: setting
+`ATS_WEBHOOK_SECRET` in their environment (their dispatcher omits the auth header entirely
+when it is unset, so every delivery would 401), and supplying the exact R2 host if the
+resume stage is ever enabled. HMAC request signing is the agreed pre-production hardening
+step.

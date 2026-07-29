@@ -74,21 +74,15 @@ school:
   bonus_intl_top50: 16
   fuzzy_match_threshold: 88
 
-# Resume bonus (Stage 6, Phase 12) — additive only, never subtracts. bonus_max is the kill
-# switch: setting it to 0 disables the stage entirely (zero fetches, zero LLM calls — exact
-# pre-Phase-12 stub behavior); 10 is the live value (PRD §10.1 "120 once resume is built").
-# allowed_url_hosts is the https-only SSRF allowlist — resume URLs come from an uploaded CSV,
-# so only these pinned hosts are ever fetched (openissue #5: the Fillout S3 bucket).
-# The weight_* knobs price the Task E signal counts deterministically (model counts, config
-# prices); the sum is capped at bonus_max.
+# Resume bonus (Stage 6) — additive only, never subtracts. In-house rubric: Task E extracts
+# signals, the weight_* knobs price them (model counts, config prices), sum capped at
+# bonus_max. allowed_url_hosts is the https-only SSRF allowlist.
+#
+# bonus_max: 0 is the kill switch AND the shipping default — zero fetches, zero tokens.
+# Two things must land before raising it to 25: re-pin allowed_url_hosts to the website's R2
+# host (the entry below is the frozen v2 Fillout value), and re-price the weights for the
+# 0-25 scale (they were tuned for v2's 10).
 resume:
-  # v3: engine DECIDED in-house (owner, 2026-07-27, WEBSITE_ASKS #11) — Task E extracts,
-  # the weight_* knobs below price it. 0 is the kill switch and the shipping default (zero
-  # fetches, zero tokens); 25 is the value once the rubric is calibrated post-pilot
-  # (SCORING.md). Two things must land before flipping this off 0: the allowlist must be
-  # re-pinned to the website's R2 host (ask #4 — the Fillout S3 entry below is the frozen
-  # v2 value), and the weights must be re-priced for the 0-25 scale (they were tuned for
-  # v2's 10).
   bonus_max: 0
   max_download_bytes: 10485760   # 10 MiB streaming cap per resume; abort above this
   download_timeout_s: 20.0

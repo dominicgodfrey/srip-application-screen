@@ -11,7 +11,7 @@ becomes a typed reason in :class:`FetchResult` that the Stage 6 aggregator turns
 plus an audit note, never a block. Transient failures (timeout / network / 5xx) are retried
 once; 4xx are not (not transient).
 
-Memory rule (PLAN.md Phase 12 hosting analysis): the fetcher holds its **own semaphore**
+Memory rule: the fetcher holds its **own semaphore**
 (``download_concurrency``, separate from the LLM one), so peak transient memory is
 ``download_concurrency × max_download_bytes`` regardless of batch size. The caller must
 fetch → extract → discard per applicant; resume bytes never land on an audit record.

@@ -14,7 +14,7 @@ omits the header entirely when its env var is unset, so an unset secret on eithe
 looks like a healthy deploy that authenticates nothing — rejecting is the safe read.
 
 HMAC (timestamp + body binding + replay window) was the v3 design and is the intended
-pre-production hardening (WEBSITE_ASKS #1); it lives in git history and this module is the
+pre-production hardening; it lives in git history and this module is the
 seam to restore it. A static bearer secret over HTTPS is replayable and does not bind the
 body — accepted deliberately, revisit before go-live.
 

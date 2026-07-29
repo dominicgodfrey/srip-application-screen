@@ -10,7 +10,7 @@ Two families of models:
   to ``decisions.jsonl``. These carry convenience defaults.
 
 Deviation note: ``TaskDOutput.is_gibberish`` is an addition to the PRD §8.3 schema — gibberish
-detection was moved into the LLM as a Task-D backstop (see PLAN.md decisions log).
+detection was moved into the LLM as a Task-D backstop.
 """
 
 from __future__ import annotations
@@ -479,7 +479,7 @@ class AnswerEntry(_Payload):
 
 class EssayEntry(_Payload):
     """One essay as delivered. The site sends ``question`` + ``answer`` only — no
-    ``field_key`` and no word bounds (WEBSITE_ASKS #5 closed; bounds are server-enforced
+    ``field_key`` and no word bounds (bounds are server-enforced
     at submit, so the ATS does not re-check them)."""
 
     question: str = ""

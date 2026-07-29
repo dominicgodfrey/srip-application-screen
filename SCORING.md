@@ -23,7 +23,7 @@ Outcomes: `REJECTED` (failed a hard gate) · `RANKED` (scored, ranked per cohort
 | Essay 3 (technical, optional) | 0–20 | bonus | Task F: relevance to its prompt, technical depth/difficulty, real-world impact. Surface-level interest scores low; interest → side project → real impact scores high. Absent ⇒ 0 (neutral). Gibberish/off-topic/over-max ⇒ 0 bonus, never a rejection. |
 | Relevant coursework | 0–15 | bonus | Task C decomposition; CS > Math > Data, others ignored; flat weight × unit per counting course; explicit grade < 80% excludes a course. |
 | School | 0–20 | bonus | Fuzzy match vs curated lists: Top-20 US = 20, Top-50 Intl = 16. "High School"/unmatched ⇒ 0. |
-| Resume | 0–25 | bonus | **In-house rubric** (owner, 2026-07-27 — hiring-agent rejected, WEBSITE_ASKS #11): Task E extracts signals, `config.yaml` prices them, same shape as Tasks C/F. Ships disabled (`resume.bonus_max: 0`) until calibrated post-pilot. Any failure ⇒ 0 + audit note, never a block. |
+| Resume | 0–25 | bonus | **In-house rubric** (owner, 2026-07-27 — a third-party hiring agent was rejected): Task E extracts signals, `config.yaml` prices them, same shape as Tasks C/F. Ships disabled (`resume.bonus_max: 0`) until calibrated post-pilot. Any failure ⇒ 0 + audit note, never a block. |
 
 **Required core = 70** (GPA 40 + essays 30). **Bonuses = up to 80.** Theoretical max **150**
 (125 while resume is disabled).
@@ -33,17 +33,12 @@ Outcomes: `REJECTED` (failed a hard gate) · `RANKED` (scored, ranked per cohort
 1. **Profanity in ANY essay** — including the optional Essay 3 (good-faith violation).
 2. **Gibberish in a required essay** (deterministic heuristics, ≥2 signals; ESL-safe) —
    Task D backstops this. Gibberish in Essay 3 ⇒ 0 bonus only.
-3. **Word bounds, strict to the exact per-essay `min_words`/`max_words`** — ⚠️ **v3.1: the
-   source changed and the verdict is under review.** The partner does not send per-essay
-   bounds, so they are now owner-maintained in `config.yaml` (decision 2026-07-26). That
-   removes the justification for a hard REJECT below: it held *because* the site validated
-   at submit and sent us its own bounds. With bounds from our config, a violation may just
-   mean our config is stale — see **PLAN.md decision D1** (proposed: NEEDS_REVIEW, not
-   REJECTED, when bounds are config-sourced). The text below describes the as-built v3
-   behavior. Originally: from the webhook
-   payload (the website validates required essays at submit, so a violation here signals
-   tampering or contract drift — audited as such). Essay 3 over-max ⇒ bonus voided, not
-   rejected (the site does not server-validate optional essays).
+3. ~~**Word bounds**~~ — **the length gate was deleted** (owner, 2026-07-28). The site
+   server-validates essay length at submit and 400s any violation, and it does not send us
+   its bounds, so a config-sourced check could only ever fire on a stale local config —
+   i.e. produce false positives on good-faith applicants. No word-count rule rejects anyone.
+   Essay 3 length is likewise not gated; an over-long optional essay still just scores on
+   its merits.
 4. **GPA gate:** normalized GPA < 2.0 ⇒ REJECTED regardless of explanation (hard floor).
    GPA < 3.3 with no explanation ⇒ REJECTED; with an explanation ⇒ Task B judges
    (severity-scaled bar) — `rank` or `reject`. Blank GPA + blank explanation ⇒ REJECTED

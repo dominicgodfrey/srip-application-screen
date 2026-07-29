@@ -12,7 +12,7 @@ and the §8.4 bonus math stays fully testable with zero API spend:
   * 5.2 pure bonus math — :func:`coursework_bonus`  (pure, no LLM)
   * 5.3 Stage 5 aggregator — :func:`score_coursework` (LLM)
 
-Two deliberate decisions (see PLAN.md Notes):
+Two deliberate decisions:
 
 * **Weights/counts are recomputed from config**, never trusted from the model — the model
   classifies ``category`` and normalizes ``grade_pct``; the system owns the tunable weights and

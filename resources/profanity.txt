@@ -14,7 +14,7 @@
 #
 # ============================ BLOCK  (slurs / profanity) =========================
 # TODO(owner): primary concern is slurs. Add curated terms below, one per line.
-# (Still awaiting the owner's curated list — see openissue.md #3. The default
+# (Still awaiting the owner's curated BLOCK list. The default
 # better-profanity list covers common profanity/slurs in the meantime.)
 
 
