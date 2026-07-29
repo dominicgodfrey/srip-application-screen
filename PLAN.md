@@ -8,18 +8,19 @@ on the **`v2-fillout-batch`** branch together with its PLAN.md history. v3 resta
 phase numbering as P0–P8.
 
 ## Current Phase
-**v3.1 re-architecture — in progress. P9 + P10 shipped; P11–P13 remain.** P0–P7 built the
-tool half against a *proposed* contract and an always-on host. The 2026-07-26 repo audit
-and the 2026-07-27/28 owner decisions invalidated four built assumptions; **two of the four
-are now fixed in code** (contract shape → P9, auth scheme → P10) and two remain (hosting
-model → P11–P13, bounds source → resolved by deleting the gate entirely).
+**v3.1 re-architecture — P9–P13.2 shipped. Only the deploy itself (P13.3–13.5) is left,
+and it needs Andrew.** All four invalidated assumptions are now fixed in code: contract
+shape (P9), auth scheme (P10), hosting model (P11–P13.2), bounds source (gate deleted).
+
+The code is deploy-ready. What remains before the pilot is (a) the ~9-call live OpenAI
+smoke, (b) the profanity BLOCK list, (c) owner-only secret generation, (d) Andrew.
 
 **A Neon database now exists and is connected** (2026-07-29). `001_init.sql` is applied and
 therefore **frozen** — further schema changes need `002_*.sql`. The 11 P1 persistence tests
 execute for the first time and pass.
 
-**Suite state:** `uv run pytest -q` → **518 passed, 0 failed.** P11.5 deleted the 5
-known-red tests along with the machinery they covered; the suite is fully green.
+**Suite state:** `uv run pytest -q` → **534 passed, 0 failed.** Fully green (P11.5 deleted
+the 5 known-red tests along with the machinery they covered; P11–P13 added 16).
 
 **Stage 1 E2E is DONE** (2026-07-29, zero tokens — see the Notes log). The full path
 webhook → DB → worker → audit record → dashboard → exports ran on 12 synthetic
@@ -33,41 +34,33 @@ schemas, and prompt wiring are unvalidated against the real API. A real key is i
 
 ---
 
-# ▶ START HERE (handoff, 2026-07-29)
+# ▶ START HERE (handoff, updated 2026-07-29 late)
 
-**Owner's stated goal: finish as much as possible locally BEFORE contacting Andrew.**
-Everything in "Do now" below is unblocked — no partner input, no owner decision, and
-**nothing here is blocked by the profanity list** (see "What the profanity list blocks").
+**The whole "Do now" list from the previous handoff is done and pushed** (P11.1–11.4,
+P11.6, P12, P13.1–13.2, plus the audit-panel fix). Commits `0c5ab20 · c286868 · 55337cb ·
+0accfd2 · b246978 · 53323f8`. Nothing below is blocked by the profanity list.
 
 ### Do now, in this order
-1. **P11.3 — migrations out of the lifespan.** The one remaining *defect* rather than a
-   port: `create_app`'s lifespan applies migrations on every app construction, wrong on one
-   host and unsafe across concurrent cold starts. Move behind `pg_try_advisory_lock` +
-   a guarded `POST /api/admin/migrate`.
-2. **P11.6 — gate `run_worker` behind `SRIP_LOCAL_WORKER=1`.** Today it starts whenever a
-   pool exists. On Vercel that is a polling loop per instance. `SKIP LOCKED` keeps it
-   *correct*, but it is constant DB churn and unbounded LLM concurrency. Do it before 11.1
-   so the drain is the only driver.
-3. **P11.2 — stale-claim reaper**, then **P11.1 — cron drain** (reaper first so the drain
-   ships with it, not after).
-4. **P11.4 — pooled endpoint.** `.env` still points at Neon's **direct** host; needs
-   `-pooler` + `statement_cache_size=0` (asyncpg vs PgBouncer transaction mode).
-5. **P12 — signed-cookie sessions** (D2, already decided; P12.1 as written).
-6. **P13.1 `vercel.json` + ASGI entrypoint, P13.2 `requirements.txt`** — neither exists;
-   they are literally what Andrew needs in hand.
+1. **Stage 2 LLM smoke — ~9 real calls, the last unproven boundary.** Drop
+   `SRIP_DEV_FAKE_LLM`, replay **3** fixtures against the real API. Narrow purpose: confirm
+   the pinned model IDs exist, Structured Outputs parse into the pydantic models, and the
+   prompts don't error. **Not** a quality check. `llm_cache` means a repeat costs nothing.
+   Shipping a system whose OpenAI wiring has never run is a bad trade for a few cents.
+2. **Curated profanity BLOCK list** (owner input) — then the 466-row calibration, which is
+   only blocked by this.
+3. **Owner-only handover steps**, then the three asks to Andrew (see below).
 
-### Two small items to fold in anywhere
-- **Stage 2 LLM smoke, ~9 real calls.** Drop `SRIP_DEV_FAKE_LLM`, replay **3** fixtures.
-  Purpose is narrow: confirm the pinned model IDs exist, Structured Outputs parse into the
-  pydantic models, and the prompts don't error. **Not** a quality check. Do it before
-  handover — shipping a system whose OpenAI wiring never ran is a bad trade for a few cents.
-- **Audit panel omits `technical_essay_bonus`** (found 2026-07-29). `api/static/js/audit.js`
-  renders GPA / essays / coursework / school / resume but not Task F, which is live and
-  worth 0–20. It renders "Resume bonus" (permanently 0) while hiding a real one, so the
-  staff-facing breakdown will not add up to `final_score` whenever the optional essay was
-  written. "Every subscore explainable" is a stated principle — fix before handover.
-  (This is the standing P6 leftover; `international` / `cohort_name` / `finaid` are missing
-  from the panel too, but Task F is the one that breaks the arithmetic.)
+### Left deliberately undone, with reasons
+- **P13.2 `requirements.txt` — not created.** Vercel's Python runtime accepts
+  `pyproject.toml` (docs verified 2026-07-29), so a second generated manifest would only
+  drift. The api extra was folded into the main dependency list instead — Vercel installs
+  only default dependencies, so an extra would have deployed with no web framework.
+- **P13.5 post-ACK grading kick** — still deliberately out of v1.
+- **Finaid block in the audit panel** — the record has no finaid fields to render; it lives
+  in `payload`, so surfacing it needs an API change, not a JS one. Task F was the item that
+  broke the arithmetic and it is fixed.
+- **A live Vercel deploy** cannot be verified from here at all; the whole path was proven
+  against the real Neon DB locally instead (see the Notes entry).
 
 ### What the profanity list blocks
 Only **the 466-row calibration run** — outcomes shift under a changed gate, so calibrating
@@ -80,9 +73,16 @@ schema, no tests. Treat it as a parallel track.
 Owner-only steps first — **generate a REAL `ATS_WEBHOOK_SECRET`** (the one in `.env` is a
 local throwaway that leaked into a chat transcript), and **remove the owner's personal
 `OPENAI_API_KEY`**, deciding whose key production uses. Andrew generates and holds
-`ADMIN_PASSWORD_HASH`. Re-read the secrets-governance note in the Notes log before sending:
-deployed in his Vercel project, his team can read our env vars and function logs.
-Then send the three asks in "Partner (Andrew)" below.
+`ADMIN_PASSWORD_HASH` (note: it now doubles as the session-cookie signing key, so changing
+it logs every staff session out — that is the intended revocation lever, P12.1). A
+`CRON_SECRET` is new and also needed. Re-read the secrets-governance note in the Notes log
+before sending: deployed in his Vercel project, his team can read our env vars and function
+logs. The env-var table he needs is in `README.md` → Deployment. Then send the three asks in
+"Partner (Andrew)" below.
+
+**Also rotate, because this session printed them into a transcript:** the Neon
+`neondb_owner` password (both DSNs in `.env`) and the owner's personal `OPENAI_API_KEY`. The
+webhook secret was already a known-leaked throwaway.
 
 ---
 
@@ -247,7 +247,8 @@ the state that port breaks, P13 the deploy.
          `test_unsigned_tampered_stale_all_401_and_touch_nothing` no longer apply — replace
          with missing/wrong-secret cases, keeping the "touches nothing" assertions.
 
-- **P11 — Serverless port (Vercel)**
+- **P11 — Serverless port (Vercel)** ✔ shipped 2026-07-29 (0c5ab20, c286868, 55337cb) —
+        sub-item text below is the as-designed spec; see Completed for what landed.
   - 11.1 **Driver: cron drain.** New `api/cron.py` → `POST /api/cron/drain`, authorized by
          `Authorization: Bearer $CRON_SECRET` (Vercel sets this on cron invocations);
          path added to `OPEN_PREFIXES` and self-guarded like the webhook. Loops the
@@ -278,7 +279,7 @@ the state that port breaks, P13 the deploy.
          loop, and 2 000 applications spread over ~40 one-minute drains. Verify the
          OpenAI client's 429/backoff behavior before the pilot.
 
-- **P12 — Session state off the single process**
+- **P12 — Session state off the single process** ✔ shipped 2026-07-29 (0accfd2)
   - 12.1 **Recommended: stateless HMAC-signed session cookies.** Cookie =
          `base64(payload).hmac`, payload `{exp, v}`, signed with the existing session-key
          secret; verification is a constant-time HMAC + expiry check. Keeps the
@@ -296,7 +297,8 @@ the state that port breaks, P13 the deploy.
          replaced by sign/verify/expiry/tamper vectors; the nine TestClient login-flow
          tests should survive unchanged.
 
-- **P13 — Vercel deploy + pilot ladder** *(replaces old P8)*
+- **P13 — Vercel deploy + pilot ladder** *(replaces old P8)* — 13.1 ✔ shipped (b246978),
+        13.2 ✔ resolved by *not* adding a manifest, 13.3–13.5 need Andrew
   - 13.1 Entrypoint + `vercel.json`: ASGI `app` at a Vercel-discoverable path, a rewrite
          sending all routes to it, `functions.maxDuration: 800`, and
          `crons: [{path: "/api/cron/drain", schedule: "* * * * *"}]`.
@@ -440,8 +442,50 @@ close-cycle · flow-back (#9) → post-v3.
       `test_unconfigured_hash_fails_closed`, which depended on an empty ambient `.env`.
       See the Notes log for the re-billing trap this avoided.
 
+- [x] **P11.6 — in-process worker gated** (2026-07-29, 0c5ab20). `run_worker` starts only
+      under `SRIP_LOCAL_WORKER=1`; the durable `llm_cache` backend stays wired
+      unconditionally. `.claude/launch.json` sets the flag for the local demo server.
+
+- [x] **P11.1–11.3 — cron drain, reaper, migrations relocated** (2026-07-29, c286868).
+      `api/cron.py` → `POST /api/cron/drain`: bearer `CRON_SECRET` (constant-time,
+      fail-closed on unset), then migrate → reap → `process_one` under
+      `worker.drain_budget_seconds` / `drain_max_rows`. Drives the **unmodified**
+      `process_one`, so invariant #9 and the SKIP LOCKED claim are the already-tested ones.
+      `db.reap_stale_claims` requeues rows orphaned in `grading` past
+      `worker.stale_grading_seconds`. `apply_migrations` now runs under
+      `pg_try_advisory_lock` (a loser returns `[]`, never waits) and is **out of the app
+      lifespan**; `POST /api/admin/migrate` (session-gated) is the manual first run.
+      `/api/cron/` added to `OPEN_PREFIXES`. 8 endpoint tests + 1 db test.
+
+- [x] **P11.4 — pool sized for serverless** (2026-07-29, 55337cb). `create_pool` pins
+      `statement_cache_size=0` unconditionally (PgBouncer transaction mode reassigns server
+      connections per transaction, so cached prepared statements fail *intermittently*);
+      `min_size 0` / `max_size 2`; `.env`'s `DATABASE_URL` now points at Neon's `-pooler`
+      host, `DATABASE_URL_TEST` stays direct because the db suite does DDL.
+
+- [x] **P12 — stateless signed-cookie sessions + shared throttle** (2026-07-29, 0accfd2).
+      Cookie = `<expiry>.<hmac>`; `SessionStore` deleted. **The signing key is the admin
+      password hash** — no separate secret to deploy, and rotating the password is the only
+      revocation lever a stateless scheme has. TTL 12 h → 2 h. Throttle counts `login_failed`
+      events in the window when a pool exists (`db.count_recent_events`), in-memory
+      `LoginThrottle` otherwise. Verified live: a session survived a server restart, which
+      the old in-memory store could not.
+
+- [x] **P13.1/13.2 — deploy config** (2026-07-29, b246978). `vercel.json`
+      (`maxDuration: 800`, `excludeFiles`, per-minute drain cron) +
+      `[tool.vercel] entrypoint = "api.main:app"`. No rewrite needed — a FastAPI app deploys
+      as one function. The `api` extra folded into main `dependencies`; **no
+      `requirements.txt`** (pyproject is a supported manifest). `project_root()` added
+      because `config.yaml` / `db/migrations` / `resources` were resolved off `parents[2]`,
+      which breaks the moment the package is installed rather than run from the tree.
+      README gained the deploy section + env-var table (13.3).
+
+- [x] **P6 leftover — audit panel shows Task F** (2026-07-29, 53323f8), plus `cohort_name` /
+      `international`, and a `task_f` builder for the demo LLM handler (its absence is why
+      the zero-spend path never surfaced the defect).
+
 ## In Progress
-- [ ] (none — the "Do now" list in ▶ START HERE is all unblocked local work)
+- [ ] (none — see "Do now" in ▶ START HERE: the LLM smoke, then the profanity list)
 
 ## Blocked (owner / external)
 - [ ] P7 (E2E half): local end-to-end + idempotent re-replay + 466-row v2-vs-v3
@@ -585,6 +629,15 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
   `uv run python -c "from api.main import create_app; print([r.path for r in create_app().routes])"`
   → no `/jobs*`, no `/upload`. `grep -rn "JobRegistry\|sweeper_loop\|getJobId" api/ tests/`
   → nothing.
+- **P11–P13.2:** `uv run pytest -q` → **534 passed**; `uv run ruff check .` clean.
+  Serverless-path smoke against the live Neon DB (zero tokens) — requeue one row, age
+  another into `grading` by 2 h, then POST the drain:
+  `{"migrated": [], "reaped": 1, "processed": 2, "elapsed": 1.97}`, second call
+  `{"reaped": 0, "processed": 0}`, all 12 rows `graded`; wrong/missing bearer → 401.
+  Pooled endpoint verified separately (migrations no-op under the advisory lock, 20
+  concurrent round-trips clean). UI walkthrough on the audit panel: bonus 12.0 and
+  34.3 + 22.0 + 12.0 + 5.4 = 73.7 = displayed `final_score`, zero console errors.
+  **Note `uv sync` no longer takes `--extra api`.**
 - P9/P10: `uv run pytest -q` — 550 passed, 11 skipped (the skips are the DB suite,
   which needs `DATABASE_URL_TEST`). `uv run ruff check .` clean. Live-shaped fixtures
   live in `tests/live_payload.py` — one builder, used by every suite.
@@ -593,6 +646,34 @@ longer here — decided in-house 2026-07-27; only the *build* is deferred to pos
 
 ## Notes / Decisions Log
 
+- **2026-07-29 (late) — P11–P13.2 shipped; five things worth carrying forward.**
+  1. **The Vercel deploy story is simpler than P13 assumed, because the docs moved.** Two
+     planned items evaporated on reading the current runtime docs: `pyproject.toml` is a
+     supported dependency manifest, so **P13.2's `requirements.txt` was not created** (a
+     second generated manifest only drifts); and a FastAPI app becomes **one** function, so
+     no rewrite rule is needed. What the plan did *not* anticipate: Vercel installs only the
+     **default** dependency set, so the optional `api` extra would have deployed a service
+     with no web framework. The extra is gone — `uv sync --extra api` now errors.
+  2. **`parents[2]` resource paths were a latent deploy bug.** `config.yaml`,
+     `db/migrations`, `resources/schools.json`, and `resources/profanity.txt` were all
+     resolved relative to a source file two/three levels up. That is correct when running
+     from the tree and wrong the moment the package is *installed* (site-packages), which is
+     what a host may do. One `config.project_root()` with a cwd fallback covers both. Nothing
+     failed locally, so nothing would have caught this before a deploy.
+  3. **The session signing key is the admin password hash, deliberately.** P12.1 called for
+     a separate session secret plus a `session_key_version` for bulk invalidation. Deriving
+     from the password hash gives the same lever for free (change the password ⇒ every
+     session dies), removes an env var from the handover, and cannot drift out of sync
+     across instances. Recorded because it looks like an omission and is not.
+  4. **The demo LLM handler had no `task_f` builder.** So every zero-spend run produced
+     `llm_parse_failure → 0 bonus` for the optional essay — which is *correct* fallback
+     behavior and therefore silent. It is why the Stage 1 E2E could not have revealed the
+     audit-panel arithmetic gap, and a reminder that the fake handler's coverage is part of
+     what the local E2E actually tests. Fixed at mid-range values (deliberately not full
+     marks — a demo where every bonus maxes out hides the arithmetic).
+  5. **`reap_stale_claims` takes a `timedelta`, not a string.** asyncpg binds `$1::interval`
+     to a Python `timedelta`; passing `"900 seconds"` raises `DataError` at runtime, not at
+     import. Trivial, but it is the kind of thing only a live DB test catches.
 - **2026-07-29 — Stage 1 E2E green, and the two defects it exposed.** First run of the
   full path against a live DB, at zero token cost (`SRIP_DEV_FAKE_LLM=1`). Twelve synthetic
   applications: 12 `graded`, 0 `error`, 0 stuck in `grading`; 8 RANKED / 4 REJECTED;
