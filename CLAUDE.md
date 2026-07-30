@@ -120,9 +120,10 @@ No o-series reasoning models. Verify exact IDs against OpenAI's catalog; swap in
   size cap, fetch → extract → score → **discard** — resume bytes/text never reach the DB, an
   artifact, or a log. Scoring is in-house (Task E extracts, `config.yaml` prices); no
   third-party agent framework belongs in this path. **`resume.bonus_max: 0` is the current
-  setting and disables the stage entirely.** Raising it requires re-pinning
+  setting and disables the stage entirely.** The weights are priced for the 0–25 band; the one
+  thing outstanding before `bonus_max` can be raised to 25 is re-pinning
   `resume.allowed_url_hosts` to the website's R2 host — the entry there is the retired Fillout
-  value — and re-pricing the weights for the 0–25 scale.
+  value, and the allowlist is exact-host, so an unpinned host simply never fetches.
 - **Logging & events:** `submission_id` only — never essay/explanation/resume text.
 - **Retention:** per-submission delete and **bulk purge** are built — the latter is a
   session-gated bottom-corner control (`GET /api/admin/purge-preview` →

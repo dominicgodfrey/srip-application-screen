@@ -293,9 +293,16 @@ Task E extracts signals and `config.yaml` prices them, the same shape as Tasks C
 stage is a seam: `payload → {score_0_25, signals, audit_notes}`.
 
 **`resume.bonus_max: 0` disables it entirely — zero fetches, zero tokens — and that is the
-current setting.** Two things must change before it can be raised: `resume.allowed_url_hosts`
-must be re-pinned to the website's R2 host (the entry there is the retired Fillout value), and
-the weights must be re-priced for the 0–25 scale.
+current setting.** The `weight_*` values are priced for the 0–25 band (a typical resume earns
+about half of it, a standout resume saturates the cap). One thing is outstanding before
+`bonus_max` can be raised to 25: `resume.allowed_url_hosts` must be re-pinned to the website's
+R2 host — the entry there is the retired Fillout value, and because the allowlist is exact-host,
+an unpinned host simply never fetches.
+
+Note that resume URLs from the website are presigned with a short expiry, so a resume is
+fetchable only within minutes of delivery. The per-minute drain is comfortably inside that
+window, but it does mean the stage cannot be calibrated against a stored corpus — and storing
+one would violate the discard rule anyway.
 
 When enabled, the guardrails are absolute: https-only exact-host allowlist, no redirects,
 streaming size cap, and **fetch → extract → score → discard**. Resume bytes and text never reach

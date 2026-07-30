@@ -8,6 +8,7 @@ scripted :class:`FakeLLMClient`. Hard line throughout (PRD §0.3): every failure
 from __future__ import annotations
 
 import httpx
+import pytest
 from pydantic import BaseModel
 
 from srip_filter.config import AppConfig, ResumeConfig
@@ -123,11 +124,15 @@ def test_task_e_prompt_shape() -> None:
 
 
 def test_signal_bonus_composition_uses_config_weights() -> None:
+    """The formula, with weights supplied explicitly so calibration changes can't break it."""
     out = _signals(
         relevant_projects=2, relevant_experience=1, relevant_awards=1, skills_relevance=0.5
     )
+    cfg = _resume_cfg(
+        weight_project=1.5, weight_experience=2.0, weight_award=1.0, weight_skills=2.0
+    )
     # 2*1.5 + 1*2.0 + 1*1.0 + 0.5*2.0 = 7.0
-    assert resume_signal_bonus(out, _resume_cfg()) == 7.0
+    assert resume_signal_bonus(out, cfg) == 7.0
 
 
 def test_signal_bonus_capped_at_bonus_max() -> None:
@@ -160,6 +165,62 @@ def test_signal_bonus_kill_switch_prices_everything_to_zero() -> None:
     assert resume_signal_bonus(out, _resume_cfg(bonus_max=0.0)) == 0.0
 
 
+# --- Calibration (owner-owned) ---------------------------------------------------------------
+# The shipped weights must actually use the 0-25 band. They previously did not: v2 values tuned
+# for a 10-point band were carried over unscaled, so an exceptional resume reached only ~56% of
+# the cap and the whole stage silently under-priced. These profiles are the check that a future
+# weight edit is deliberate — they use the SHIPPED defaults, not explicit overrides.
+
+
+@pytest.mark.parametrize(
+    ("profile", "signals", "expected"),
+    [
+        ("minimal", {"relevant_projects": 1, "skills_relevance": 0.3}, 5.25),
+        (
+            "typical",
+            {"relevant_projects": 2, "relevant_awards": 1, "skills_relevance": 0.5},
+            12.5,
+        ),
+        (
+            "strong",
+            {
+                "relevant_projects": 3,
+                "relevant_experience": 1,
+                "relevant_awards": 1,
+                "skills_relevance": 0.8,
+            },
+            22.75,
+        ),
+        (
+            "exceptional",
+            {
+                "relevant_projects": 4,
+                "relevant_experience": 2,
+                "relevant_awards": 2,
+                "skills_relevance": 1.0,
+            },
+            25.0,  # raw 35.0 — saturates, which is intended for a bonus band
+        ),
+    ],
+)
+def test_shipped_weights_span_the_25_point_band(
+    profile: str, signals: dict[str, object], expected: float
+) -> None:
+    cfg = _resume_cfg(bonus_max=25.0)  # weights come from the shipped defaults
+    assert resume_signal_bonus(_signals(**signals), cfg) == expected, profile
+
+
+def test_realistic_resume_earns_a_meaningful_share_of_the_band() -> None:
+    """The regression that motivated the recalibration, stated as a property.
+
+    Under the old weights a strong resume priced to 9.1/25 (36%). Any future weight change that
+    pushes an ordinary-but-real resume back under a third of the band is the same bug again.
+    """
+    typical = _signals(relevant_projects=2, relevant_awards=1, skills_relevance=0.5)
+    cfg = _resume_cfg(bonus_max=25.0)
+    assert resume_signal_bonus(typical, cfg) / cfg.bonus_max >= 0.4
+
+
 # ================================================================================================
 # 12.5 — Stage 6 aggregator (MockTransport fetcher + FakeLLMClient; no spend, no network)
 # ================================================================================================
@@ -171,7 +232,7 @@ async def test_score_resume_happy_path() -> None:
     signals = _signals(relevant_projects=2, relevant_experience=1, skills_relevance=0.5)
     async with fetcher:
         result = await score_resume(_row(GOOD_URL), fetcher, task_e_client(cfg, signals), cfg)
-    assert result.bonus == 6.0  # 2*1.5 + 1*2.0 + 0.5*2.0
+    assert result.bonus == 10.0  # 2*3.75 + 1*5.0 + 0.5*5.0 = 15.0, capped at this cfg's 10
     assert result.error == "" and result.task_e_called
     a = result.assessment
     assert a.url_present and a.attempted and a.fetched

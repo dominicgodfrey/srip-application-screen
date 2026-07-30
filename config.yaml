@@ -83,9 +83,22 @@ school:
 # bonus_max. allowed_url_hosts is the https-only SSRF allowlist.
 #
 # bonus_max: 0 is the kill switch AND the shipping default — zero fetches, zero tokens.
-# Two things must land before raising it to 25: re-pin allowed_url_hosts to the website's R2
-# host (the entry below is the frozen v2 Fillout value), and re-price the weights for the
-# 0-25 scale (they were tuned for v2's 10).
+# The weights below are priced for the 0-25 scale. ONE thing is still outstanding before
+# bonus_max can be raised to 25: re-pin allowed_url_hosts to the website's R2 host
+# (`<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`) — the entry below is the retired v2 Fillout
+# bucket, and the allowlist is exact-host, so an unpinned host simply never fetches.
+#
+# Weight calibration (owner, 2026-07-30): the v2 weights were tuned for a 10-point band and
+# were carried over unscaled, so they under-priced everything against a 25-point cap — an
+# exceptional resume reached only ~56% of the band. Every weight is the v2 value x2.5, which
+# moves the approved *shape* onto the new maximum rather than re-deciding it. Where realistic
+# applicant profiles land (pinned by tests/scoring/test_resume.py):
+#   1 project, skills 0.3                         ->  5.25 / 25   (21%)
+#   2 projects, 1 award, skills 0.5               -> 12.5  / 25   (50%)
+#   3 projects, 1 internship, 1 award, skills 0.8 -> 22.75 / 25   (91%)
+#   4 projects, 2 internships, 2 awards, skills 1 -> 35.0 -> capped at 25
+# Saturation at the top is intended: this is a bonus band, and a standout resume earns all of
+# it. Counts are unbounded, so the weights alone decide where real resumes land.
 resume:
   bonus_max: 0
   max_download_bytes: 10485760   # 10 MiB streaming cap per resume; abort above this
@@ -94,10 +107,10 @@ resume:
   allowed_url_hosts:
     - prod-fillout-oregon-s3.s3.us-west-2.amazonaws.com
   max_text_chars: 15000          # extracted-text cap; bounds Task E token spend
-  weight_project: 1.5            # per relevant software/CS/data project
-  weight_experience: 2.0         # per relevant internship/job/research entry
-  weight_award: 1.0              # per relevant award/competition placement
-  weight_skills: 2.0             # x skills_relevance (0-1)
+  weight_project: 3.75           # per relevant software/CS/data project
+  weight_experience: 5.0         # per relevant internship/job/research entry
+  weight_award: 2.5              # per relevant award/competition placement
+  weight_skills: 5.0             # x skills_relevance (0-1)
 
 # Cohort assignment (Phase 11, PRD §11) — downstream of ranking. Tier tokens are matched
 # case-insensitively inside the free-text choice strings ("Summer 2026- HONORS" etc.).

@@ -150,21 +150,24 @@ class ResumeConfig(_Strict):
     deterministically: the model counts and classifies, config prices (the Task C pattern).
     """
 
-    # 0 = shipping default (zero fetches, zero LLM calls); 25 once the in-house rubric is
-    # calibrated post-pilot (SCORING.md).
+    # 0 = shipping default (zero fetches, zero LLM calls). Raising it to 25 needs only the R2
+    # host pinned in allowed_url_hosts; the weights below are already priced for that scale.
     bonus_max: float = 0.0
     max_download_bytes: int = 10_485_760  # 10 MiB streaming cap per resume; abort above this
     download_timeout_s: float = 20.0
     download_concurrency: int = 4  # own semaphore, separate from the LLM one
     allowed_url_hosts: list[str] = Field(
-        # Frozen v2 value (the Fillout S3 bucket); re-pin to the R2 host before enabling.
+        # Retired v2 value (the Fillout S3 bucket); re-pin to the R2 host before enabling.
         default_factory=lambda: ["prod-fillout-oregon-s3.s3.us-west-2.amazonaws.com"]
     )
     max_text_chars: int = 15_000  # extracted-text cap; bounds Task E token spend
-    weight_project: float = 1.5  # per relevant project
-    weight_experience: float = 2.0  # per relevant internship/job/research entry
-    weight_award: float = 1.0  # per relevant award/competition
-    weight_skills: float = 2.0  # × skills_relevance (0-1)
+    # Priced for the 0-25 band (owner, 2026-07-30): the v2 values x2.5, which moves the approved
+    # shape onto the new maximum instead of re-deciding it. See config.yaml for where realistic
+    # applicant profiles land; tests/scoring/test_resume.py pins them.
+    weight_project: float = 3.75  # per relevant project
+    weight_experience: float = 5.0  # per relevant internship/job/research entry
+    weight_award: float = 2.5  # per relevant award/competition
+    weight_skills: float = 5.0  # × skills_relevance (0-1)
 
 
 class CohortConfig(_Strict):

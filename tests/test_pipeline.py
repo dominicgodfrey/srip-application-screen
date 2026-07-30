@@ -566,8 +566,10 @@ _RESUME_URL = f"https://{_RESUME_HOST}/applicant/resume.pdf"
 
 
 def _resume_app_config() -> AppConfig:
+    # 25.0 is the live band the shipped weights are priced for, so these integration tests
+    # exercise the real calibration rather than a 10-point band the stage no longer uses.
     return AppConfig.model_validate(
-        {"resume": {"bonus_max": 10.0, "allowed_url_hosts": [_RESUME_HOST]}}
+        {"resume": {"bonus_max": 25.0, "allowed_url_hosts": [_RESUME_HOST]}}
     )
 
 
@@ -641,9 +643,14 @@ async def test_survivor_with_resume_gets_bonus_and_audit_trail() -> None:
         result = await grade_batch(_csv_bytes(rows), client, cfg, fetcher=fetcher)
     rec = result.records[0]
     assert rec.outcome == "RANKED"
-    assert rec.scores.resume_bonus == pytest.approx(6.0)  # 2*1.5 + 1*2.0 + 0.5*2.0
+    assert rec.scores.resume_bonus == pytest.approx(15.0)  # 2*3.75 + 1*5.0 + 0.5*5.0
+    # Composition, not calibration: the bonus that was computed is the bonus that lands in the
+    # total. The weight values are pinned once, in tests/scoring/test_resume.py.
     assert rec.final_score == pytest.approx(
-        rec.scores.gpa_points + rec.scores.essay.total + rec.scores.coursework_bonus + 6.0
+        rec.scores.gpa_points
+        + rec.scores.essay.total
+        + rec.scores.coursework_bonus
+        + rec.scores.resume_bonus
     )
     assert "task_e" in rec.llm_calls
     assert rec.resume.fetched and rec.resume.signals is not None
@@ -709,7 +716,7 @@ async def test_resume_at_volume_holds_memory_and_concurrency_discipline() -> Non
     cfg = AppConfig.model_validate(
         {
             "resume": {
-                "bonus_max": 10.0,
+                "bonus_max": 25.0,  # the live band; see _resume_app_config
                 "download_concurrency": 3,
                 "allowed_url_hosts": [_RESUME_HOST],
             }
@@ -738,7 +745,7 @@ async def test_resume_at_volume_holds_memory_and_concurrency_discipline() -> Non
     assert calls == 60  # one fetch per applicant, none for free
     assert peak <= 3  # the download semaphore binds, independent of LLM concurrency
     assert all(r.outcome == "RANKED" for r in result.records)
-    assert all(r.scores.resume_bonus == pytest.approx(6.0) for r in result.records)
+    assert all(r.scores.resume_bonus == pytest.approx(15.0) for r in result.records)
     # Memory rule: the extracted text (and the PDF bytes) never reach a record or artifact.
     assert marker not in result.decisions_jsonl
     for record in result.records:
