@@ -47,12 +47,35 @@ migrations under an advisory lock — there is no release phase, so the drain ow
 `POST /api/admin/migrate` (session-gated) is the manual first run on a fresh database.
 
 **First-deploy checklist**
-1. Set every environment variable below (an unset `ATS_WEBHOOK_SECRET` makes the website's
-   dispatcher omit the auth header entirely, so every delivery 401s).
+1. Provision the database (see below) and set every environment variable in the table (an
+   unset `ATS_WEBHOOK_SECRET` makes the website's dispatcher omit the auth header entirely,
+   so every delivery 401s; an unset `CRON_SECRET` means nothing is ever graded).
 2. Deploy, then `curl` `/health` — expect 200.
 3. `POST /api/admin/migrate` once, or wait one minute for the cron to do it.
 4. Fire the website admin panel's ATS **Test** button — expect 200 and no row created.
 5. Send one real application, confirm it appears on the dashboard as `graded`.
+
+### Bringing your own Neon database
+The service is not tied to any particular Neon project — it owns whatever database
+`DATABASE_URL` points at, and creates its own schema there. To use a fresh one:
+
+1. Create a Neon project (or a branch) and a database. **It must be the ATS's own** — never
+   the website's, and ideally with credentials scoped to it alone, since this database holds
+   minors' PII.
+2. Point `DATABASE_URL` at its **pooled** (`-pooler`) DSN. The pool ships
+   `statement_cache_size=0`, which is what makes asyncpg safe against Neon's PgBouncer
+   transaction mode; the direct host works too but wastes the pooler serverless needs.
+3. Deploy and run step 3 above. `db/migrations/*.sql` is applied in order under a Postgres
+   advisory lock and recorded in a `schema_migrations` table, so it is safe to run
+   concurrently and idempotent to run twice — an empty database and an up-to-date one both
+   end in the same place. Three tables are created: `applications`, `llm_cache`, `events`.
+4. Optionally set `DATABASE_URL_TEST` to a **separate** Neon branch (direct host, not pooled)
+   to enable the DB test suite. Leave it unset and those tests skip cleanly — `uv run pytest`
+   on a fresh clone with no `.env` at all passes 554 and skips 19.
+
+Nothing else is environment-specific: there is no external queue, no second datastore, and
+no state outside Postgres, so moving databases is just repointing `DATABASE_URL` (the new one
+starts empty — data does not follow).
 
 **Monitoring.** Point an uptime check at `GET /health` (unauthenticated, no PII, no counts).
 It returns 200 `{"status":"ok"}` normally and **503** `{"status":"degraded"}` when the oldest
@@ -70,7 +93,12 @@ Environment variables to set in the Vercel project:
 | `ATS_WEBHOOK_SECRET` | must equal the website's value, or every delivery 401s |
 | `ATS_WEBHOOK_SECRET_PREVIOUS` | set only during a rotation |
 | `ADMIN_PASSWORD_HASH` | `uv run python -m api.auth '<password>'` — also signs session cookies, so changing it logs everyone out |
-| `CRON_SECRET` | Vercel sends it as `Authorization: Bearer …` on cron invocations |
+| `CRON_SECRET` | Vercel sends it as `Authorization: Bearer …` on cron invocations. **Unset ⇒ the drain fails closed and nothing is ever graded** |
+
+Every one of these fails closed rather than silently degrading: no webhook secret ⇒ 401 on
+every delivery; no `CRON_SECRET` ⇒ no grading; no `ADMIN_PASSWORD_HASH` ⇒ `/login` 503s and
+the UI is shut; no `DATABASE_URL` ⇒ 503 from the data routes. A deploy missing one looks
+broken in a specific way rather than working incorrectly.
 
 ## Privacy
 This system processes minors' PII. Applicant data **is persisted** — in the ATS's own Neon
