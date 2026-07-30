@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -84,6 +85,27 @@ _LOCAL_WORKER_ENV = "SRIP_LOCAL_WORKER"
 _Capacity = Annotated[int | None, Query(ge=0, description="Seat cap; omit for unlimited.")]
 
 
+def _wire_core_logging() -> None:
+    """Give the root logger a stderr handler so ``srip_filter.*`` records are visible.
+
+    uvicorn (and Vercel) configure only their own loggers, so our records propagate to a root
+    logger with no handler attached and are dropped. Measured 2026-07-29: a 42-minute
+    calibration run that provably paced against the TPM bucket for its whole duration emitted
+    zero ``paced ... to stay under TPM`` lines, so a sustained 429 storm would slow the drain
+    with no trace anywhere. ``/health`` only reports a *dead* drain, not a degraded one.
+
+    One handler on the root logger is the whole fix: uvicorn's own loggers set
+    ``propagate=False``, so nothing double-logs through it, and ``basicConfig`` is a no-op
+    when the host (or pytest) has already installed handlers of its own. Level follows
+    uvicorn's ``--log-level`` when it set one (NOTSET/0 otherwise, hence the INFO fallback).
+    """
+    logging.basicConfig(
+        level=logging.getLogger("uvicorn.error").level or logging.INFO,
+        format="%(levelname)s:%(name)s:%(message)s",
+        stream=sys.stderr,
+    )
+
+
 def create_app(
     *,
     config: AppConfig | None = None,
@@ -100,6 +122,7 @@ def create_app(
     no startup build — and no API spend — happens. Dependencies live on ``app.state`` so route
     handlers read them without globals.
     """
+    _wire_core_logging()
     cfg = config if config is not None else get_config()
 
     @asynccontextmanager
