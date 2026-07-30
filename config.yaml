@@ -117,8 +117,18 @@ llm:
     task_e: gpt-4.1-mini   # E: resume signal extraction (mechanical extraction, Phase 12)
     task_f: gpt-4.1        # F: technical-essay bonus (judgment, bonus-only — NEW in v3)
   temperature: 0.2         # <= 0.2 for repeatability
+  # Sized to the ACCOUNT'S tokens-per-minute limit, not to taste. A task_d call is roughly
+  # 1k tokens round trip, so 8 in flight demands ~100k TPM if the model answers in ~5 s.
+  # Above the account ceiling the backoff below absorbs it (correct, just slower) — but if
+  # drains are consistently slow, lower this before raising anything else.
   max_concurrency: 8       # bound for the asyncio.Semaphore around LLM calls
-  max_retries: 2
+  max_retries: 2           # retries INSIDE the OpenAI SDK (it honours Retry-After)
+  # Our own budget for transient failures (429 / timeout / connection / 5xx), exponential
+  # backoff capped at backoff_max_s. Measured 2026-07-29: at 2 attempts a 30k-TPM ceiling
+  # turned 307 of 466 real applications into NEEDS_REVIEW. A rate limit is our problem, not
+  # the applicant's. Terminal failures (unparseable output) still get one retry, per PRD §8.
+  max_attempts: 6
+  backoff_max_s: 30.0
   request_timeout_s: 60.0
 
 # Persistence (P1, PRD v3 §1.1) — asyncpg pool sizing only. The DATABASE_URL DSN is a

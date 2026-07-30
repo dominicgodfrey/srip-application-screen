@@ -193,6 +193,13 @@ class TaskModels(_Strict):
 class LlmConfig(_Strict):
     models: TaskModels = Field(default_factory=TaskModels)
     temperature: float = 0.2
+    # Transient-failure budget (429 / timeout / connection / 5xx), with exponential backoff
+    # capped at backoff_max_s. Sized so a sustained rate limit is ridden out rather than
+    # dumping healthy applications into NEEDS_REVIEW: 6 attempts spans ~1+2+4+8+16 = 31 s of
+    # waiting. Measured 2026-07-29 — at 2 attempts a 30k-TPM ceiling failed 307 of 466 rows.
+    # Terminal failures (unparseable output) still get exactly one retry, per PRD §8.
+    max_attempts: int = 6
+    backoff_max_s: float = 30.0
     max_concurrency: int = 8
     max_retries: int = 2
     request_timeout_s: float = 60.0

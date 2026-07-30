@@ -6,8 +6,13 @@ A thin, replaceable wrapper around OpenAI Structured Outputs. Responsibilities:
 * an **in-run cache** keyed by ``(task, sha256(input))`` so identical inputs and retries are
   free within a single run (stateless: it does not persist across runs);
 * **bounded concurrency** via an ``asyncio.Semaphore`` sized from ``config.llm.max_concurrency``;
-* a **retry-once then ``LLMParseFailure``** fallback — the pipeline turns that into a
-  NEEDS_REVIEW row, never a silent rejection (PRD §8).
+* **two different failure policies**, because conflating them cost a whole calibration run
+  (2026-07-29: a 30k-TPM rate limit turned 307 of 466 real applications into NEEDS_REVIEW):
+  a *transient* error (429, timeout, connection, 5xx) is retried with exponential backoff up
+  to ``config.llm.max_attempts``, while a *terminal* one (unparseable/invalid output) gets
+  the PRD §8 initial-attempt-plus-one-retry and then raises ``LLMParseFailure``. Only the
+  latter should ever become a NEEDS_REVIEW row; a rate limit is our problem, not the
+  applicant's.
 
 Prompt templates live in ``prompts/`` and are passed in by the per-task modules; this client is
 task-agnostic. The real OpenAI call path is exercised only by the optional live suite
@@ -24,7 +29,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Literal, Protocol, TypeVar, cast
 
-from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+    RateLimitError,
+)
 from pydantic import BaseModel
 
 from srip_filter.config import AppConfig, require_openai_key
@@ -35,6 +46,10 @@ FakeHandler = Callable[[str, str, type[BaseModel]], "BaseModel | Awaitable[BaseM
 T = TypeVar("T", bound=BaseModel)
 
 logger = logging.getLogger(__name__)
+
+# Failures that say "ask again shortly", not "this input cannot be graded". Retrying these is
+# the difference between a slow drain and a needs-review queue full of healthy applications.
+TRANSIENT_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
 
 
 class CacheBackend(Protocol):
@@ -127,20 +142,54 @@ class BaseLLMClient(ABC):
             )
         return result
 
+    def _backoff_seconds(self, attempt: int) -> float:
+        """Exponential backoff, capped. ``attempt`` is 0-based."""
+        return min(self._config.llm.backoff_max_s, 2.0**attempt)
+
     async def _complete_with_retry(
         self, task: TaskName, system: str, user: str, schema: type[T]
     ) -> T:
+        """Call the model, retrying by failure *kind* (see the module docstring).
+
+        Transient failures get ``max_attempts`` tries with exponential backoff — a sustained
+        rate limit must slow the pipeline down, never route healthy applications to a human.
+        Terminal failures keep the PRD §8 policy: initial attempt plus one retry, then
+        ``LLMParseFailure``. The raised message names the kind so the audit trail can say
+        *why* a row is unscoreable.
+        """
         model = self.model_for(task)
+        max_attempts = max(2, self._config.llm.max_attempts)
         last_error: Exception | None = None
-        for attempt in range(2):  # initial attempt + one retry (PRD §8)
+        transient_seen = False
+
+        for attempt in range(max_attempts):
             try:
                 return await self._call_once(task, model, system, user, schema)
             except LLMParseFailure:
                 raise  # already terminal; do not retry
-            except Exception as error:  # boundary: any failure becomes a NEEDS_REVIEW signal
+            except Exception as error:
                 last_error = error
-                logger.warning("LLM task=%s attempt=%d failed: %s", task, attempt + 1, error)
-        raise LLMParseFailure(task, f"failed after retry: {last_error}")
+                transient = isinstance(error, TRANSIENT_ERRORS)
+                transient_seen = transient_seen or transient
+                logger.warning(
+                    "LLM task=%s attempt=%d/%d failed (%s): %s",
+                    task,
+                    attempt + 1,
+                    max_attempts,
+                    "transient" if transient else "terminal",
+                    error,
+                )
+                # A non-transient error is a property of the input; one retry is the PRD §8
+                # allowance and a third attempt would just re-burn tokens.
+                if not transient and attempt >= 1:
+                    break
+                if attempt + 1 < max_attempts:
+                    await asyncio.sleep(self._backoff_seconds(attempt))
+
+        kind = "transient" if transient_seen else "terminal"
+        raise LLMParseFailure(
+            task, f"{kind} failure after {max_attempts} attempt(s): {last_error}"
+        )
 
     @abstractmethod
     async def _call_once(
