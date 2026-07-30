@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import inspect
 import logging
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Literal, Protocol, TypeVar, cast
@@ -50,6 +51,55 @@ logger = logging.getLogger(__name__)
 # Failures that say "ask again shortly", not "this input cannot be graded". Retrying these is
 # the difference between a slow drain and a needs-review queue full of healthy applications.
 TRANSIENT_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
+
+
+class TokenBucket:
+    """Paces requests against a tokens-per-minute ceiling, so 429s never happen.
+
+    Backoff alone is reactive: once demand exceeds the account's TPM, most calls fail once
+    before succeeding, and a long burst can exhaust a row's retry budget and route a healthy
+    application to a human. This bucket makes a batch *slower* instead of *lossy* — the drain
+    grades everything, just spread over more minutes.
+
+    Continuous refill (not per-minute buckets) so a burst is smoothed rather than allowed to
+    slam the first second of every minute.
+
+    ponytail: per-process, because the queue-claim model means one drain at a time. Two
+    overlapping drains would each hold their own bucket and collectively exceed the limit —
+    the transient backoff is the backstop for that. Move this into Postgres only if
+    overlapping drains ever become normal.
+    """
+
+    def __init__(self, tokens_per_minute: int) -> None:
+        self.rate = tokens_per_minute / 60.0  # tokens per second
+        self.capacity = float(tokens_per_minute)
+        self._tokens = float(tokens_per_minute)
+        self._updated = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, tokens: int) -> float:
+        """Wait until ``tokens`` are available, then spend them. Returns seconds waited.
+
+        A single request larger than the whole per-minute budget would never be satisfiable,
+        so it is clamped to the capacity — better one over-budget call (which backoff can
+        absorb) than a permanent hang.
+        """
+        want = float(min(tokens, self.capacity))
+        waited = 0.0
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                self._tokens = min(
+                    self.capacity, self._tokens + (now - self._updated) * self.rate
+                )
+                self._updated = now
+                if self._tokens >= want:
+                    self._tokens -= want
+                    return waited
+                shortfall = want - self._tokens
+                delay = max(0.05, shortfall / self.rate)
+            waited += delay
+            await asyncio.sleep(delay)
 
 
 class CacheBackend(Protocol):
@@ -92,6 +142,9 @@ class BaseLLMClient(ABC):
         # Optional durable cache (P3). Settable, not a constructor arg, so the many
         # existing FakeLLMClient call sites stay untouched; None preserves v2 behavior.
         self.cache_backend: CacheBackend | None = None
+        # Rate limiting belongs to the real network boundary only: OpenAILLMClient sets this,
+        # so FakeLLMClient (and therefore the whole test suite) is never paced.
+        self.bucket: TokenBucket | None = None
 
     def model_for(self, task: TaskName) -> str:
         """Resolve the pinned model id for a task from config."""
@@ -142,6 +195,15 @@ class BaseLLMClient(ABC):
             )
         return result
 
+    def _estimate_tokens(self, system: str, user: str) -> int:
+        """Rough token cost of one round trip: prompt chars/4 plus an output allowance.
+
+        Deliberately an estimate — importing a tokenizer to pace requests would add a
+        dependency and a model-version coupling to save a few percent of accuracy. Rounding
+        up is the safe direction: it paces slightly early.
+        """
+        return (len(system) + len(user)) // 4 + self._config.llm.estimated_output_tokens
+
     def _backoff_seconds(self, attempt: int) -> float:
         """Exponential backoff, capped. ``attempt`` is 0-based."""
         return min(self._config.llm.backoff_max_s, 2.0**attempt)
@@ -164,6 +226,10 @@ class BaseLLMClient(ABC):
 
         for attempt in range(max_attempts):
             try:
+                if self.bucket is not None:
+                    waited = await self.bucket.acquire(self._estimate_tokens(system, user))
+                    if waited > 1.0:
+                        logger.info("LLM task=%s paced %.1fs to stay under TPM", task, waited)
                 return await self._call_once(task, model, system, user, schema)
             except LLMParseFailure:
                 raise  # already terminal; do not retry
@@ -215,6 +281,8 @@ class OpenAILLMClient(BaseLLMClient):
             max_retries=config.llm.max_retries,
             timeout=config.llm.request_timeout_s,
         )
+        if config.llm.tokens_per_minute > 0:
+            self.bucket = TokenBucket(config.llm.tokens_per_minute)
 
     async def _call_once(
         self, task: TaskName, model: str, system: str, user: str, schema: type[T]

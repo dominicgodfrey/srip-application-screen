@@ -200,6 +200,13 @@ class LlmConfig(_Strict):
     # Terminal failures (unparseable output) still get exactly one retry, per PRD §8.
     max_attempts: int = 6
     backoff_max_s: float = 30.0
+    # Proactive pacing: set to the OpenAI account's tokens-per-minute limit for the *judgment*
+    # models (gpt-4.1 is the binding one). 0 disables pacing and relies on backoff alone.
+    # Default is OpenAI's tier-1 figure, the most restrictive real limit — being wrong this
+    # way only makes a batch slower, whereas being wrong the other way wastes calls on 429s.
+    # RAISE THIS to the deployment account's actual limit; a burst is paced, never dropped.
+    tokens_per_minute: int = 30_000
+    estimated_output_tokens: int = 400  # per-call output allowance for the pacing estimate
     max_concurrency: int = 8
     max_retries: int = 2
     request_timeout_s: float = 60.0

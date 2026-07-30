@@ -117,11 +117,15 @@ llm:
     task_e: gpt-4.1-mini   # E: resume signal extraction (mechanical extraction, Phase 12)
     task_f: gpt-4.1        # F: technical-essay bonus (judgment, bonus-only — NEW in v3)
   temperature: 0.2         # <= 0.2 for repeatability
-  # Sized to the ACCOUNT'S tokens-per-minute limit, not to taste. A task_d call is roughly
-  # 1k tokens round trip, so 8 in flight demands ~100k TPM if the model answers in ~5 s.
-  # Above the account ceiling the backoff below absorbs it (correct, just slower) — but if
-  # drains are consistently slow, lower this before raising anything else.
   max_concurrency: 8       # bound for the asyncio.Semaphore around LLM calls
+  # ⚠️ SET tokens_per_minute TO THE DEPLOYMENT ACCOUNT'S ACTUAL gpt-4.1 TPM LIMIT.
+  # This paces requests so the token ceiling is never breached, which is what lets a batch of
+  # applications be graded *slower* rather than *lossily*. 0 disables pacing.
+  # The default below is OpenAI's tier-1 figure — the most restrictive real limit, and what
+  # produced the 2026-07-29 incident when pacing did not exist. Measured cost of leaving it
+  # too low: ~1k tokens per essay call, so 30k TPM grades roughly 8 applications/minute.
+  tokens_per_minute: 30000
+  estimated_output_tokens: 400   # output allowance added to the prompt estimate when pacing
   max_retries: 2           # retries INSIDE the OpenAI SDK (it honours Retry-After)
   # Our own budget for transient failures (429 / timeout / connection / 5xx), exponential
   # backoff capped at backoff_max_s. Measured 2026-07-29: at 2 attempts a 30k-TPM ceiling

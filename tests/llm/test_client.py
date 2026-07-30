@@ -7,7 +7,12 @@ import pytest
 from openai import RateLimitError
 
 from srip_filter.config import AppConfig
-from srip_filter.llm.client import FakeLLMClient, LLMParseFailure, OpenAILLMClient
+from srip_filter.llm.client import (
+    FakeLLMClient,
+    LLMParseFailure,
+    OpenAILLMClient,
+    TokenBucket,
+)
 from srip_filter.models import TaskAOutput, TaskDOutput
 
 
@@ -172,6 +177,30 @@ async def test_terminal_errors_still_stop_after_one_retry(monkeypatch) -> None:
         await client.complete("task_a", system="s", user="x", schema=TaskAOutput)
     assert len(client.calls) == 2  # not 6
     assert "terminal" in str(err.value)
+
+
+async def test_token_bucket_paces_to_the_configured_rate() -> None:
+    """A batch must be graded slower, not lossily: once the per-minute budget is spent the
+    next acquire waits rather than letting the request through to a 429."""
+    bucket = TokenBucket(tokens_per_minute=6000)  # 100 tokens/second
+    assert await bucket.acquire(6000) == 0.0  # full bucket, no wait
+    waited = await bucket.acquire(200)  # needs ~2 s of refill
+    assert waited >= 1.0
+
+
+async def test_token_bucket_never_hangs_on_an_oversized_request() -> None:
+    """A single essay bigger than the whole minute's budget must still be satisfiable —
+    clamped to capacity, so backoff absorbs one over-budget call instead of the pipeline
+    waiting forever for a refill that can never reach the requested size."""
+    bucket = TokenBucket(tokens_per_minute=600)
+    waited = await asyncio.wait_for(bucket.acquire(10_000_000), timeout=2.0)
+    assert waited == 0.0  # clamped to the full bucket, not an unsatisfiable 10M
+
+
+def test_fake_client_is_never_paced() -> None:
+    """Pacing belongs to the real network boundary. If the fake inherited a bucket the whole
+    suite would sit in sleeps."""
+    assert FakeLLMClient(_config()).bucket is None
 
 
 async def test_no_handler_routes_to_parse_failure() -> None:
