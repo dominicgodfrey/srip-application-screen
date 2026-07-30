@@ -45,6 +45,10 @@ async def process_one(pool: Any, grade_fn: GradeFn) -> bool:
 
     The error note passed to :func:`db.mark_error` is the exception *class name only* —
     exception messages can quote applicant text and the events ledger is non-PII by law.
+    The same rule governs the log line: ``logger.exception`` would print the traceback, and a
+    traceback ends with the exception *message* (a pydantic ValidationError quoting an essay,
+    an OpenAI refusal quoting the content it refused). Logs are non-PII by the same law, so the
+    class name is all that goes out; the audit record carries the detail.
     """
     row = await dbmod.claim_next(pool)
     if row is None:
@@ -53,7 +57,9 @@ async def process_one(pool: Any, grade_fn: GradeFn) -> bool:
     try:
         result = await grade_fn(row)
     except Exception as error:
-        logger.exception("grading crashed submission_id=%s", sid)
+        logger.error(
+            "grading crashed submission_id=%s error=%s", sid, type(error).__name__
+        )
         await dbmod.mark_error(pool, sid, type(error).__name__)
         return True
     await dbmod.finish_graded(
@@ -87,6 +93,11 @@ async def run_worker(
         try:
             processed = await process_one(pool, grade_fn)
         except Exception:
+            # Traceback kept here, unlike process_one's grading except: grade_fn (and the
+            # applicant text it handles) is caught inside process_one, so what reaches this
+            # handler is queue plumbing — asyncpg/connection errors, whose messages are about
+            # our infrastructure, not an applicant. Without a traceback a dropped-connection
+            # loop is undiagnosable.
             logger.exception("worker iteration failed; backing off")
             processed = False
         if not processed:

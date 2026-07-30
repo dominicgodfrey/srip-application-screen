@@ -8,6 +8,7 @@ here we prove the loop's behavior around them (PRD v3 invariants #8 and #9).
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 from pydantic import BaseModel
@@ -91,6 +92,31 @@ async def test_crash_isolates_row_and_loop_continues(store) -> None:
 
     assert [g[0] for g in s.graded] == ["a", "c"]
     assert s.errors == [("poison", "ValueError")]  # class name only, never the message
+
+
+async def test_crash_log_line_carries_no_applicant_text(store, caplog) -> None:
+    """The log path obeys the same non-PII law as the events ledger.
+
+    `logger.exception` here would print a traceback, and a traceback ends with the exception
+    *message* — which for a grading crash can be a pydantic ValidationError quoting an essay or
+    an OpenAI refusal naming the content it refused. These records now reach real handlers
+    (api.main._wire_core_logging), so on Vercel they land in function logs the partner team can
+    read.
+    """
+    secret = "essay text that must never reach a log"
+    s = store([_row("poison")])
+
+    async def grade(row: dict) -> GradeResult:
+        raise ValueError(secret)
+
+    with caplog.at_level(logging.ERROR, logger="srip_filter.worker"):
+        assert await process_one(object(), grade) is True
+
+    logged = "\n".join(r.getMessage() for r in caplog.records) + (caplog.text or "")
+    assert secret not in logged
+    assert "ValueError" in logged  # the class name still gets out
+    assert "poison" in logged  # ...and so does submission_id
+    assert s.errors == [("poison", "ValueError")]
 
 
 async def test_run_worker_drains_then_stops_promptly(store) -> None:

@@ -237,13 +237,18 @@ class BaseLLMClient(ABC):
                 last_error = error
                 transient = isinstance(error, TRANSIENT_ERRORS)
                 transient_seen = transient_seen or transient
+                # Class name, not str(error): a terminal failure's message can quote applicant
+                # content back at us (a pydantic ValidationError echoing the raw output, an
+                # OpenAI refusal naming what it refused), and logs are non-PII by law. The
+                # kind plus the attempt counter is what diagnoses a 429 storm; the full
+                # message still reaches the audit record via LLMParseFailure below.
                 logger.warning(
                     "LLM task=%s attempt=%d/%d failed (%s): %s",
                     task,
                     attempt + 1,
                     max_attempts,
                     "transient" if transient else "terminal",
-                    error,
+                    type(error).__name__,
                 )
                 # A non-transient error is a property of the input; one retry is the PRD §8
                 # allowance and a third attempt would just re-burn tokens.

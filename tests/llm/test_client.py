@@ -1,6 +1,7 @@
 """Tests for the LLM client boundary (Phase 0.4). No network — FakeLLMClient only."""
 
 import asyncio
+import logging
 
 import httpx
 import pytest
@@ -139,6 +140,31 @@ async def test_transient_errors_are_retried_to_the_full_budget(monkeypatch) -> N
         await client.complete("task_a", system="s", user="x", schema=TaskAOutput)
     assert attempts["n"] == 5  # NOT 2 — the whole transient budget is spent
     assert "transient" in str(err.value)  # the audit trail can say which kind
+
+
+async def test_retry_warning_names_the_kind_but_not_the_error_text(monkeypatch, caplog) -> None:
+    """The retry warning is the 429-storm signal, so it must be safe to emit.
+
+    A terminal failure's message can quote applicant content back at us (a pydantic
+    ValidationError echoing raw output, an OpenAI refusal naming what it refused). These records
+    now reach real handlers (api.main._wire_core_logging), so on Vercel they land in function
+    logs. The kind plus the attempt counter is what diagnoses a storm; the message belongs in
+    the audit record, which LLMParseFailure still carries.
+    """
+    monkeypatch.setattr("srip_filter.llm.client.asyncio.sleep", _no_sleep)
+    secret = "quoted essay fragment from a refusal"
+
+    def refusing(task: str, user: str, schema: type) -> TaskAOutput:
+        raise RuntimeError(f"model refused: {secret}")
+
+    client = FakeLLMClient(_config(), handler=refusing)
+    with caplog.at_level(logging.WARNING, logger="srip_filter.llm.client"):
+        with pytest.raises(LLMParseFailure):
+            await client.complete("task_a", system="s", user="x", schema=TaskAOutput)
+
+    assert secret not in caplog.text
+    assert "RuntimeError" in caplog.text  # class name still identifies the failure
+    assert "terminal" in caplog.text  # ...and the kind still distinguishes it from a 429
 
 
 async def test_a_transient_blip_then_success_costs_no_review(monkeypatch) -> None:
