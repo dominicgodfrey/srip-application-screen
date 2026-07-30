@@ -9,16 +9,11 @@ does *not* decide acceptances — that is a downstream step consuming this syste
 Results persist in a dedicated Neon Postgres database (applications · llm_cache · events).
 The service deploys to Vercel as a single function; grading runs from a per-minute cron.
 
-> **v2 note:** the stateless Fillout-CSV batch system described by
-> [`SRIP_Application_Filter_PRD.md`](SRIP_Application_Filter_PRD.md) is **superseded** and
-> frozen on the `v2-fillout-batch` branch. It stays in the repo because v3 carries over its
-> GPA (§6), task-contract (§8), and audit-record (§9) semantics verbatim.
-
 ## Docs
 - [`CLAUDE.md`](CLAUDE.md) — how the system is built (stack, conventions, guardrails)
-- [`SRIP_ATS_PRD_v3.md`](SRIP_ATS_PRD_v3.md) — **current** functional spec (what it decides)
+- [`SRIP_ATS_PRD_v3.md`](SRIP_ATS_PRD_v3.md) — functional spec (what it decides, and why)
 - [`SCORING.md`](SCORING.md) — the 150-point scoring model
-- [`SRIP_Application_Filter_PRD.md`](SRIP_Application_Filter_PRD.md) — superseded v2 spec
+- [`config.yaml`](config.yaml) — every tunable and the pinned model IDs
 
 ## Dev quickstart
 Requires [uv](https://docs.astral.sh/uv/); the Python version is managed via `.python-version`.
@@ -102,8 +97,8 @@ broken in a specific way rather than working incorrectly.
 
 ## Privacy
 This system processes minors' PII. Applicant data **is persisted** — in the ATS's own Neon
-Postgres database only (v2's "no database" rule was deliberately overturned; see PRD v3 §9).
-The privacy stance is retention-based, so the DB can be emptied between cycles:
+Postgres database and nowhere else. The privacy stance is retention-based, so the database can
+be emptied between cycles:
 
 - **Per-submission delete** — for individual removal requests.
 - **Bulk purge** — the `Purge data…` control in the bottom corner of any signed-in page. It
@@ -112,8 +107,7 @@ The privacy stance is retention-based, so the DB can be emptied between cycles:
   one cohort or every cohort; a full wipe also clears `llm_cache`, which holds model output
   derived from essay text. If applications arrive while the dialog is open the confirm is
   rejected rather than deleting a different set than the one displayed.
-- **No export is taken by a purge** — download anything you need first. The export-then-purge
-  close-cycle flow of PRD v3 §9 is still designed rather than built.
+- **No export is taken by a purge** — download anything you need first.
 
 Both actions are session-gated and leave a non-PII tombstone in `events` (counts + timestamp).
 Never commit `data/`, `.env`, results files, or any real applicant content. Test fixtures are

@@ -1,325 +1,473 @@
-# PRD v3 — SRIP ATS: Continuous Webhook-Receiver Application Filter (CS Track)
+# SRIP ATS — Functional Specification (CS Track)
 
-**Consumer of this doc:** the implementation agent
-**Supersedes:** `SRIP_Application_Filter_PRD.md` (v2, Fillout CSV batch — frozen on the
-`v2-fillout-batch` branch). Where this document is silent, v2 semantics carry over;
-where they conflict, v3 wins.
-**Approved:** owner grill session, 2026-07-04.
+**Consumer of this doc:** anyone changing the filtering logic.
+This is the authoritative description of what the service decides and why. `config.yaml` is the
+machine-readable source of every tunable; `SCORING.md` is the one-page scoring summary;
+`src/srip_filter/models.py` is the source of truth for every schema named here.
 
-> ### ⚠️ Corrections layer — read this before implementing the transport, auth, or hosting
-> This document is authoritative for **scoring, gates, pipeline order, ranking, retention,
-> and the audit record**, and those sections are built exactly as written. It is **out of
-> date** wherever it describes the transport, auth, hosting, or payload shape: it was written
-> against a *proposed* contract and an always-on host, and both changed before launch. **The
-> table below is the built reality and wins over the body text.**
->
-> | Section | Says | Actually built |
-> |---|---|---|
-> | §1 diagram, §2.1 | Always-on host, no serverless | **Vercel serverless**, in the partner team's project and managed by them. The grading worker is a per-minute cron drain (`POST /api/cron/drain`) over the same Postgres queue, with a stale-claim reaper; migrations run there under an advisory lock, not at startup |
-> | §2.1, §8 | HMAC-SHA256 (`X-ATS-Timestamp`/`X-ATS-Signature`), ±300 s replay window | **Static `X-ATS-Secret` header**, constant-time compared, current+previous rotation, fail-closed when unset. HMAC is deferred pre-production hardening; `api/webhook_auth.py` is the seam |
-> | §2.1 | Website aborts at 15 s | Their dispatcher allows **60 s** plus retries. The fast-ACK discipline is unchanged regardless |
-> | §2.2, §2.3 | `ats_mode`-discriminated essays/resume payloads | **One combined payload** carrying every sector + an `ats_run: ("essays"\|"resume"\|"finaid")[]` selector. Extra fields: `all_answers[]` (the only place `field_key` appears), `gpa_unweighted`/`gpa_weighted` as separate `"value/max"` strings, `tier_*_choice`, `detected_sub_track`. A delivery whose `ats_run` omits `"essays"` is stored in a terminal `stored` status and never graded |
-> | §2.3 | Per-mode content hashes | **One `payload` column + one `payload_hash`**; the per-mode split existed only for "resume may arrive before essays", which the combined payload kills |
-> | §0, §11 | finaid out of scope (422) | **Stored, never scored** — accepted and persisted, no gate or subscore |
-> | §4 Stage 1, §8, SCORING §hard-gates | Profanity in any essay ⇒ REJECTED | **⇒ NEEDS_REVIEW** (owner, 2026-07-29). The gate is a word list and cannot tell a slur from ordinary vocabulary in context, so a human confirms every flag. Still fail-fast — no LLM spend on a flagged row. Gibberish still rejects |
-> | §4 Stage 1 | Word bounds from payload `min_words`/`max_words` | **The length gate is deleted.** The site 400s violations at submit and sends no bounds, so a config-sourced check could only fire on a stale local config |
-> | §6 | Server-side admin sessions | **Stateless HMAC-signed cookies** keyed on `ADMIN_PASSWORD_HASH` (no shared store; changing the password revokes every session), and the login throttle counts `events` rows so it holds across instances |
->
-> Everything not in this table — §4 stages 2–8, §5 LLM tasks, §7 ranking, §9 retention,
-> §10 invariants — carries over unchanged.
+The service does exactly two things per application: **reject** on deterministic hard-gate
+failures, and **score + rank** every survivor within its cohort. It does **not** decide
+acceptances — the ranked list is the deliverable, and acceptance happens downstream.
 
 ---
 
-## 0. What changed and why
+## 0. Governing principles
 
-The intake moved off Fillout onto the partner-owned **thinkNeuroWebsite**
-(Next.js + Neon Postgres + Auth0 on Vercel). That site dispatches **one JSON POST per
-application** to configurable per-cohort ATS webhook URLs and logs every attempt
-(`ats_logs`) with per-row re-run. The ATS is therefore no longer a batch tool a human
-feeds a CSV — it is a **continuous, persistent, secured receiver**:
+These decide every ambiguous case:
 
-- **Stateless → persistent.** v2's "no DB" principle is deliberately overturned:
-  applications arrive one at a time over weeks and results must outlive any restart.
-  The replacement privacy stance is §9 (retention) — the *spirit* (hold PII no longer
-  than needed) survives at cycle timescale.
-- **Trigger model:** website admins press "Run ATS on All Applications"
-  (`untested_only` re-runs undelivered rows). Assume batch bursts of single-application
-  POSTs; the design is trigger-agnostic if the site later adds auto-dispatch.
-- **Scope:** CS/Software-Engineering track only. `finaid` mode is **out of scope** (the
-  site simply leaves that URL unconfigured). Med track is future work.
+- **Deterministic-first, fail-fast.** Cheap gates run before any LLM call; the first hard-gate
+  hit stops the application with zero further token spend.
+- **Hard rules decide rejections; the score only ranks survivors.** No score threshold accepts
+  or rejects anyone.
+- **Bonuses only add.** The absence of any optional signal is neutral. No code path deducts for
+  a missing optional signal, and no bonus can create or rescue a rejection.
+- **Never silently reject.** Only an affirmative hard-gate failure produces `REJECTED`. Anything
+  unscoreable becomes `NEEDS_REVIEW`.
+- **Three outcomes only:** `REJECTED`, `RANKED`, `NEEDS_REVIEW`.
+- **Auditability is a feature.** Every applicant gets a structured audit record explaining every
+  gate and subscore. Manual overrides record `decided_by`.
+- **Idempotent ingest.** Same `submission_id` + same content ⇒ no-op. Changed content ⇒ re-grade.
+- **Scoring is owner-owned.** Weights, the 3.3 GPA threshold, the 2.0 floor, and gate semantics
+  change only by owner decision.
 
-Unchanged non-negotiables from v2 §0: deterministic-first fail-fast; hard rules reject,
-score only ranks; bonuses only add; never silently reject; three outcomes only
-(`REJECTED` / `RANKED` / `NEEDS_REVIEW`); auditability is a feature; GPA threshold 3.3,
-hard floor 2.0, blank-GPA+blank-explanation ⇒ REJECTED.
+Scope is the CS / Software-Engineering track. Applications arrive one at a time over weeks, and
+results outlive any process, so the service is persistent rather than a batch tool.
 
 ---
 
-## 1. System architecture
+## 1. Architecture
 
 ```
-thinkNeuroWebsite (Vercel) ──signed POST /webhooks/applications (ats_mode: essays|resume)
-                                       │ HMAC verify → validate → upsert → 202 (ms)
+Application website (Vercel) ──POST /webhooks/applications  (X-ATS-Secret)
+                                       │ verify → validate → upsert → 202 (milliseconds)
                                        ▼
-        FastAPI service (always-on host) ─── in-process async grading worker
-             │ session-gated admin UI            │ DB queue → pipeline → audit record
-             ▼                                   ▼
-        Review UI (live dashboard,          Neon Postgres (separate DB, ATS-only creds):
-        audit detail, promote/demote,       applications · llm_cache · events
-        needs-review, cohort what-if,
-        exports, close-cycle)               OpenAI (Tasks A,B,C,D,E,F) · R2 (resume GET)
+        FastAPI service on Vercel ◄── POST /api/cron/drain (per-minute cron, bearer)
+             │ session-gated admin UI      │ claim → pipeline → audit record
+             ▼                             ▼
+        Review UI (dashboard,         Neon Postgres (its own database, ATS-only creds):
+        audit detail, needs-review,   applications · llm_cache · events
+        cohort what-if, exports,
+        purge)                        OpenAI (Tasks A–F) · R2 (resume GET, disabled)
 ```
 
-- Separate Python/FastAPI service; the transport-agnostic core (`src/srip_filter/`)
-  keeps all logic; `api/` is the shell.
-- **Separate Neon Postgres database** — never the website's DB; ATS-only credentials;
-  thin plain-SQL layer (asyncpg), **no ORM**; payloads and audit records as JSONB.
-- Single instance; the queue lives in Postgres; concurrency bounded by the existing
-  semaphores. ~2,000 applications/cycle design target.
+- One Vercel Function. `vercel.json` pins `maxDuration: 800` and the per-minute cron;
+  `[tool.vercel] entrypoint` points at `api.main:app`.
+- The transport-agnostic core lives in `src/srip_filter/`; `api/` is a thin HTTP shell.
+- **A separate Neon Postgres database** — never the website's. ATS-only credentials, thin
+  plain-SQL layer over asyncpg, no ORM. Payloads and audit records are JSONB.
+- Nothing depends on a single long-lived process: the queue is a Postgres status column,
+  sessions are stateless signed cookies, and the login throttle counts `events` rows.
+- Design target ~2,000 applications per cycle.
 
-### 1.1 Persistence schema (migrations in `db/migrations/*.sql`)
+### 1.1 Persistence schema
 
-- **`applications`** — `submission_id` UUID PK, `cohort_name`, `user_email`,
-  `student_name`, `sub_track`, `submitted_at`, `essays_payload` JSONB,
-  `resume_payload` JSONB, `essays_hash`, `resume_hash`, `status`
-  (`received | grading | graded | error`), `audit_record` JSONB, `outcome`,
-  `final_score`, `created_at`, `updated_at`.
-  Resume-mode may arrive before essays-mode: a row may exist with only
-  `resume_payload`; composition happens when essays grade.
-- **`llm_cache`** — PK `(task, input_sha256)`, `output` JSONB, `model`, `created_at`.
-  The v2 in-run cache made persistent: re-grades re-bill only changed fields.
-- **`events`** — non-PII operational ledger: deliveries, grade completions, manual
-  overrides (with `decided_by`), purge tombstones (counts + timestamps). Never essay or
-  explanation text.
-- **Rank is never stored** — computed at read time per cohort (§7).
+Migrations are numbered `.sql` files in `db/migrations/`, applied in order under a Postgres
+advisory lock and recorded in `schema_migrations` — safe to run concurrently, idempotent to run
+twice.
+
+- **`applications`** — `submission_id` UUID PK, `cohort_name`, `user_email`, `student_name`,
+  `sub_track`, `submitted_at`, `payload` JSONB, `payload_hash`, `status`, `audit_record` JSONB,
+  `outcome`, `final_score`, `created_at`, `updated_at`.
+  `status` is the grading queue: `received | grading | graded | error | stored`.
+  `stored` is terminal — delivered but essay grading was never requested.
+- **`llm_cache`** — PK `(task, input_sha256)`, `output` JSONB, `model`, `created_at`. Keyed per
+  field, so a re-grade re-bills only what changed.
+- **`events`** — non-PII operational ledger: deliveries, grade completions, manual overrides
+  (with `decided_by`), login failures, purge tombstones. Never essay, explanation, or resume
+  text.
+- **Rank is never stored** — it is computed at read time, per cohort (§7).
 
 ---
 
 ## 2. Webhook contract
 
-### 2.1 Security (all webhook requests)
+### 2.1 Security
 
-- **HMAC-SHA256 signing.** Headers `X-ATS-Timestamp` (unix seconds) and
-  `X-ATS-Signature = hex(HMAC_SHA256(secret, timestamp + "." + raw_body))`.
-  Constant-time comparison; reject if |now − timestamp| > 300 s (replay window).
-  Two accepted secrets (`ATS_WEBHOOK_SECRET`, `ATS_WEBHOOK_SECRET_PREVIOUS`) for
-  zero-downtime rotation. Unsigned/mis-signed/stale ⇒ **401**, no row created or touched.
-- HTTPS only. Body cap ~1 MB ⇒ 413. Strict pydantic validation ⇒ 422 with a safe
-  message — **never a 500** on bad input. No rate limiting (single authenticated source;
-  admin-run bursts are legitimate).
-- **202 in milliseconds:** verify → validate → upsert → respond. Grading is async
-  (the website's `sendWebhook` aborts at 15 s; its `ats_logs.success` means *delivered*,
-  not *graded*). 4xx tells the website the payload is permanently rejected — don't
-  blind-retry.
+- **Static shared secret.** The website sends `X-ATS-Secret`; the service compares it
+  constant-time against `ATS_WEBHOOK_SECRET` and `ATS_WEBHOOK_SECRET_PREVIOUS` (both accepted, so
+  a rotation needs no downtime). Missing or wrong ⇒ **401**, and **nothing is created or
+  touched**. No secrets configured ⇒ fail closed. `api/webhook_auth.py` is the single place this
+  rule lives, shared with the replay tool.
+- HTTPS only. Body cap 1 MiB ⇒ 413. Strict pydantic validation ⇒ 422 with a safe message.
+  **Never a 500 on bad input.** No rate limiting — one authenticated source, and admin-triggered
+  bursts are legitimate.
+- **202 in milliseconds.** The handler does verify → validate → upsert → respond, nothing more.
+  Grading is the cron drain's job (§3). A 4xx tells the website the payload is permanently
+  rejected and should not be blind-retried.
 
 ### 2.2 `POST /webhooks/applications`
 
-Discriminated by `ats_mode`:
+One combined payload per application, carrying every sector, plus an
+`ats_run: ("essays"|"resume"|"finaid")[]` selector saying which graders to run. **A delivery
+whose `ats_run` omits `"essays"` is stored in the terminal `stored` status and never graded.**
 
-- **`_test` ping** (`{"_test": true, ...}` — sent by the site's Test button): if signed,
-  ⇒ 200 `{ok: true}`, **no row created**. Unsigned ⇒ 401 (that *is* the connectivity
-  answer).
-- **`essays` mode** — the primary application record. Expected fields (pinned against
-  the PROPOSED contract — see the corrections banner for the live shape):
-  `submission_id`, `user_email`, `student_name`, `cohort_name`, `cohort_display_name`,
-  `submitted_at`, `ed`, `is_finaid`, `ats_mode`,
-  `gpa: {unweighted, weighted|null}` (structured — ask #3),
-  `gpa_explanation`, `relevant_coursework`, `programming_languages`, `institution`,
-  `state_of_residence`, program-choice fields (three ranked), `github_profile`,
-  `sub_track`, `resume_url`,
-  `required_essays[]` / `optional_essays[]` with per-entry
-  `{question, answer, field_key, min_words, max_words}` (ask #5).
-- **`resume` mode** — thin payload (`submission_id`, identity, `resume_url`, `gpa`).
-  Upserted onto the same row; triggers only the resume stage when enabled.
+Fields: `submission_id`, `user_email`, `student_name`, `cohort_name`, `cohort_display_name`,
+`submitted_at` (US Pacific ISO with offset, not UTC `Z`), `ed`, `is_finaid`, `ats_run`,
+`gpa_unweighted` and `gpa_weighted` (separate `"value/max"` strings), `tier_first_choice` /
+`tier_second_choice` / `tier_third_choice`, `detected_sub_track`, `resume_url`,
+`required_essays[]` and `optional_essays[]` (each `{question, answer}`), `all_answers[]` (the
+only place `field_key` appears — institution, state of residence, GPA explanation, relevant
+coursework), and a `finaid` block.
+
+**`finaid` is present for every applicant** (empty-ish when not applicable) and is **stored but
+never scored** — no gate, no subscore. Non-finaid applicants simply drop `"finaid"` from
+`ats_run`.
+
+A `_test` ping (`{"_test": true, …}`, sent by the website's Test button) with a valid secret
+returns **200 `{ok: true}` and creates no row**. Without the secret it 401s — which is itself the
+connectivity answer.
+
+The contract is pinned against the live question config, and `tests/live_payload.py` is the
+single builder every suite uses, so a contract change happens in exactly one place.
 
 ### 2.3 Idempotency
 
-Upsert by `submission_id` with a per-mode content hash (`essays_hash`, `resume_hash`):
+Upsert by `submission_id` against one `payload_hash` over the whole canonicalized payload:
 
 - hash unchanged ⇒ 202 `{status: "unchanged"}`, nothing re-graded, nothing re-billed;
-- hash changed (the site allows re-submission overwriting `form_data`) ⇒ payload
-  replaces the stored one, `status → received`, re-grade; `llm_cache` makes unchanged
-  fields free;
-- duplicate deliveries (admin re-runs, `untested_only` races) are therefore harmless.
+- hash changed (re-submissions are legal on the website) ⇒ the payload replaces the stored one,
+  `status → received`, re-grade — and `llm_cache` makes unchanged fields free.
 
-v2's email/name dedup logic retires: `submission_id` is the identity, and the website
-enforces one application per user per cohort (`UNIQUE(user_email, cohort_id)`).
+Duplicate deliveries and admin re-runs are therefore harmless. `submission_id` is the identity;
+the website enforces one application per user per cohort.
 
 ---
 
-## 3. Grading worker
+## 3. Grading
 
-In-process async worker; claims rows with `SELECT … FOR UPDATE SKIP LOCKED` where
-`status='received'`, runs the pipeline per row inside try/except (per-row isolation —
-"when grading begins, it finishes"; unexpected error ⇒ `status='error'` + NEEDS_REVIEW
-audit record, never a stuck queue). Progress and completions go to `events`.
+`POST /api/cron/drain` is the only path that grades. It authenticates with
+`Authorization: Bearer $CRON_SECRET` and fails closed when that is unset, so a misconfigured
+deploy never exposes an open grading trigger.
+
+Each invocation does: apply pending migrations (advisory-locked) → reap stale claims older than
+`worker.stale_grading_seconds` → `process_one` until the queue is empty, `worker.drain_max_rows`
+is reached, or `worker.drain_budget_seconds` expires.
+
+Rows are claimed with `SELECT … FOR UPDATE SKIP LOCKED` where `status='received'`, so
+overlapping invocations are safe by construction and never double-grade a row. Each row runs
+inside its own try/except: an unexpected error marks **that** row `error` with a `NEEDS_REVIEW`
+audit record and the drain moves on. One poisoned application can never stall the queue.
+
+For local development `SRIP_LOCAL_WORKER=1` runs the same `process_one` in an in-process polling
+loop instead; `SRIP_DEV_FAKE_LLM=1` swaps in a zero-spend fake model client. Neither is ever set
+in production.
+
+**Health.** `GET /health` is unauthenticated and carries no PII or counts. It returns 200
+`{"status":"ok"}` normally, and **503** `{"status":"degraded"}` when the oldest ungraded
+application is older than `worker.queue_alert_seconds` or the database is unreachable. This is
+what makes a silently-stopped drain visible.
 
 ---
 
 ## 4. Pipeline (per application, fail-fast order)
 
 ```
-Gate 0  Payload validation           (at the edge; malformed ⇒ 422, never stored)
-Stage 1 Essay deterministic gates    profanity (ANY essay ⇒ NEEDS_REVIEW) · gibberish
-                                     (required essays ⇒ REJECTED)
-                                     · strict word bounds ── fail ⇒ REJECTED, STOP
-Stage 2 GPA normalization            structured input; Task A only for odd/weighted-only
-Stage 3 GPA gate                     unchanged v2 logic (3.3 / 2.0 / Task B)  ⇒ REJECTED?
-Stage 4 Required essays (Task D)     off-topic/gibberish ⇒ REJECTED; quality 0–15 each
-Stage 4b Technical essay (Task F)    bonus 0–20; failures ⇒ 0 bonus, never reject
-Stage 5 Coursework (Task C)          bonus 0–15, unchanged
-Stage 6 Resume                       bonus 0–25 behind pluggable seam; ships DISABLED
-Stage 7 School                       bonus 0–20/16, unchanged mechanics
-Stage 8 Compose + rank per cohort    (rank computed at read time)
-Stage 9 Audit record → applications.audit_record (JSONB)
+Gate 0   Payload validation        at the edge; malformed ⇒ 422, never stored
+Stage 1  Essay deterministic gates profanity (ANY essay ⇒ NEEDS_REVIEW)
+                                   gibberish (required essay ⇒ REJECTED)
+Stage 2  GPA normalization         structured input; Task A only for odd/weighted-only values
+Stage 3  GPA gate                  3.3 threshold / 2.0 floor / Task B      ⇒ REJECTED?
+Stage 4  Required essays (Task D)   off-topic or gibberish ⇒ REJECTED; quality 0–15 each
+Stage 4b Technical essay (Task F)   bonus 0–20; any failure ⇒ 0 bonus, never a rejection
+Stage 5  Coursework (Task C)        bonus 0–15
+Stage 6  Resume (Task E)            bonus 0–25, currently disabled
+Stage 7  School match               bonus 20 / 16
+Stage 8  Compose score              ranking computed at read time, per cohort
+Stage 9  Audit record               → applications.audit_record (JSONB)
 ```
 
-Stage-by-stage deltas from v2:
+### Stage 1 — essay gates (no LLM)
 
-- **Stage 1 length:** strict to the exact per-essay `min_words`/`max_words` from the
-  payload. The site server-validates required essays at submit, so a violation reaching
-  us signals tampering or contract drift — REJECTED with an audit note saying exactly
-  that. An essay entry without bounds gets no length check. Essay 3 over-max ⇒ bonus
-  voided (0), not rejected. The v2 soft-penalty ramp and HARD_MIN/HARD_MAX retire.
-- **Stage 2 GPA:** input is `gpa.unweighted` (format "3.8 / 4.0" — the existing
-  `_from_fraction` deterministic path). Task A fires only for weighted-only submissions
-  or unparseable values. Everything else in v2 §6 (percentage table, /5, /10,
-  NEEDS_REVIEW routing) carries over.
-- **Stage 4:** Task D unchanged except `quality_max_each: 15`.
-- **Stage 4b — NEW Task F (judgment tier, can only grant bonus):** grades the optional
-  technical essay on **relevance to its prompt, technical depth/difficulty, and
-  real-world impact**. Calibration: generic interest / surface-level online reading ⇒
-  low; sustained exploration ⇒ mid; interest turned side-project turned real impact ⇒
-  high. Output schema:
-  `{on_topic, gibberish, technical_depth_0_10, exploration_level_0_10, impact_0_10,
-  rationale}` — deterministic config-priced math maps signals to 0–20 (model judges,
-  config prices — the Task C pattern). `on_topic=false` or `gibberish=true` ⇒ 0 bonus.
-  Absent essay ⇒ 0, no LLM call. Profanity in this essay already stopped the application at
-  Stage 1 (as NEEDS_REVIEW — see the corrections banner).
-- **Stage 6 resume:** engine **decided in-house** (owner, 2026-07-27; a third-party hiring
-  agent was rejected — black box, an agent framework in a minors'-PII path, and it bypasses
-  the fetch-and-discard guardrails). Task E extracts signals,
-  `config.yaml` prices them — the Task C/F pattern. The stage is a
-  seam: `payload → {score_0_25, signals, audit_notes}`. Ships with
-  `resume.bonus_max: 0` (zero fetches, zero tokens). When enabled: fetch from the R2
-  host (https-only exact-host allowlist — ask #4), pypdf extract,
-  **fetch → extract → score → discard** — resume bytes/text never persist.
-- **Stage 7 school:** bonuses become US-Top-20 = 20, Intl-Top-50 = 16.
-- **Stage 8:** composition per `SCORING.md` (40+15+15+20+15+20+25 = 150). Ranking is
-  **scoped per `cohort_name`**.
-- **Affirmation gate retires** — the new form enforces required checkboxes at submit.
+- **Profanity in ANY essay, including the optional technical essay ⇒ NEEDS_REVIEW.** It stops the
+  application, but a human confirms the flag. The gate is `better-profanity`'s word list plus a
+  curated ALLOW list in `resources/profanity.txt`, and a word list cannot tell a slur from
+  ordinary vocabulary in context ("the transatlantic slave trade", "flange coupling", a
+  surname). A false positive must cost a review, not an application. Still fail-fast: zero token
+  spend on a flagged row. The BLOCK side of that file is deliberately empty.
+- **Gibberish in a required essay ⇒ REJECTED.** Deterministic heuristics needing at least
+  `gibberish.min_signals` signals together, so one alone never fires; ESL-safe by construction.
+  Task D backstops it. Gibberish in the optional essay only zeroes that bonus.
+- Where both fire, rejection wins and `primary_reason` names gibberish — a `REJECTED` record must
+  cite the gate that decided it.
+- **There is no word-count gate.** The website server-validates essay length at submit and
+  rejects violations there, and it sends no bounds, so any length check here could only fire on
+  a stale local config — that is, produce false positives on good-faith applicants. Word counts
+  are recorded as audit data only, and an over-long optional essay still scores on its merits.
 
-Program choices: the live form carries three ranked choice dropdowns
-(regular/intensive/honors) — v2's three-tier cohort machinery (strict first-choice cost
-ceiling, rank-filled caps, waitlist) survives with structured input replacing free-text
-parsing. **Note:** the website repo's `questions-default.ts` seeds differ from the live
-form; the payload contract must be pinned against the live question config (ask #6).
+### Stage 2 — GPA normalization
+
+Input is `gpa_unweighted` (format `"3.8 / 4.0"`). The goal is to resolve as many values as
+possible **deterministically**; minimizing `NEEDS_REVIEW` volume is an explicit objective.
+
+Deterministic path (no LLM):
+- clean 4.0-scale values `0.0–4.0` — used as-is;
+- detectable percentages (`85/100`, `92%`, `95.2%`) — via the table below;
+- clear `/5` or `/10` scales — linear/table conversion;
+- trailing labels stripped (`3.97 GPA`, `3.8/4.0 unweighted`) and the number parsed.
+
+Percentage → 4.0 conversion (`gpa.normalization.percentage_table`; the 87 row is the threshold):
+
+| Percentage | 4.0 |
+|---|---|
+| 93–100 | 4.0 |
+| 90–92 | 3.7 |
+| 87–89 | **3.3 ← threshold** |
+| 83–86 | 3.0 |
+| 80–82 | 2.7 |
+| 77–79 | 2.3 |
+| 73–76 | 2.0 |
+| < 73 | scales linearly toward 0 |
+
+**Task A** handles what the parser cannot: weighted-only submissions, values above the scale
+maximum (a 4.4 weighted is not a 4.0 unweighted), non-numeric or foreign scales. Its result is
+capped at 4.0.
+
+**`NEEDS_REVIEW`** when even Task A cannot safely place the value — `N/A`, "my school doesn't
+offer GPAs", blank. **A missing or unresolvable scale is never a rejection**; doing so would
+false-reject the large legitimate international contingent.
+
+### Stage 3 — GPA gate
+
+```
+if normalized_gpa is null or requires_manual_review:
+    if the GPA field is blank AND the explanation is blank:
+        → REJECTED  ("No GPA provided and no explanation given")     # a non-answer
+    → NEEDS_REVIEW  ("GPA scale could not be normalized")            # not a rejection
+elif normalized_gpa < 2.0:                                           # hard floor
+    → REJECTED                                    # no explanation can rescue; no Task B call
+elif normalized_gpa >= 3.3:
+    → PASS, award GPA points on the 3.3 → 4.0 gradient
+else:                                                                # below 3.3
+    if the explanation is blank:
+        → REJECTED  ("GPA below 3.3, no explanation")
+    else:
+        Task B judges (severity-scaled bar) → "rank" or "reject"
+```
+
+GPA points are a linear gradient over normalized GPA: 3.3 ⇒ 0, 4.0 ⇒ `gpa.score_max` (40). Below
+3.3 is reachable only via an approved Task B explanation and lands at the gradient bottom — the
+deficit is reflected, never erased. The further below 3.3, the higher the bar Task B applies.
+
+### Stage 4 — required essays
+
+Task D adds relevance (a gate) and quality (a score) per essay. `on_topic=false` or
+`is_gibberish=true` ⇒ the whole application is `REJECTED`. Otherwise
+`essay_score = max(0, quality_score − grammar_spelling_penalty)`, with quality 0–15 each
+(30 total) and the grammar penalty capped at `essay_scoring.grammar_penalty_max` (3) — slight by
+design, because many applicants are non-native English speakers.
+
+### Stage 4b — technical essay (optional, bonus-only)
+
+Task F grades the optional technical essay on **relevance to its prompt, technical depth and
+difficulty, and real-world impact**. Calibration: generic interest or surface-level online
+reading scores low; sustained exploration scores mid; interest turned side project turned real
+impact scores high.
+
+The model judges three 0–10 signals and `config.yaml` prices them:
+
+```
+bonus = bonus_max × (w_depth·d + w_expl·e + w_impact·i) / (10 × (w_depth + w_expl + w_impact))
+```
+
+`on_topic=false` or `gibberish=true` ⇒ 0 bonus. An absent essay ⇒ 0 with no LLM call. Nothing
+here can ever reject.
+
+### Stage 5 — coursework (bonus)
+
+Relevance ranking, most to least: **CS > Math > Data > everything else (ignored)**.
+
+- CS / software / programming — strongest positive.
+- Math (calculus, linear algebra, discrete, statistics-as-math) — strong.
+- Data (data science, analytics, ML, databases) — moderate.
+- Anything else — **ignored at weight 0. Not a penalty.**
+
+Grades are **exclusion-only**: a grade counts only when explicitly stated for that course; a
+course with no stated grade counts at full weight (never guess or default one); a course
+explicitly graded below `coursework.min_grade_pct` (80%) is **excluded entirely**. Any counting
+course contributes a flat `category_weight × unit` — the grade never scales the bonus up or down.
+Empty coursework ⇒ 0 bonus, no penalty.
+
+### Stage 6 — resume (bonus, disabled)
+
+Task E extracts signals and `config.yaml` prices them, the same shape as Tasks C and F. The
+stage is a seam: `payload → {score_0_25, signals, audit_notes}`.
+
+**`resume.bonus_max: 0` disables it entirely — zero fetches, zero tokens — and that is the
+current setting.** Two things must change before it can be raised: `resume.allowed_url_hosts`
+must be re-pinned to the website's R2 host (the entry there is the retired Fillout value), and
+the weights must be re-priced for the 0–25 scale.
+
+When enabled, the guardrails are absolute: https-only exact-host allowlist, no redirects,
+streaming size cap, and **fetch → extract → score → discard**. Resume bytes and text never reach
+the database, an artifact, or a log. Any failure ⇒ 0 bonus plus an audit note, never a block.
+
+### Stage 7 — school match (bonus)
+
+Fuzzy match (`rapidfuzz`, threshold `school.fuzzy_match_threshold`) against curated lists:
+US Top-20 ⇒ 20, International Top-50 ⇒ 16. "High School" or no match ⇒ 0, which is neutral.
+
+### Stage 8 — composition
+
+Per `SCORING.md`: 40 + 15 + 15 + 20 + 15 + 20 + 25 = **150 maximum** (125 while the resume stage
+is disabled). Ranking is scoped per `cohort_name`.
+
+Program choices arrive as three ranked dropdown values (regular / intensive / honors) and feed
+the cohort what-if tool: a strict first-choice cost ceiling, rank-filled caps, and a waitlist.
+Per-tier capacities are a staff input on the cohort endpoints, not config.
 
 ---
 
 ## 5. LLM tasks
 
-| Task | Job | Tier | Notes |
+| Task | Job | Tier | Can reject? |
 |---|---|---|---|
-| A | GPA normalization fallback | mini | now rare (structured GPA) |
-| B | Low-GPA explanation adequacy | full | unchanged, severity-scaled |
-| C | Coursework decomposition | mini | unchanged |
-| D | Required-essay grading | full | quality max 15 each |
-| E | Resume signal extraction | mini | behind the resume seam |
-| F | **NEW** technical-essay bonus | full | §4 Stage 4b |
+| A | GPA normalization fallback | mini | no |
+| B | Low-GPA explanation adequacy | full | **yes** |
+| C | Coursework decomposition | mini | no |
+| D | Required-essay grading | full | **yes** |
+| E | Resume signal extraction | mini | no |
+| F | Technical-essay bonus | full | no (bonus only) |
 
-All v2 LLM rules stand: structured outputs into pydantic, temperature ≤ 0.2, retry-once
-then NEEDS_REVIEW (`LLM_PARSE_FAILURE`) for required signals / 0-bonus for optional ones,
-prompts in `llm/prompts/`, model IDs pinned in config. Cache is now the persistent
-`llm_cache` table.
+Model IDs are pinned in `config.yaml` and swappable; verify against OpenAI's current catalog. No
+o-series reasoning models.
 
----
+Rules for every task:
 
-## 6. Admin surface (session-gated)
-
-Auth: **shared strong admin password** → server-side session, secure/HTTP-only cookie,
-throttled login attempts. One `require_admin` dependency guards every route except
-`/health` and the HMAC-verified webhook. Treated as the permanent solution (the
-dependency is the seam if SSO is ever wanted). Manual overrides record `decided_by`.
-
-Screens (adapted from v2's Phase 10–16 UI, re-pointed from in-memory jobs to the DB):
-
-1. **Live cohort dashboard** — replaces the upload screen: applicants by cohort, outcome
-   counts, score histogram, grading-status column, filter/sort.
-2. **Audit detail** — the existing per-applicant panel (gates, GPA block incl.
-   explanation text, subscores, coursework breakdown, essays with highlight-on-reject,
-   promote/demote buttons) unchanged in spirit.
-3. **Needs-review queue** — NEEDS_REVIEW rows + blocker reasons; resolves via
-   promote (re-score) as in v2.
-4. **Cohort what-if** — live capacity allocation over the current ranking (per cohort).
-5. **Exports** — `decisions.jsonl`, ranked/rejected/needs-review CSVs, cohort rosters;
-   generated on demand from the DB.
-6. **Lifecycle** — per-submission delete (individual removal requests) and the
-   close-cycle action (§9), both admin-gated, both tombstoned in `events`.
+- All calls go through `llm/client.py`. Structured Outputs parsed straight into the pydantic
+  models in `models.py` (`TaskAOutput` … `TaskFOutput`), which are the authoritative schemas.
+  Prompts live in `llm/prompts/`, never inline.
+- Temperature ≤ 0.2 for repeatability. Bounded concurrency via a semaphore.
+- **Applicant text is always fenced data in prompts, never instructions.**
+- **Requests are paced against `llm.tokens_per_minute`** by a continuously-refilling token
+  bucket, so a burst is slowed rather than made lossy. ⚠️ This must be set to the deploying
+  account's real TPM limit for the full-tier model.
+- **Two distinct failure policies.** A *transient* failure (429, timeout, connection, 5xx) is
+  retried up to `llm.max_attempts` with exponential backoff — a rate limit is the service's
+  problem, not the applicant's, and must never become a human review item. A *terminal* failure
+  (unparseable or invalid output) gets the initial attempt plus one retry, then raises. Only
+  terminal failures become `NEEDS_REVIEW` on a required signal, or 0 bonus on an optional one.
+- **`llm_cache` (Postgres)** is keyed `(task, sha256(input))`, so a re-grade re-bills only
+  changed fields.
+- Per-row try/except: one failure is one `NEEDS_REVIEW`/`error` row, never a stuck queue.
 
 ---
 
-## 7. Ranking & downstream
+## 6. Admin surface
 
-Sort `RANKED` by `final_score` desc within `cohort_name`; tiebreaker
-gpa_points → essay total → submission_id; rank 1..N assigned at read time (always live —
-a new application can shift ranks until the cycle closes). No acceptance cutoff — the
-ranked list is the deliverable; the cohort what-if tool simulates capacities.
-Acceptance/payment/onboarding live on the website side; results move by export handoff
-until a results flow-back API is agreed with the website team (not planned for v3).
+Auth is a **shared strong admin password** → a stateless HMAC-signed session cookie
+(Secure / HttpOnly / SameSite=Lax), with throttled login attempts counted in `events` so the
+throttle holds across instances. The cookie is signed with `ADMIN_PASSWORD_HASH`, so **changing
+the password invalidates every live session** — that is the revocation lever. One middleware
+default-denies everything outside `auth.OPEN_PREFIXES` (health, the secret-verified webhook, the
+bearer-verified cron drain, login/logout, static assets). Manual overrides record `decided_by`,
+which under a shared credential is the literal `"admin"`.
+
+Screens:
+
+1. **Live cohort dashboard** — applicants by cohort, outcome counts, grading status,
+   filter/sort/search.
+2. **Audit detail** — per applicant: gates, the GPA block including explanation text, subscores,
+   coursework breakdown, technical-essay bonus, essays with highlight-on-reject, and
+   promote/demote buttons.
+3. **Needs-review queue** — `NEEDS_REVIEW` rows with their blocker reasons; resolved by promoting
+   (which re-scores) or demoting to `REJECTED`.
+4. **Cohort what-if** — live capacity allocation over the current per-cohort ranking.
+5. **Exports** — `decisions.jsonl`, ranked / rejected / needs-review CSVs, cohort rosters,
+   generated on demand from the database.
+6. **Lifecycle** — per-submission delete and bulk purge (§9).
+
+---
+
+## 7. Ranking
+
+`RANKED` applicants sort by `final_score` descending **within `cohort_name`**, with a
+deterministic tiebreaker: `gpa_points` → essay total → `submission_id`. Rank 1..N is assigned at
+read time, so it is always live — a new application can shift ranks until the cycle closes.
+
+There is no acceptance cutoff. The ranked list is the deliverable, and the cohort what-if tool
+simulates capacities over it. Results move downstream by export handoff.
 
 ---
 
 ## 8. Security summary
 
-- Webhook: HMAC + replay window + rotation (§2.1); 401 touches nothing.
-- Admin: session auth (§6); throttled login; HTTPS everywhere.
-- Secrets (env only, never repo): `OPENAI_API_KEY`, `DATABASE_URL`,
-  `ATS_WEBHOOK_SECRET[_PREVIOUS]`, `ADMIN_PASSWORD_HASH`, session signing key.
-- SSRF: resume fetches https-only against an exact-host allowlist (R2 public host);
-  no redirects; streaming size cap.
-- Logs and `events` carry `submission_id` only — never essay/explanation/resume content.
-- Prompt-injection posture unchanged: applicant text is always fenced data in prompts,
-  never instructions; Task F/E prompts are injection-resistant per the Task E precedent.
+- **Webhook:** static secret, constant-time compared, current+previous rotation, fail-closed when
+  unset. A 401 touches nothing.
+- **Cron drain:** bearer `CRON_SECRET`, fail-closed when unset. The only path that grades.
+- **Admin:** signed-cookie sessions, throttled login, default-deny middleware, HTTPS.
+- **Secrets** live in the environment or a gitignored `.env`, never in code, config, output, or
+  logs: `OPENAI_API_KEY`, `DATABASE_URL`, `ATS_WEBHOOK_SECRET[_PREVIOUS]`,
+  `ADMIN_PASSWORD_HASH`, `CRON_SECRET`. Every one fails closed.
+- **SSRF:** resume fetches are https-only against an exact-host allowlist, with no redirects and
+  a streaming size cap.
+- **Logs and `events` carry `submission_id` only** — never essay, explanation, or resume text.
+  Exception messages are reduced to their class name before logging, because a traceback can
+  quote applicant content.
+- **Prompt injection:** applicant text is always fenced data, never instructions.
+
+This service holds minors' PII. Every change is judged accordingly.
+
+---
 
 ## 9. Data retention
 
-Design supports (final policy still to be settled with the programme owner):
+- **Per-submission delete** — hard delete plus a tombstone, for individual removal requests.
+- **Bulk purge** — a session-gated control that previews exactly what would be destroyed (row
+  count, per-cohort and per-outcome splits, submission-date span, and the applicant fields
+  involved), then deletes on confirmation. Scope is one cohort or every cohort. The confirmation
+  carries the row count the operator was shown and is refused if the live count has moved, so a
+  purge can never destroy a different set than the one displayed. A full wipe also truncates
+  `llm_cache`, whose `output` holds model commentary derived from essay text; a scoped purge
+  cannot (the cache has no cohort column). Delete and tombstone share one transaction.
+- **A purge takes no export.** Artifacts must be downloaded first if they are wanted.
+- Both actions leave a non-PII tombstone in `events` — counts, scope, and timestamp.
+- Resume bytes and text are never stored under any policy.
 
-- **Per-submission delete** — hard delete + tombstone.
-- **Close-cycle** — admin action: export final artifacts → typed confirmation → delete
-  the cohort's applicant rows → non-PII tombstone (counts + timestamp). DB empty between
-  cycles; exported artifacts in staff hands are the durable record.
-- Optional anonymized-analytics retention (strict column allowlist, all free text
-  dropped) if the owner chooses that variant.
-- Resume bytes/text are never stored under any policy.
+The retention *policy* — how long applications live after a cycle closes — is an owner decision
+and is not encoded anywhere in the service.
 
-## 10. Invariants (all tested, extending v2 §12)
+---
 
-1. No optional-signal absence (essay 3, coursework, school, resume) ever reduces
+## 10. Invariants (each has an explicit test)
+
+1. No optional-signal absence (technical essay, coursework, school, resume) ever reduces
    `final_score`.
 2. No bonus changes a `REJECTED` outcome.
 3. Every `REJECTED` record names the failing gate in `primary_reason`.
-4. GPA < 3.3 never yields points without an approved Task B explanation, never above
-   the gradient bottom.
+4. GPA below 3.3 never yields points without an approved Task B explanation, and never above the
+   gradient bottom.
 5. Ranking is deterministic and stable across reruns.
-6. Nothing unscoreable is ever `REJECTED` — always `NEEDS_REVIEW`.
-7. **NEW** Unsigned / tampered / stale / replayed webhook requests never create or
-   mutate any row.
-8. **NEW** Re-delivery of identical content changes no outcome and re-bills nothing.
-9. **NEW** A grading crash on one row never blocks the queue (per-row isolation).
+6. Nothing unscoreable is ever `REJECTED` — it becomes `NEEDS_REVIEW`.
+7. Unauthenticated, tampered, or wrong-secret webhook requests never create or mutate any row.
+8. Re-delivery of identical content changes no outcome and re-bills nothing.
+9. A grading crash on one row never blocks the queue.
 
-## 11. Out of scope (v3)
+Tests run with no API spend against a `FakeLLMClient`. Database tests run against
+`DATABASE_URL_TEST` and skip cleanly when it is unset.
 
-Finaid mode · med track · results flow-back into the website · auto-dispatch triggers ·
-GitHub-profile fetching for resume eval · manual CSV upload (may return later; the
-replay tool covers dev needs).
+---
 
-## 12. External dependencies
+## 11. Audit record
 
-The contract is frozen against the live question config, so nothing here blocks the code.
-Two items remain owned by the website team and are tracked outside this repo: setting
-`ATS_WEBHOOK_SECRET` in their environment (their dispatcher omits the auth header entirely
-when it is unset, so every delivery would 401), and supplying the exact R2 host if the
-resume stage is ever enabled. HMAC request signing is the agreed pre-production hardening
-step.
+One per applicant, stored as JSONB in `applications.audit_record`. `AuditRecord` in
+`src/srip_filter/models.py` is the authoritative schema — validated on read, so a malformed
+record degrades visibly rather than silently.
+
+Identity and metadata: `submission_id`, `name`, `email`, `phone`, `cohort_name`,
+`state_of_residence`, `international` (derived, not scored), `programming_languages`,
+`github_profile`, `sub_track`, `program_choices`, `dedup`.
+
+Decision: `outcome`, `final_score` (null unless `RANKED`), `rank` (read-time), `decided_at_stage`,
+`primary_reason`.
+
+Evidence: `gates` (profanity, gibberish, GPA gate, essay relevance, word counts as data),
+`gpa` (raw, normalized, original scale, conversion method, confidence, and the Task B
+`explanation_eval` when it ran), `scores` (gpa_points, per-essay and total, coursework, school,
+resume, technical-essay bonuses), `essays` (texts, for highlight-on-reject),
+`coursework_breakdown` (per course: name, raw grade, percentage, category, whether it counts),
+`school_match`, `resume`, `technical_essay`.
+
+Provenance: `reasons` (human-readable trail), `llm_calls` (which tasks ran), `errors`, and
+`manual_override` — true when a human pushed a `REJECTED`/`NEEDS_REVIEW` applicant into the
+ranking from the audit UI. The original gate verdicts stay visible in `gates` and `reasons`, so
+the override is honest in the trail.
