@@ -75,10 +75,22 @@ Environment variables to set in the Vercel project:
 ## Privacy
 This system processes minors' PII. Applicant data **is persisted** — in the ATS's own Neon
 Postgres database only (v2's "no database" rule was deliberately overturned; see PRD v3 §9).
-The privacy stance is retention-based: per-submission delete (built) plus a close-cycle
-export-then-purge (designed, not yet built) so the DB is empty between cycles. Never commit
-`data/`, `.env`, results files, or any real applicant content. Test fixtures are synthetic. Logs and the `events`
-ledger carry `submission_id` only — never essay, explanation, or resume text.
+The privacy stance is retention-based, so the DB can be emptied between cycles:
+
+- **Per-submission delete** — for individual removal requests.
+- **Bulk purge** — the `Purge data…` control in the bottom corner of any signed-in page. It
+  shows exactly what is about to be destroyed (row count, cohorts, submission-date span,
+  outcome split, and the applicant fields involved) and deletes only on confirmation. Scope is
+  one cohort or every cohort; a full wipe also clears `llm_cache`, which holds model output
+  derived from essay text. If applications arrive while the dialog is open the confirm is
+  rejected rather than deleting a different set than the one displayed.
+- **No export is taken by a purge** — download anything you need first. The export-then-purge
+  close-cycle flow of PRD v3 §9 is still designed rather than built.
+
+Both actions are session-gated and leave a non-PII tombstone in `events` (counts + timestamp).
+Never commit `data/`, `.env`, results files, or any real applicant content. Test fixtures are
+synthetic. Logs and the `events` ledger carry `submission_id` only — never essay, explanation,
+or resume text.
 
 Resume PDFs (Stage 6) are downloaded only from the https hosts pinned in
 `resume.allowed_url_hosts` (`config.yaml`), processed in memory one applicant at a time

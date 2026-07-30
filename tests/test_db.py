@@ -294,3 +294,105 @@ async def test_delete_submission_hard_deletes_and_tombstones(pool):
     assert await delete_submission(pool, sid) is False  # honest double-delete
     kinds = [r["kind"] for r in await pool.fetch("SELECT kind FROM events")]
     assert "submission_deleted" in kinds
+
+
+# ------------------------------------------------------------------------------------------------
+# Bulk purge (PRD v3 §9 close-cycle)
+# ------------------------------------------------------------------------------------------------
+
+
+async def test_purge_preview_describes_the_scope_without_deleting(pool):
+    a, b, c = _sid(), _sid(), _sid()
+    await upsert_application(pool, submission_id=a, payload=_payload(), cohort_name="calib")
+    await upsert_application(pool, submission_id=b, payload=_payload(x=1), cohort_name="calib")
+    await upsert_application(pool, submission_id=c, payload=_payload(x=2), cohort_name="live")
+    await finish_graded(pool, a, audit_record={"outcome": "RANKED"}, outcome="RANKED",
+                        final_score=100.0)
+    await cache_put(pool, "task_d", "hash-1", {"quality_score": 12}, model="gpt-x")
+
+    scoped = await dbmod.purge_preview(pool, cohort_name="calib")
+    assert scoped["total"] == 2
+    assert scoped["by_cohort"] == {"calib": 2}
+    assert scoped["with_audit_record"] == 1
+    assert scoped["llm_cache_cleared"] is False  # a scoped purge leaves the cache alone
+    assert scoped["llm_cache_rows"] == 1
+
+    every = await dbmod.purge_preview(pool)
+    assert every["total"] == 3
+    assert every["by_cohort"] == {"calib": 2, "live": 1}
+    assert every["llm_cache_cleared"] is True
+
+    # Read-only: previewing twice must not have destroyed anything.
+    assert len(await list_applications(pool)) == 3
+
+
+async def test_scoped_purge_deletes_only_its_cohort_and_keeps_the_cache(pool):
+    a, b = _sid(), _sid()
+    await upsert_application(pool, submission_id=a, payload=_payload(), cohort_name="calib")
+    await upsert_application(pool, submission_id=b, payload=_payload(x=1), cohort_name="live")
+    await cache_put(pool, "task_d", "hash-1", {"quality_score": 12}, model="gpt-x")
+
+    receipt = await dbmod.purge_applications(pool, cohort_name="calib", expected_count=1)
+
+    assert receipt == {
+        "applications_deleted": 1,
+        "llm_cache_rows_deleted": 0,
+        "scope": "calib",
+    }
+    assert await get_application(pool, a) is None
+    assert await get_application(pool, b) is not None  # the other cohort survives
+    assert await pool.fetchval("SELECT COUNT(*) FROM llm_cache") == 1
+
+
+async def test_full_wipe_clears_applications_and_the_derived_cache(pool):
+    """A full wipe must not leave model commentary about deleted applicants behind."""
+    a, b = _sid(), _sid()
+    await upsert_application(pool, submission_id=a, payload=_payload(), cohort_name="calib")
+    await upsert_application(pool, submission_id=b, payload=_payload(x=1), cohort_name="live")
+    await cache_put(pool, "task_d", "hash-1", {"rationale": "about an essay"}, model="gpt-x")
+    await cache_put(pool, "task_b", "hash-2", {"rationale": "about a GPA note"}, model="gpt-x")
+
+    receipt = await dbmod.purge_applications(pool, cohort_name=None, expected_count=2)
+
+    assert receipt["applications_deleted"] == 2
+    assert receipt["llm_cache_rows_deleted"] == 2
+    assert receipt["scope"] == "ALL_COHORTS"
+    assert await list_applications(pool) == []
+    assert await pool.fetchval("SELECT COUNT(*) FROM llm_cache") == 0
+
+
+async def test_purge_is_tombstoned_with_counts_and_no_pii(pool):
+    sid = _sid()
+    await upsert_application(
+        pool, submission_id=sid, payload=_payload(), cohort_name="calib",
+        user_email="syn@example.com", student_name="Syn Thetic",
+    )
+
+    await dbmod.purge_applications(pool, cohort_name="calib", expected_count=1)
+
+    row = await pool.fetchrow("SELECT * FROM events WHERE kind = 'purge'")
+    assert row is not None
+    assert row["submission_id"] is None  # a bulk purge is about counts, not one applicant
+    blob = row["details"]
+    assert "syn@example.com" not in blob and "Syn Thetic" not in blob
+    assert '"applications_deleted": 1' in blob
+
+
+async def test_count_drift_aborts_the_purge_and_deletes_nothing(pool):
+    """The dialog's count is what the operator consented to; deliveries keep arriving."""
+    a, b = _sid(), _sid()
+    await upsert_application(pool, submission_id=a, payload=_payload(), cohort_name="calib")
+    await upsert_application(pool, submission_id=b, payload=_payload(x=1), cohort_name="calib")
+
+    # Operator was shown 1 (a second application landed while the dialog was open).
+    with pytest.raises(dbmod.PurgeCountMismatch) as err:
+        await dbmod.purge_applications(pool, cohort_name="calib", expected_count=1)
+
+    assert err.value.expected == 1 and err.value.actual == 2
+    assert len(await list_applications(pool)) == 2  # nothing destroyed
+    assert await pool.fetchval("SELECT COUNT(*) FROM events WHERE kind='purge'") == 0
+
+
+async def test_purge_of_an_empty_scope_is_a_harmless_noop(pool):
+    receipt = await dbmod.purge_applications(pool, cohort_name="nobody-here", expected_count=0)
+    assert receipt["applications_deleted"] == 0

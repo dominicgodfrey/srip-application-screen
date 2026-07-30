@@ -98,7 +98,11 @@ def test_open_path_allowlist() -> None:
                  "/logout", "/favicon.ico", "/api/cron/drain"):
         assert is_open_path(path), path
     for path in ("/", "/api/applications", "/api/exports/decisions", "/audit", "/cohorts",
-                 "/healthz", "/webhooksx"):
+                 "/healthz", "/webhooksx",
+                 # The bulk purge is irreversible and destroys minors' PII: it must never
+                 # drift onto the allowlist, and /api/cron/ sitting there makes that a real
+                 # hazard rather than a theoretical one.
+                 "/api/admin/purge", "/api/admin/purge-preview"):
         assert not is_open_path(path), path
 
 
@@ -132,6 +136,22 @@ def test_api_without_session_gets_401_json() -> None:
     resp = client.get("/api/applications")  # fetch-style caller, no text/html accept
     assert resp.status_code == 401
     assert resp.json() == {"detail": "Authentication required."}
+
+
+def test_bulk_purge_is_unreachable_without_a_session() -> None:
+    """The destructive endpoint has to be stopped by the middleware, before any handler.
+
+    A sentinel pool would raise on use, so reaching the handler at all would surface as a 500
+    rather than a quiet 401 — the assertion is that the barrier, not luck, is what stops it.
+    """
+    client = _client(db_pool=object())
+
+    preview = client.get("/api/admin/purge-preview")
+    purge = client.post("/api/admin/purge", json={"expected_count": 0})
+
+    assert preview.status_code == 401
+    assert purge.status_code == 401
+    assert purge.json() == {"detail": "Authentication required."}
 
 
 def test_health_and_login_stay_open() -> None:

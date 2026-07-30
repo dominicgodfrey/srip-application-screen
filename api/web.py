@@ -24,8 +24,14 @@ APP_TITLE = "SRIP Track 2 — Application Filter"
 
 
 def _ctx(**extra: object) -> dict[str, object]:
-    """Base template context shared by every page (non-PII only)."""
-    return {"brand": BRAND, "app_title": APP_TITLE, **extra}
+    """Base template context shared by every page (non-PII only).
+
+    ``show_purge`` gates the bulk-purge control in ``base.html``. Only these three routes set
+    it, and they are all behind the session middleware — ``login.html`` extends the same base
+    but builds its context in ``api.main``, so the destructive control never renders to an
+    unauthenticated visitor.
+    """
+    return {"brand": BRAND, "app_title": APP_TITLE, "show_purge": True, **extra}
 
 
 def register_pages(app: FastAPI, templates: Jinja2Templates) -> None:

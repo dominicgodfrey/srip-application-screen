@@ -35,7 +35,30 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
+  {% if show_purge %}
+  {# Bulk purge (PRD v3 §9). Bottom corner, deliberately out of the primary flow: it is
+     irreversible and destroys minors' PII. Rendered only for the session-gated pages. #}
+  <button id="purge-open" class="purge-fab" type="button"
+          title="Permanently delete application data">Purge data…</button>
+
+  <dialog id="purge-dialog" class="purge-dialog" aria-labelledby="purge-title">
+    <h2 id="purge-title" class="purge-heading">Permanently delete application data</h2>
+    <p class="purge-lede">
+      Read this before confirming. There is no undo, no export taken, and no recycle bin —
+      the rows are removed from the database.
+    </p>
+    <div id="purge-body" class="purge-body" aria-live="polite">Loading current figures…</div>
+    <form method="dialog" class="purge-actions">
+      <button value="cancel" class="btn" autofocus>Cancel</button>
+      <button id="purge-confirm" type="button" class="btn btn-danger" disabled>
+        Confirm delete
+      </button>
+    </form>
+  </dialog>
+  {% endif %}
+
   <script src="/static/js/common.js"></script>
+  {% if show_purge %}<script src="/static/js/purge.js"></script>{% endif %}
   {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -18,6 +18,7 @@ from api.main import create_app
 from fastapi.testclient import TestClient
 
 from api import admin_api as admin_mod
+from srip_filter import db as dbmod
 from srip_filter.config import AppConfig
 from srip_filter.llm.client import FakeLLMClient
 from srip_filter.models import TaskDOutput, TaskFOutput
@@ -95,13 +96,47 @@ class _FakeStore:
     async def add_event(self, pool, kind, *, submission_id=None, details=None):
         self.events.append((kind, submission_id, details))
 
+    def _scoped(self, cohort_name):
+        return [r for r in self.rows.values()
+                if cohort_name is None or r["cohort_name"] == cohort_name]
+
+    async def purge_preview(self, pool, *, cohort_name=None):
+        rows = self._scoped(cohort_name)
+        by_cohort: dict[str, int] = {}
+        for r in rows:
+            by_cohort[r["cohort_name"]] = by_cohort.get(r["cohort_name"], 0) + 1
+        return {
+            "cohort_name": cohort_name,
+            "total": len(rows),
+            "with_audit_record": sum(1 for r in rows if r["audit_record"]),
+            "earliest": None,
+            "latest": None,
+            "by_outcome": {},
+            "by_cohort": by_cohort,
+            "llm_cache_rows": 7,
+            "llm_cache_cleared": cohort_name is None,
+        }
+
+    async def purge_applications(self, pool, *, cohort_name=None, expected_count):
+        rows = self._scoped(cohort_name)
+        if len(rows) != expected_count:
+            raise dbmod.PurgeCountMismatch(expected=expected_count, actual=len(rows))
+        for r in rows:
+            del self.rows[r["submission_id"]]
+        self.events.append(("purge", None, {"applications_deleted": len(rows)}))
+        return {
+            "applications_deleted": len(rows),
+            "llm_cache_rows_deleted": 7 if cohort_name is None else 0,
+            "scope": cohort_name or "ALL_COHORTS",
+        }
+
 
 @pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
     s = _FakeStore()
     for name in (
         "list_applications", "get_application", "finish_graded",
-        "delete_submission", "add_event",
+        "delete_submission", "add_event", "purge_preview", "purge_applications",
     ):
         monkeypatch.setattr(admin_mod.dbmod, name, getattr(s, name))
     return s
@@ -285,3 +320,77 @@ def test_cohort_whatif_runs_over_live_ranking(client: TestClient,
     body = client.post("/api/cohorts", params={"intensive": 5}).json()
     assert body["summary"]["assigned"] == 1
     assert body["summary"]["total_ranked"] == 1
+
+
+# ------------------------------------------------------------------------------------------------
+# Bulk purge (PRD v3 §9) — the endpoints behind the confirmation dialog
+# ------------------------------------------------------------------------------------------------
+
+
+def test_purge_preview_is_read_only(client: TestClient, store: _FakeStore) -> None:
+    a, b = str(uuid.uuid4()), str(uuid.uuid4())
+    store.add(a, audit_record=_audit(a, outcome="RANKED", score=1.0))
+    store.add(b, cohort_name="su27-cs")
+
+    body = client.get("/api/admin/purge-preview").json()
+    assert body["total"] == 2
+    assert body["by_cohort"] == {"su26-cs": 1, "su27-cs": 1}
+    assert body["llm_cache_cleared"] is True  # unscoped preview == full wipe
+    assert len(store.rows) == 2  # nothing deleted by looking
+
+    scoped = client.get("/api/admin/purge-preview?cohort=su27-cs").json()
+    assert scoped["total"] == 1
+    assert scoped["llm_cache_cleared"] is False
+
+
+def test_purge_deletes_the_scope_and_returns_a_receipt(
+    client: TestClient, store: _FakeStore
+) -> None:
+    a, b = str(uuid.uuid4()), str(uuid.uuid4())
+    store.add(a)
+    store.add(b, cohort_name="su27-cs")
+
+    res = client.post("/api/admin/purge", json={"cohort": "su26-cs", "expected_count": 1})
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "applications_deleted": 1,
+        "llm_cache_rows_deleted": 0,
+        "scope": "su26-cs",
+        "decided_by": "admin",
+    }
+    assert list(store.rows) == [b]  # the other cohort untouched
+    assert ("purge", None, {"applications_deleted": 1}) in store.events
+
+
+def test_purge_of_every_cohort_also_reports_the_cache(
+    client: TestClient, store: _FakeStore
+) -> None:
+    store.add(str(uuid.uuid4()))
+    store.add(str(uuid.uuid4()), cohort_name="su27-cs")
+
+    body = client.post("/api/admin/purge", json={"expected_count": 2}).json()
+
+    assert body["scope"] == "ALL_COHORTS"
+    assert body["applications_deleted"] == 2
+    assert body["llm_cache_rows_deleted"] == 7
+    assert store.rows == {}
+
+
+def test_stale_count_409s_and_deletes_nothing(client: TestClient, store: _FakeStore) -> None:
+    """A delivery landing while the dialog is open must not be silently destroyed."""
+    store.add(str(uuid.uuid4()))
+    store.add(str(uuid.uuid4()))
+
+    res = client.post("/api/admin/purge", json={"cohort": "su26-cs", "expected_count": 1})
+
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert "changed from 1 to 2" in detail
+    assert "Nothing was deleted" in detail
+    assert len(store.rows) == 2
+    assert not any(kind == "purge" for kind, _, _ in store.events)
+
+
+def test_negative_expected_count_is_rejected(client: TestClient, store: _FakeStore) -> None:
+    assert client.post("/api/admin/purge", json={"expected_count": -1}).status_code == 422

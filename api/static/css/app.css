@@ -237,3 +237,38 @@ mark.hl-bad { background: #fecaca; color: #7f1d1d; border-radius: 3px; padding: 
 .btn-link:hover { opacity: 1; }
 .alert { border-radius: 8px; padding: 0.6rem 0.9rem; margin: 0.6rem 0; }
 .alert-error { background: #fdecea; color: #b3261e; }
+
+/* ---- Bulk purge (PRD v3 §9) ----------------------------------------------------------- */
+/* Bottom-corner FAB: reachable from every screen but out of the primary flow, because it
+   destroys minors' PII irreversibly. Outlined rather than solid red — a solid danger button
+   sitting permanently on screen reads as a primary action, which is the opposite of intended. */
+.purge-fab {
+  position: fixed; bottom: 1.25rem; right: 1.25rem; z-index: 40;
+  font: inherit; font-size: 0.84rem; font-weight: 600; cursor: pointer;
+  padding: 0.5rem 0.9rem; border-radius: 999px;
+  background: var(--white); color: var(--danger); border: 1px solid var(--danger);
+  box-shadow: var(--shadow-md);
+}
+.purge-fab:hover, .purge-fab:focus-visible { background: var(--danger-bg); outline: none; }
+
+.purge-dialog {
+  border: none; border-radius: var(--radius-lg); padding: 1.5rem;
+  max-width: 34rem; width: calc(100vw - 2rem);
+  box-shadow: var(--shadow-md); color: var(--gray-900); font-family: var(--font);
+}
+.purge-dialog::backdrop { background: rgba(15, 23, 42, 0.55); }
+.purge-heading { margin: 0 0 0.5rem; font-size: 1.15rem; color: var(--danger); }
+.purge-lede { margin: 0 0 1rem; font-size: 0.88rem; line-height: 1.5; color: var(--gray-700); }
+.purge-body { font-size: 0.88rem; line-height: 1.55; }
+.purge-scope {
+  background: var(--danger-bg); border: 1px solid #fecaca;
+  border-radius: var(--radius); padding: 0.7rem 0.9rem; margin-bottom: 0.9rem;
+}
+.purge-count { font-size: 1.5rem; font-weight: 700; color: var(--danger); line-height: 1.1; }
+.purge-body ul { margin: 0.4rem 0 0.9rem; padding-left: 1.1rem; }
+.purge-body li { margin: 0.15rem 0; }
+.purge-body dl { display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.6rem; margin: 0.3rem 0 0.9rem; }
+.purge-body dt { color: var(--gray-500); }
+.purge-body dd { margin: 0; font-variant-numeric: tabular-nums; }
+.purge-kept { color: var(--gray-500); font-size: 0.82rem; margin: 0.5rem 0 0; }
+.purge-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin: 1.2rem 0 0; }

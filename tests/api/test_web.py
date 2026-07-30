@@ -121,3 +121,35 @@ def test_health_still_ok_with_ui_mounted(client: TestClient) -> None:
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"  # queue detail is covered by tests/api/test_health.py
+
+
+# --------------------------------------------------------------------------------------------
+# Bulk-purge control (PRD v3 §9) — rendered only where a session is required
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/", "/audit", "/cohorts"])
+def test_purge_control_renders_on_session_gated_pages(client: TestClient, path: str) -> None:
+    text = client.get(path).text
+    assert 'id="purge-open"' in text
+    assert 'id="purge-dialog"' in text
+    assert "/static/js/purge.js" in text
+
+
+def test_purge_control_is_absent_from_the_login_page(client: TestClient) -> None:
+    """login.html extends the same base, but its context comes from api.main, not web._ctx.
+
+    A destructive control must not render to an unauthenticated visitor even though the
+    endpoints behind it are separately default-denied (tests/api/test_auth.py).
+    """
+    text = client.get("/login").text
+    assert "Staff sign-in" in text  # precondition: this really is the login page
+    assert 'id="purge-open"' not in text
+    assert 'id="purge-dialog"' not in text
+    assert "/static/js/purge.js" not in text
+
+
+def test_purge_script_serves(client: TestClient) -> None:
+    resp = client.get("/static/js/purge.js")
+    assert resp.status_code == 200
+    assert "javascript" in resp.headers["content-type"]

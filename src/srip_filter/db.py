@@ -37,6 +37,21 @@ _MIGRATION_LOCK_KEY = 3_771_020_301
 
 UpsertResult = Literal["accepted", "unchanged"]
 
+
+class PurgeCountMismatch(Exception):
+    """The live row count moved between the confirmation dialog and the confirm click.
+
+    Deliveries arrive continuously, so a purge is only safe if it destroys exactly the rows the
+    operator was shown a count for. Raised instead of deleting; the caller re-previews.
+    """
+
+    def __init__(self, *, expected: int, actual: int) -> None:
+        super().__init__(
+            f"row count changed since preview: expected {expected}, found {actual}"
+        )
+        self.expected = expected
+        self.actual = actual
+
 # Application lifecycle states (the queue). Mirrors the 001_init CHECK constraint.
 STATUS_RECEIVED = "received"
 STATUS_GRADING = "grading"
@@ -340,6 +355,111 @@ async def delete_submission(pool: asyncpg.Pool, submission_id: str) -> bool:
     if deleted:
         await add_event(pool, "submission_deleted", submission_id=submission_id)
     return deleted
+
+
+async def purge_preview(
+    pool: asyncpg.Pool, *, cohort_name: str | None = None
+) -> dict[str, Any]:
+    """Exactly what a purge of this scope would destroy (PRD v3 §9 close-cycle).
+
+    Feeds the confirmation dialog, so it must describe the *scale* honestly rather than
+    reassuringly: row count, per-outcome split, the cohorts affected, and the submission-date
+    span. ``cohort_name=None`` means every cohort — a full wipe, which also clears ``llm_cache``
+    (see :func:`purge_applications` for why the cache cannot be scoped to one cohort).
+
+    Read-only. Counts are a snapshot: deliveries keep arriving, which is why
+    :func:`purge_applications` takes an ``expected_count`` rather than trusting this.
+    """
+    where, args = ("WHERE cohort_name = $1", [cohort_name]) if cohort_name else ("", [])
+    summary = await pool.fetchrow(
+        f"""
+        SELECT COUNT(*) AS total,
+               COUNT(audit_record) AS with_audit_record,
+               MIN(submitted_at) AS earliest,
+               MAX(submitted_at) AS latest
+        FROM applications {where}
+        """,
+        *args,
+    )
+    outcomes = await pool.fetch(
+        f"SELECT COALESCE(outcome, status) AS label, COUNT(*) AS n "
+        f"FROM applications {where} GROUP BY 1 ORDER BY n DESC",
+        *args,
+    )
+    cohorts = await pool.fetch(
+        f"SELECT cohort_name, COUNT(*) AS n FROM applications {where} "
+        f"GROUP BY 1 ORDER BY n DESC",
+        *args,
+    )
+    return {
+        "cohort_name": cohort_name,
+        "total": summary["total"],
+        "with_audit_record": summary["with_audit_record"],
+        "earliest": summary["earliest"],
+        "latest": summary["latest"],
+        "by_outcome": {r["label"]: r["n"] for r in outcomes},
+        "by_cohort": {r["cohort_name"]: r["n"] for r in cohorts},
+        # Only a full wipe clears the cache, so a scoped purge must say what it leaves behind.
+        "llm_cache_rows": await pool.fetchval("SELECT COUNT(*) FROM llm_cache"),
+        "llm_cache_cleared": cohort_name is None,
+    }
+
+
+async def purge_applications(
+    pool: asyncpg.Pool, *, cohort_name: str | None = None, expected_count: int
+) -> dict[str, Any]:
+    """Hard-delete every application in scope; return a non-PII receipt (PRD v3 §9).
+
+    ``expected_count`` must equal the live row count or nothing is deleted and
+    :class:`PurgeCountMismatch` is raised. Webhook deliveries continue during the seconds a
+    human spends reading the confirmation dialog, so without this guard a purge could destroy
+    rows nobody was shown — the count is the only thing the operator actually consented to.
+
+    A full wipe (``cohort_name=None``) also truncates ``llm_cache``. The cache is keyed
+    ``(task, sha256(input))`` with no cohort column, so it cannot be scoped; and its ``output``
+    holds model-generated commentary derived from essay text, which has no business outliving
+    the applications it describes. The cost is re-billing a re-grade, which is exactly the
+    tradeoff a full wipe implies. Deliberately NOT touched by a scoped purge.
+
+    Everything runs in one transaction, so a mid-purge failure leaves the table untouched
+    rather than half-deleted. The tombstone carries counts and a timestamp only.
+    """
+    where, args = ("WHERE cohort_name = $1", [cohort_name]) if cohort_name else ("", [])
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # FOR UPDATE so a concurrent upsert cannot slip a row in between count and delete.
+            live = await conn.fetchval(
+                f"SELECT COUNT(*) FROM (SELECT 1 FROM applications {where} FOR UPDATE) t",
+                *args,
+            )
+            if live != expected_count:
+                raise PurgeCountMismatch(expected=expected_count, actual=live)
+            status = await conn.execute(f"DELETE FROM applications {where}", *args)
+            deleted = int(status.rsplit(" ", 1)[-1])
+            cache_cleared = 0
+            if cohort_name is None:
+                cache_cleared = await conn.fetchval("SELECT COUNT(*) FROM llm_cache")
+                await conn.execute("TRUNCATE llm_cache")
+            receipt = {
+                "applications_deleted": deleted,
+                "llm_cache_rows_deleted": cache_cleared,
+                "scope": cohort_name or "ALL_COHORTS",
+            }
+            # Same connection/transaction: the tombstone is part of the purge, not a follow-up
+            # that could be lost if the process died between the two.
+            await conn.execute(
+                "INSERT INTO events (kind, submission_id, details) VALUES ($1, $2, $3)",
+                "purge",
+                None,
+                json.dumps(receipt),
+            )
+    logger.warning(
+        "purge committed scope=%s applications=%d llm_cache=%d",
+        receipt["scope"],
+        deleted,
+        cache_cleared,
+    )
+    return receipt
 
 
 # ================================================================================================

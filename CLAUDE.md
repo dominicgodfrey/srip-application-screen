@@ -132,9 +132,14 @@ No o-series reasoning models. Verify exact IDs against OpenAI's catalog; swap in
   third-party agent framework in this path. Enablement is post-pilot, and the allowlist must
   be re-pinned to the website's R2 host before it is flipped on.
 - **Logging & events:** `submission_id` only — never essay/explanation/resume text.
-- **Retention:** per-submission delete is built; the close-cycle export-then-purge action is
-  designed but not, pending a settled retention policy. Never commit real applicant data;
-  `data/` and `.env` stay gitignored; test fixtures are synthetic only.
+- **Retention:** per-submission delete and **bulk purge** are built — the latter is a
+  session-gated bottom-corner control (`GET /api/admin/purge-preview` →
+  `POST /api/admin/purge`), scoped to one cohort or every cohort, guarded by an
+  `expected_count` that 409s if the live count moved while the dialog was open, and tombstoned
+  in `events` with counts only. A full wipe also truncates `llm_cache`, whose `output` holds
+  model commentary derived from essay text. The **export** half of PRD §9's close-cycle is
+  still not built: purge takes no backup, which is why the dialog says so. Never commit real
+  applicant data; `data/` and `.env` stay gitignored; test fixtures are synthetic only.
 
 ---
 

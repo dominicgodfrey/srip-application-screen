@@ -14,6 +14,8 @@ Routes (all under ``/api``):
 * ``GET    /api/exports/{artifact}``         — decisions.jsonl / CSVs / summary from the DB
 * ``POST   /api/cohorts``                    — cohort what-if over the live ranking
 * ``POST   /api/admin/migrate``              — apply pending migrations (P11.3 bootstrap)
+* ``GET    /api/admin/purge-preview``        — what a purge would destroy (read-only)
+* ``POST   /api/admin/purge``                — bulk hard delete, count-guarded (§9)
 
 Manual overrides append a non-PII ``events`` entry with ``decided_by`` (PRD v3 §1.1);
 under the shared-password model that is the literal ``"admin"``.
@@ -41,6 +43,7 @@ from srip_filter.scoring.aggregate import assign_read_time_ranks
 
 from .cohorts import CohortFormat, cohort_response
 from .jobs import ArtifactName, artifact_response_from_records
+from .schemas import PurgeRequest
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +244,41 @@ def register_admin_api(app: FastAPI) -> None:
         if not deleted:
             raise HTTPException(status_code=404, detail="No application with that id.")
         return Response(status_code=204)
+
+    @app.get("/api/admin/purge-preview", response_model=None, tags=["admin"])
+    async def purge_preview(cohort: str | None = None) -> dict:
+        """What a purge of this scope would destroy — the confirmation dialog's source.
+
+        Read-only. ``cohort`` omitted means every cohort (a full wipe, which also clears
+        ``llm_cache``). Returns counts and date spans only, never applicant fields.
+        """
+        return await dbmod.purge_preview(_pool(), cohort_name=cohort)
+
+    @app.post("/api/admin/purge", response_model=None, tags=["admin"])
+    async def purge(body: PurgeRequest) -> dict:
+        """Hard-delete every application in scope (PRD v3 §9). Irreversible; tombstoned.
+
+        ``expected_count`` must match the live count or this 409s without deleting anything:
+        webhook deliveries keep landing while a human reads the dialog, and the operator only
+        consented to the number they were shown. The client re-previews and asks again.
+        """
+        try:
+            receipt = await dbmod.purge_applications(
+                _pool(), cohort_name=body.cohort, expected_count=body.expected_count
+            )
+        except dbmod.PurgeCountMismatch as mismatch:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Nothing was deleted — the application count changed from "
+                    f"{mismatch.expected} to {mismatch.actual} while the dialog was open. "
+                    f"Review the new figures and confirm again."
+                ),
+            ) from mismatch
+        # decided_by mirrors the promote/demote overrides: under the shared-password model the
+        # only identity available is the literal "admin" (PRD v3 §1.1).
+        logger.warning("purge by %s: %s", DECIDED_BY, receipt)
+        return {**receipt, "decided_by": DECIDED_BY}
 
     @app.get("/api/exports/{artifact}", response_model=None, tags=["admin"])
     async def export_artifact(artifact: ArtifactName, cohort: str | None = None) -> Response:
