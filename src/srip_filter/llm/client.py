@@ -15,8 +15,8 @@ A thin, replaceable wrapper around OpenAI Structured Outputs. Responsibilities:
   applicant's.
 
 Prompt templates live in ``prompts/`` and are passed in by the per-task modules; this client is
-task-agnostic. The real OpenAI call path is exercised only by the optional live suite
-(``RUN_LLM_TESTS=1``); unit tests use :class:`FakeLLMClient`.
+task-agnostic. Every test uses :class:`FakeLLMClient` — no test calls a real model. The real
+OpenAI path is exercised by hand, via ``scripts/replay.py`` against a locally-run server.
 """
 
 from __future__ import annotations

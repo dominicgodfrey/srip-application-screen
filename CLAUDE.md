@@ -199,7 +199,8 @@ Every invariant in the spec's §10 has an explicit deterministic test, with no A
 (`FakeLLMClient`) — including that wrong-secret requests never create or mutate rows, that
 identical re-delivery changes nothing and re-bills nothing, and that a per-row crash never
 blocks the queue. DB tests run against `DATABASE_URL_TEST` and skip cleanly when it is unset.
-A small live suite stays behind `RUN_LLM_TESTS=1`.
+**No test ever calls a real model.** The OpenAI boundary is exercised by hand via
+`scripts/replay.py` against a locally-run server (see @README.md → Dev quickstart).
 
 ## What NOT to Do
 
