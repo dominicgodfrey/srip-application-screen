@@ -85,7 +85,13 @@ def _ranked_records(rows: list[dict[str, Any]]) -> dict[str, AuditRecord]:
 
 
 def _summary_row(row: dict[str, Any], record: AuditRecord | None) -> dict[str, Any]:
-    """One dashboard listing entry — identity + status + outcome, no essay text."""
+    """One listing entry — identity, status, outcome and GPA. Never essay text.
+
+    Feeds both the dashboard and the audit browser's table. ``gpa`` carries the normalized
+    value plus the raw cell, because a reviewer working the NEEDS_REVIEW queue needs to see
+    what the applicant actually typed when normalization could not resolve it.
+    """
+    gpa = record.gpa if record else None
     return {
         "submission_id": str(row["submission_id"]),
         "name": record.name if record else row.get("student_name") or "",
@@ -99,6 +105,7 @@ def _summary_row(row: dict[str, Any], record: AuditRecord | None) -> dict[str, A
         "primary_reason": record.primary_reason if record else "",
         "manual_override": record.manual_override if record else False,
         "international": record.international if record else False,
+        "gpa": {"normalized_gpa": gpa.normalized_gpa, "raw": gpa.raw} if gpa else None,
         "submitted_at": row["submitted_at"].isoformat() if row.get("submitted_at") else None,
         "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
     }
@@ -131,33 +138,45 @@ def register_admin_api(app: FastAPI) -> None:
 
     @app.get("/api/applications", response_model=None, tags=["admin"])
     async def list_applications(cohort: str | None = None) -> dict:
-        """Live cohort listing with read-time ranks and outcome counts."""
+        """Live cohort listing with read-time ranks and outcome counts.
+
+        The summary projection, not the full rows: this is the most-hit endpoint in the
+        service and none of it renders essay text or the stored payload.
+        """
         pool = _pool()
-        rows = await dbmod.list_applications(pool, cohort_name=cohort)
+        rows = await dbmod.list_application_summaries(pool, cohort_name=cohort)
         records = _ranked_records(rows)
         listing = [
             _summary_row(row, records.get(str(row["submission_id"]))) for row in rows
         ]
-        counts: dict[str, int] = {}
-        for entry in listing:
-            key = entry["outcome"] or entry["status"] or "unknown"
-            counts[key] = counts.get(key, 0) + 1
-        cohorts = sorted({e["cohort_name"] for e in listing if e["cohort_name"]})
-        return {"applications": listing, "counts": counts, "cohorts": cohorts}
+        return {
+            "applications": listing,
+            "counts": await dbmod.count_by_outcome(pool, cohort_name=cohort),
+            "cohorts": sorted({e["cohort_name"] for e in listing if e["cohort_name"]}),
+        }
 
     @app.get("/api/applications/{submission_id}", response_model=None, tags=["admin"])
     async def get_application(submission_id: SubmissionId) -> dict:
-        """One applicant: lifecycle status + the full audit record (rank read-time)."""
+        """One applicant: lifecycle status + the full audit record (rank read-time).
+
+        Two reads on purpose. The applicant's own row is fetched whole — the audit UI needs
+        the essay text for highlight-on-reject. Their *rank* only exists relative to the
+        cohort, so the cohort is read through the summary projection and the resulting rank
+        copied onto the full record. Ranking the cohort off full rows meant opening one
+        audit detail loaded every payload and every essay in that cohort.
+        """
         pool = _pool()
-        row = await _row_or_404(pool, str(submission_id))
-        # Rank must reflect the applicant's place in the live cohort, so rank the cohort.
-        cohort_rows = await dbmod.list_applications(
-            pool, cohort_name=row.get("cohort_name") or None
-        )
-        records = _ranked_records(cohort_rows)
-        record = records.get(str(row["submission_id"]))
+        sid = str(submission_id)
+        row = await _row_or_404(pool, sid)
+        record = _record_from_row(row)
+        if record is not None:
+            cohort_rows = await dbmod.list_application_summaries(
+                pool, cohort_name=row.get("cohort_name") or None
+            )
+            ranked = _ranked_records(cohort_rows)
+            record.rank = ranked[sid].rank if sid in ranked else None
         return {
-            "submission_id": str(row["submission_id"]),
+            "submission_id": sid,
             "status": row.get("status"),
             "has_payload": row.get("payload") is not None,
             "audit_record": record.model_dump(mode="json") if record else None,
@@ -307,9 +326,12 @@ def register_admin_api(app: FastAPI) -> None:
         format: CohortFormat = "json",
         tier: str | None = None,
     ) -> Response:
-        """Cohort what-if over the LIVE ranking (recomputed per call, nothing stored)."""
+        """Cohort what-if over the LIVE ranking (recomputed per call, nothing stored).
+
+        Summary projection: assignment reads scores and program choices, never essays.
+        """
         pool = _pool()
-        rows = await dbmod.list_applications(pool, cohort_name=cohort)
+        rows = await dbmod.list_application_summaries(pool, cohort_name=cohort)
         records = list(_ranked_records(rows).values())
         capacities = CohortCapacities(honors=honors, intensive=intensive, regular=regular)
         result = assign_cohorts(records, capacities, app.state.config)
@@ -317,9 +339,9 @@ def register_admin_api(app: FastAPI) -> None:
 
     @app.get("/api/summary", response_model=None, tags=["admin"])
     async def live_summary(cohort: str | None = None) -> dict:
-        """Outcome counts + histogram for the dashboard (same shape as the v2 summary)."""
+        """Outcome counts + score histogram for the dashboard. Summary projection."""
         pool = _pool()
-        rows = await dbmod.list_applications(pool, cohort_name=cohort)
+        rows = await dbmod.list_application_summaries(pool, cohort_name=cohort)
         records = list(_ranked_records(rows).values())
         summary = build_summary(records)
         summary["ungraded"] = sum(1 for r in rows if not r.get("audit_record"))

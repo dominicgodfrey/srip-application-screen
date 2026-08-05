@@ -77,10 +77,35 @@ class _FakeStore:
         return row
 
     async def list_applications(self, pool, *, cohort_name=None):
-        rows = list(self.rows.values())
-        if cohort_name is not None:
-            rows = [r for r in rows if r["cohort_name"] == cohort_name]
-        return rows
+        return self._scoped(cohort_name)
+
+    async def list_application_summaries(self, pool, *, cohort_name=None):
+        """Mirror the real projection: no payload, and no essays inside the audit record.
+
+        Faithfully dropping both is what makes the suite able to catch a caller that reads
+        something the projection does not carry — the whole risk of having two shapes.
+        """
+        summaries = []
+        for row in self._scoped(cohort_name):
+            record = row["audit_record"]
+            summaries.append(
+                {
+                    **{k: v for k, v in row.items() if k != "payload"},
+                    "has_payload": row.get("payload") is not None,
+                    "audit_record": (
+                        {k: v for k, v in record.items() if k != "essays"} if record else None
+                    ),
+                }
+            )
+        return summaries
+
+    async def count_by_outcome(self, pool, *, cohort_name=None):
+        counts: dict[str, int] = {}
+        for row in self._scoped(cohort_name):
+            record = row["audit_record"] or {}
+            label = record.get("outcome") or row["status"]
+            counts[label] = counts.get(label, 0) + 1
+        return counts
 
     async def get_application(self, pool, sid):
         return self.rows.get(sid)
@@ -135,7 +160,8 @@ class _FakeStore:
 def store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
     s = _FakeStore()
     for name in (
-        "list_applications", "get_application", "finish_graded",
+        "list_applications", "list_application_summaries", "count_by_outcome",
+        "get_application", "finish_graded",
         "delete_submission", "add_event", "purge_preview", "purge_applications",
     ):
         monkeypatch.setattr(admin_mod.dbmod, name, getattr(s, name))
@@ -220,6 +246,59 @@ def test_malformed_submission_id_is_422_not_500(
     resp = getattr(client, method)(route.format("not-a-uuid"))
     assert resp.status_code == 422
     assert store.events == []  # a rejected id touches nothing
+
+
+def test_the_listing_never_carries_essay_text(client: TestClient, store: _FakeStore) -> None:
+    """The listing is a table of names and scores; essays belong to the detail panel only.
+
+    Load-bearing for both size and exposure: this is the most-hit endpoint, and every row
+    of it used to ship three verbatim essays.
+    """
+    sid = str(uuid.uuid4())
+    record = _audit(sid, outcome="RANKED", score=100.0)
+    record["essays"] = {"e1": "SECRET ESSAY ONE", "e2": "SECRET ESSAY TWO", "e3": ""}
+    store.add(sid, audit_record=record)
+
+    body = client.get("/api/applications").text
+    assert "SECRET ESSAY" not in body
+    assert "Syn Thetic" in body  # but the row itself is there
+
+
+def test_the_listing_carries_gpa_so_the_audit_table_can_render(
+    client: TestClient, store: _FakeStore
+) -> None:
+    """The audit browser sorts and displays GPA, so it must survive the projection."""
+    sid = str(uuid.uuid4())
+    record = _audit(sid, outcome="NEEDS_REVIEW", score=None)
+    record["gpa"] = {"raw": "N/A — narrative reports", "normalized_gpa": None}
+    store.add(sid, audit_record=record)
+
+    entry = client.get("/api/applications").json()["applications"][0]
+    assert entry["gpa"]["raw"] == "N/A — narrative reports"
+    assert entry["gpa"]["normalized_gpa"] is None
+
+
+def test_detail_still_returns_the_essays_for_highlight_on_reject(
+    client: TestClient, store: _FakeStore
+) -> None:
+    """The other half of the split: the detail read is the full row, essays included."""
+    sid = str(uuid.uuid4())
+    record = _audit(sid, outcome="REJECTED", score=None)
+    record["essays"] = {"e1": "SECRET ESSAY ONE", "e2": "", "e3": ""}
+    store.add(sid, audit_record=record)
+
+    body = client.get(f"/api/applications/{sid}").json()
+    assert body["audit_record"]["essays"]["e1"] == "SECRET ESSAY ONE"
+
+
+def test_detail_rank_reflects_the_live_cohort(client: TestClient, store: _FakeStore) -> None:
+    """Rank is read-time and cohort-scoped, so the detail read must still compute it."""
+    top, mid = str(uuid.uuid4()), str(uuid.uuid4())
+    store.add(top, audit_record=_audit(top, outcome="RANKED", score=120.0))
+    store.add(mid, audit_record=_audit(mid, outcome="RANKED", score=90.0))
+
+    assert client.get(f"/api/applications/{top}").json()["audit_record"]["rank"] == 1
+    assert client.get(f"/api/applications/{mid}").json()["audit_record"]["rank"] == 2
 
 
 def test_detail_404_and_full_record(client: TestClient, store: _FakeStore) -> None:

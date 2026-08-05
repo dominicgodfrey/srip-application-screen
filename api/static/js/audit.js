@@ -1,5 +1,13 @@
-/* Screen 2 — audit-record browser. Fetches decisions.jsonl once (non-evicting), parses the
-   NDJSON client-side, and renders a sortable/filterable table with a full-record detail panel.
+/* Screen 2 — audit-record browser: a sortable/filterable table over the live cohort, with a
+   full-record detail panel.
+
+   The table loads the summary listing (GET /api/applications) and the detail panel fetches
+   one full record on selection (GET /api/applications/{id}). It used to pull the entire
+   decisions.jsonl export on page load — every applicant's full audit record including all
+   three essays verbatim — to render a table of names and scores. At the ~2000-application
+   design target that is tens of MB into the browser per page view, and the same volume out
+   of Postgres, for data only one row's panel ever displays.
+
    No applicant data ever renders server-side. */
 (function () {
   "use strict";
@@ -23,30 +31,41 @@
   let sortKey = "rank";
   let sortAsc = true;
   let selectedId = null;
+  // Full records, keyed by submission id, fetched on demand and kept for the session so
+  // clicking back and forth between two applicants does not re-fetch.
+  const detailCache = new Map();
 
   function show(el) { el.classList.remove("hidden"); }
   function hide(el) { el.classList.add("hidden"); }
 
   // ----- Load -----------------------------------------------------------------
-  // This screen browses the LIVE database via /api/exports/decisions.
   refresh();
 
-  function refresh() { return loadFrom("/api/exports/decisions"); }
-
-  async function loadFrom(url) {
+  async function refresh() {
     try {
-      const res = await S.api(url);
-      const text = await res.text();
-      records = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      const res = await S.api("/api/applications");
+      const body = await res.json();
+      records = body.applications || [];
+      detailCache.clear();  // a refresh means the live cohort moved
       hide(els.empty);
       show(els.list);
       applyView();
     } catch (err) {
-      const msg = err.status === 409 ? "Results are not ready yet — grading is still running."
+      const msg = err.status === 503
+        ? "Database is not configured on this server."
         : (err.detail || "Could not load records.");
       els.empty.querySelector("p").textContent = msg;
       S.toast(msg, "danger");
     }
+  }
+
+  // Only graded rows have an audit record; an ungraded one has nothing to show yet.
+  async function loadDetail(sid) {
+    if (detailCache.has(sid)) return detailCache.get(sid);
+    const res = await S.api("/api/applications/" + encodeURIComponent(sid));
+    const body = await res.json();
+    detailCache.set(sid, body.audit_record);
+    return body.audit_record;
   }
 
   function actionUrl(sid, action) {
@@ -125,13 +144,20 @@
     applyView();
   });
 
-  els.tbody.addEventListener("click", (ev) => {
+  els.tbody.addEventListener("click", async (ev) => {
     const tr = ev.target.closest("tr[data-id]");
     if (!tr) return;
     selectedId = tr.dataset.id;
-    const record = records.find((r) => r.submission_id === selectedId);
-    if (record) renderDetail(record);
     applyView();
+    try {
+      const record = await loadDetail(selectedId);
+      // Guard against an out-of-order response: the user may have clicked on again while
+      // this one was in flight, and the older record must not overwrite the newer panel.
+      if (record && selectedId === tr.dataset.id) renderDetail(record);
+      else if (!record) S.toast("This application has not been graded yet.", "warn");
+    } catch (err) {
+      S.toast(err.detail || "Could not load that audit record.", "danger");
+    }
   });
 
   // ----- Detail panel ----------------------------------------------------------
@@ -394,10 +420,11 @@
       demoteBtn.textContent = "Removing…";
       try {
         const res = await S.api(actionUrl(sid, "demote"), { method: "POST" });
-        await res.json();
-        await refresh(); // ranks shifted for everyone — refetch the whole set
-        const demoted = records.find((x) => x.submission_id === sid);
-        if (demoted) renderDetail(demoted);
+        const body = await res.json();
+        await refresh(); // ranks shifted for everyone — refetch the listing
+        // The response carries the updated record, so re-render from it directly rather
+        // than from the listing (which holds summaries, not full audit records).
+        if (body.record) { detailCache.set(sid, body.record); renderDetail(body.record); }
         S.toast("Removed from the ranking (manual override).", "success");
       } catch (err) {
         demoteBtn.disabled = false;
@@ -417,11 +444,13 @@
     try {
       const res = await S.api(actionUrl(sid, "promote"), { method: "POST" });
       const body = await res.json();
-      await refresh(); // ranks shifted for everyone — refetch the whole set
-      const promoted = records.find((x) => x.submission_id === sid);
-      if (promoted) renderDetail(promoted);
-      const rec = (records.find((x) => x.submission_id === sid)) || body.record || {};
-      S.toast("Promoted — rank " + rec.rank + ", score " + S.fmtNum(rec.final_score), "success");
+      await refresh(); // ranks shifted for everyone — refetch the listing
+      if (body.record) { detailCache.set(sid, body.record); renderDetail(body.record); }
+      // Rank comes from the refreshed listing: the promote response is scored but not yet
+      // ranked (rank is assigned at read time, per cohort).
+      const listed = records.find((x) => x.submission_id === sid) || {};
+      const score = listed.final_score ?? (body.record || {}).final_score;
+      S.toast("Promoted — rank " + listed.rank + ", score " + S.fmtNum(score), "success");
     } catch (err) {
       btn.disabled = false;
       btn.textContent = "Promote into ranking…";

@@ -331,19 +331,70 @@ async def get_application(pool: asyncpg.Pool, submission_id: str) -> dict[str, A
     return _to_dict(row) if row else None
 
 
+_ORDER = "ORDER BY submitted_at ASC NULLS LAST"  # stable base order: oldest submission first
+
+# Everything except the two heavyweight blobs. `audit_record - 'essays'` drops the verbatim
+# essay text (a jsonb key delete, done in Postgres); `payload` is replaced by a boolean.
+_SUMMARY_COLUMNS = """
+    submission_id, cohort_name, user_email, student_name, sub_track,
+    submitted_at, created_at, updated_at, status, outcome, final_score,
+    payload_hash,
+    (payload IS NOT NULL) AS has_payload,
+    audit_record - 'essays' AS audit_record
+"""
+
+
 async def list_applications(
     pool: asyncpg.Pool, *, cohort_name: str | None = None
 ) -> list[dict[str, Any]]:
-    """All applications (optionally one cohort), oldest submission first (stable base order)."""
-    if cohort_name is None:
-        rows = await pool.fetch("SELECT * FROM applications ORDER BY submitted_at ASC NULLS LAST")
-    else:
-        rows = await pool.fetch(
-            "SELECT * FROM applications WHERE cohort_name = $1 "
-            "ORDER BY submitted_at ASC NULLS LAST",
-            cohort_name,
-        )
+    """Every column of every application (optionally one cohort) — payload and essays included.
+
+    The heavy read, and deliberately so: exports serialize the full audit record, and the
+    manual-promote path re-grades from the stored payload. **For listing, ranking, counting
+    or cohort maths use :func:`list_application_summaries` instead** — see its docstring.
+    """
+    where = "" if cohort_name is None else "WHERE cohort_name = $1"
+    args = [] if cohort_name is None else [cohort_name]
+    rows = await pool.fetch(f"SELECT * FROM applications {where} {_ORDER}", *args)
     return [_to_dict(r) for r in rows]
+
+
+async def list_application_summaries(
+    pool: asyncpg.Pool, *, cohort_name: str | None = None
+) -> list[dict[str, Any]]:
+    """Same rows, without the two payloads nothing on a listing screen reads.
+
+    ``SELECT *`` here was the dominant cost in the service. Every dashboard load, summary,
+    cohort what-if and audit-detail open pulled `payload` (the whole submitted application)
+    **and** `audit_record` (which embeds the essay text a second time) for every row, then
+    JSON-decoded both in Python. At the ~2 000-application design target that is tens of MB
+    off Neon per request, on a serverless function, to render a table of names and scores.
+    Opening one applicant's audit detail did it for their entire cohort, just to compute one
+    rank.
+
+    Projecting the columns and deleting the ``essays`` key in Postgres leaves the audit
+    record complete enough for :class:`~srip_filter.models.AuditRecord` to validate
+    (``essays`` has a default) and for read-time ranking, which needs only outcome, score,
+    cohort and the tiebreakers.
+    """
+    where = "" if cohort_name is None else "WHERE cohort_name = $1"
+    args = [] if cohort_name is None else [cohort_name]
+    rows = await pool.fetch(f"SELECT {_SUMMARY_COLUMNS} FROM applications {where} {_ORDER}", *args)
+    return [_to_dict(r) for r in rows]
+
+
+async def count_by_outcome(
+    pool: asyncpg.Pool, *, cohort_name: str | None = None
+) -> dict[str, int]:
+    """Outcome counts (falling back to lifecycle status for ungraded rows), computed in SQL."""
+    where = "" if cohort_name is None else "WHERE cohort_name = $1"
+    args = [] if cohort_name is None else [cohort_name]
+    rows = await pool.fetch(
+        f"SELECT COALESCE(outcome, status) AS label, COUNT(*) AS n "
+        f"FROM applications {where} GROUP BY 1",
+        *args,
+    )
+    return {r["label"]: r["n"] for r in rows}
 
 
 async def delete_submission(pool: asyncpg.Pool, submission_id: str) -> bool:

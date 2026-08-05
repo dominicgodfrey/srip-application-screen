@@ -241,6 +241,13 @@ def create_app(
         max_attempts_global=cfg.auth.max_attempts_global,
     )
 
+    # One answer to "is this deployment served over https", used by both the Secure cookie
+    # flag and HSTS. The dev/demo flag (never set in production — see its declaration) means
+    # a local http:// server, which must neither set a Secure cookie it cannot send back nor
+    # advertise HSTS. Browsers ignore HSTS from a plaintext response anyway, so this is
+    # consistency rather than a hole — but two copies of the rule is how they diverge.
+    https_mode = cfg.auth.cookie_secure and os.getenv(_DEV_FAKE_LLM_ENV) != "1"
+
     def _client_key(request) -> str:  # type: ignore[no-untyped-def]
         """Throttle bucket for this caller — a salted hash, never an address (see auth)."""
         return client_key(
@@ -279,7 +286,7 @@ def create_app(
         Headers go on *every* response — error pages, redirects and static assets
         included — so there is no route that can be added later and quietly miss them.
         """
-        headers = security_headers(https_only=cfg.auth.cookie_secure)
+        headers = security_headers(https_only=https_mode)
         path = request.url.path
         if is_open_path(path) or valid_session(
             request.cookies.get(SESSION_COOKIE), app.state.session_secret
@@ -343,16 +350,13 @@ def create_app(
         app.state.login_throttle.reset()
         token = sign_session(app.state.session_secret, cfg.auth.session_ttl_seconds)
         response = RedirectResponse(url=next_path, status_code=303)
-        # The dev/demo flag (never set in production — see its declaration) also drops the
-        # Secure cookie flag so the local http:// demo can hold a session.
-        dev_mode = os.getenv(_DEV_FAKE_LLM_ENV) == "1"
         response.set_cookie(
             SESSION_COOKIE,
             token,
             max_age=int(cfg.auth.session_ttl_seconds),
             httponly=True,
             samesite="lax",
-            secure=cfg.auth.cookie_secure and not dev_mode,
+            secure=https_mode,
         )
         return response
 

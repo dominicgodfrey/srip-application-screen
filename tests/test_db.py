@@ -336,6 +336,69 @@ async def test_list_scopes_by_cohort(pool):
     assert len(await list_applications(pool)) >= 2
 
 
+async def test_summaries_drop_the_payload_and_the_essay_text(pool):
+    """The projection is real SQL (`audit_record - 'essays'`), so assert it against Postgres.
+
+    The API suite's fake store can only mimic this; if the SQL stopped stripping, nothing
+    there would notice and the most-hit endpoint would quietly start shipping essays again.
+    """
+    sid = _sid()
+    await upsert_application(pool, submission_id=sid, payload=_payload(), cohort_name="calib")
+    await finish_graded(
+        pool,
+        sid,
+        audit_record={
+            "outcome": "RANKED",
+            "name": "Syn Thetic",
+            "final_score": 100.0,
+            "essays": {"e1": "SECRET ESSAY ONE", "e2": "SECRET ESSAY TWO", "e3": ""},
+            "gpa": {"raw": "3.8 / 4.0", "normalized_gpa": 3.8},
+        },
+        outcome="RANKED",
+        final_score=100.0,
+    )
+
+    [summary] = await dbmod.list_application_summaries(pool, cohort_name="calib")
+
+    assert "payload" not in summary
+    assert summary["has_payload"] is True          # the boolean the UI actually needs
+    assert "essays" not in summary["audit_record"]
+    # Everything ranking and the listing read must survive.
+    assert summary["audit_record"]["gpa"]["normalized_gpa"] == 3.8
+    assert summary["audit_record"]["outcome"] == "RANKED"
+    assert summary["final_score"] == 100.0
+    assert summary["cohort_name"] == "calib"
+
+    # The full read is unchanged — exports and the promote path still need both.
+    [full] = await list_applications(pool, cohort_name="calib")
+    assert full["audit_record"]["essays"]["e1"] == "SECRET ESSAY ONE"
+    assert full["payload"] is not None
+
+
+async def test_summaries_survive_an_ungraded_row(pool):
+    """`audit_record - 'essays'` on a NULL record must stay NULL, not become an empty object."""
+    sid = _sid()
+    await upsert_application(pool, submission_id=sid, payload=_payload())
+    [summary] = await dbmod.list_application_summaries(pool)
+    assert summary["audit_record"] is None
+    assert summary["status"] == "received"
+
+
+async def test_outcome_counts_are_computed_in_sql(pool):
+    a, b, c = _sid(), _sid(), _sid()
+    for sid in (a, b, c):
+        await upsert_application(pool, submission_id=sid, payload=_payload(x=sid),
+                                 cohort_name="calib")
+    await finish_graded(pool, a, audit_record={"outcome": "RANKED"}, outcome="RANKED",
+                        final_score=100.0)
+    await finish_graded(pool, b, audit_record={"outcome": "REJECTED"}, outcome="REJECTED",
+                        final_score=None)
+
+    counts = await dbmod.count_by_outcome(pool, cohort_name="calib")
+
+    assert counts == {"RANKED": 1, "REJECTED": 1, "received": 1}  # ungraded falls back to status
+
+
 async def test_delete_submission_hard_deletes_and_tombstones(pool):
     sid = _sid()
     await upsert_application(pool, submission_id=sid, payload=_payload())

@@ -333,6 +333,11 @@ def test_security_headers_are_on_every_response(path: str, kwargs: dict) -> None
     assert "object-src 'none'" in csp and "base-uri 'none'" in csp
 
 
+def _headers_for(config) -> dict:
+    app = create_app(config=config, client=FakeLLMClient(config), admin_password_hash=HASH)
+    return TestClient(app, follow_redirects=False).get("/health").headers
+
+
 def test_hsts_only_when_the_deployment_is_https() -> None:
     """Sending HSTS over plaintext is wrong, and local development speaks http://."""
     cfg = AppConfig()
@@ -341,12 +346,23 @@ def test_hsts_only_when_the_deployment_is_https() -> None:
     )
     https = cfg.model_copy(update={"auth": cfg.auth.model_copy(update={"cookie_secure": True})})
 
-    def _headers(config):
-        app = create_app(config=config, client=FakeLLMClient(config), admin_password_hash=HASH)
-        return TestClient(app, follow_redirects=False).get("/health").headers
+    assert "Strict-Transport-Security" not in _headers_for(http_only)
+    assert "max-age=31536000" in _headers_for(https)["Strict-Transport-Security"]
 
-    assert "Strict-Transport-Security" not in _headers(http_only)
-    assert "max-age=31536000" in _headers(https)["Strict-Transport-Security"]
+
+def test_the_dev_flag_drops_hsts_the_same_way_it_drops_the_secure_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One rule for "is this https", so the two cannot drift apart.
+
+    The demo flag means a local http:// server. It already dropped the Secure cookie flag
+    (otherwise the session cannot round-trip); HSTS was still being advertised, which
+    browsers ignore over plaintext but which contradicted the cookie's own answer.
+    """
+    monkeypatch.setenv("SRIP_DEV_FAKE_LLM", "1")
+    cfg = AppConfig()  # cookie_secure stays True — the flag is what overrides it
+    assert cfg.auth.cookie_secure is True
+    assert "Strict-Transport-Security" not in _headers_for(cfg)
 
 
 def test_the_font_hosts_base_html_uses_are_the_only_external_origins_allowed() -> None:
