@@ -243,7 +243,11 @@ class AuthConfig(_Strict):
     # 2 h. Short because P12.1 sessions are stateless: there is no server-side revocation,
     # so expiry is the only thing that retires a stolen cookie on its own.
     session_ttl_seconds: float = 7_200.0
-    max_attempts: int = 5  # failed logins within the window before lockout
+    max_attempts: int = 5  # failed logins from ONE client within the window before lockout
+    # Failed logins from EVERY client before all logins are refused — the distributed-guesser
+    # backstop. Deliberately far above max_attempts: when this was the only tier, any
+    # anonymous caller could hold staff out permanently with five requests per window.
+    max_attempts_global: int = 50
     lockout_seconds: float = 300.0  # sliding lockout window
     cookie_secure: bool = True  # set False only for local http:// development
 

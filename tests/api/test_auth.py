@@ -190,35 +190,175 @@ def test_wrong_password_401_then_lockout_429() -> None:
     assert locked.status_code == 429
 
 
+def _ledger_backed(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str | None]]:
+    """Patch the two store calls the throttle uses; return the ledger it writes to."""
+    ledger: list[tuple[str, str | None]] = []
+
+    async def add_event(pool, kind, *, submission_id=None, details=None):
+        ledger.append((kind, (details or {}).get("actor")))
+
+    async def count_recent_events(pool, kind, within_seconds, *, actor=None):
+        return sum(
+            1 for k, a in ledger if k == kind and (actor is None or a == actor)
+        )
+
+    monkeypatch.setattr(main_mod.dbmod, "add_event", add_event)
+    monkeypatch.setattr(main_mod.dbmod, "count_recent_events", count_recent_events)
+    return ledger
+
+
 def test_throttle_counts_failures_from_the_events_ledger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """P12.2: with a database the lockout is shared across instances, not per-process."""
-    ledger: list[str] = []
-
-    async def add_event(pool, kind, **kwargs):
-        ledger.append(kind)
-
-    async def count_recent_events(pool, kind, within_seconds):
-        return sum(1 for entry in ledger if entry == kind)
-
-    monkeypatch.setattr(main_mod.dbmod, "add_event", add_event)
-    monkeypatch.setattr(main_mod.dbmod, "count_recent_events", count_recent_events)
+    ledger = _ledger_backed(monkeypatch)
 
     client = _client(db_pool=object())  # sentinel: both store calls are patched
     for _ in range(AppConfig().auth.max_attempts):
         assert client.post("/login", data={"password": "nope"}).status_code == 401
-    assert ledger == ["login_failed"] * AppConfig().auth.max_attempts
+    assert [kind for kind, _ in ledger] == ["login_failed"] * AppConfig().auth.max_attempts
     # In-process throttle untouched — the lockout came from the ledger.
     assert client.post("/login", data={"password": PASSWORD}).status_code == 429
 
 
+def test_the_ledger_records_a_hashed_actor_never_an_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`events` is non-PII by law and an IP is personal data."""
+    ledger = _ledger_backed(monkeypatch)
+    client = _client(db_pool=object())
+
+    client.post(
+        "/login", data={"password": "nope"}, headers={"X-Forwarded-For": "198.51.100.9"}
+    )
+
+    (_, actor) = ledger[0]
+    assert actor and "198.51.100.9" not in actor
+    assert len(actor) == 16 and all(c in "0123456789abcdef" for c in actor)
+
+
+def test_one_abusive_client_cannot_lock_everyone_else_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The availability bug: a global-only counter let anyone hold staff out for free.
+
+    An attacker spending well past the per-client limit must lock out only themselves,
+    while a legitimate operator on a different address still logs straight in.
+    """
+    _ledger_backed(monkeypatch)
+    client = _client(db_pool=object())
+    attacker = {"X-Forwarded-For": "198.51.100.9"}
+    operator = {"X-Forwarded-For": "203.0.113.4"}
+
+    for _ in range(AppConfig().auth.max_attempts * 2):
+        client.post("/login", data={"password": "nope"}, headers=attacker)
+
+    assert client.post("/login", data={"password": PASSWORD}, headers=attacker).status_code == 429
+    assert client.post("/login", data={"password": PASSWORD}, headers=operator).status_code == 303
+
+
+def test_the_global_tier_still_backstops_a_distributed_guesser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-client throttling must not have retired the distributed-attack backstop."""
+    _ledger_backed(monkeypatch)
+    cfg = AppConfig()
+    client = _client(db_pool=object())
+
+    # One failure each from enough distinct clients to cross the global threshold, so no
+    # single per-client bucket is ever close to its own limit.
+    for n in range(cfg.auth.max_attempts_global):
+        client.post(
+            "/login", data={"password": "nope"}, headers={"X-Forwarded-For": f"198.51.100.{n}"}
+        )
+
+    fresh = {"X-Forwarded-For": "203.0.113.4"}
+    assert client.post("/login", data={"password": PASSWORD}, headers=fresh).status_code == 429
+
+
 def test_open_redirect_guard_on_next() -> None:
     client = _client()
-    for evil in ("https://evil.example", "//evil.example", "javascript:alert(1)"):
+    evils = (
+        "https://evil.example",
+        "//evil.example",
+        "javascript:alert(1)",
+        # Browsers follow the WHATWG parser, which folds a backslash to a slash for special
+        # schemes — so this resolves to https://evil.example despite the leading slash.
+        "/\\evil.example",
+        "/\\/evil.example",
+        "/legit/../\\evil.example",
+    )
+    for evil in evils:
         resp = client.post("/login", data={"password": PASSWORD, "next": evil})
-        assert resp.status_code == 303
-        assert resp.headers["location"] == "/"
+        assert resp.status_code == 303, evil
+        assert resp.headers["location"] == "/", evil
+
+
+def test_a_legitimate_next_path_still_round_trips() -> None:
+    """The tightened guard must not have broken the case it exists to serve."""
+    client = _client()
+    resp = client.post("/login", data={"password": PASSWORD, "next": "/audit?cohort=su26-cs"})
+    assert resp.headers["location"] == "/audit?cohort=su26-cs"
+
+
+# ------------------------------------------------------------------------------------------------
+# Security response headers
+# ------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path,kwargs",
+    [
+        ("/health", {}),                                        # open, no session
+        ("/login", {"headers": {"Accept": "text/html"}}),       # open, HTML
+        ("/api/applications", {}),                              # denied, JSON 401
+        ("/", {"headers": {"Accept": "text/html"}}),            # denied, redirect
+        ("/static/css/app.css", {}),                            # mounted sub-app
+    ],
+)
+def test_security_headers_are_on_every_response(path: str, kwargs: dict) -> None:
+    """Stamped in the middleware, so no route — present or future — can miss them.
+
+    This service renders minors' PII and hosts an irreversible purge control, and shipped
+    with none of these set. Error pages and redirects count: a 401 that can be framed is
+    still a framed page.
+    """
+    resp = _client().get(path, **kwargs)
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["Referrer-Policy"] == "no-referrer"
+    csp = resp.headers["Content-Security-Policy"]
+    assert "frame-ancestors 'none'" in csp
+    assert "script-src 'self'" in csp  # the backstop for a missed escape in the audit UI
+    assert "object-src 'none'" in csp and "base-uri 'none'" in csp
+
+
+def test_hsts_only_when_the_deployment_is_https() -> None:
+    """Sending HSTS over plaintext is wrong, and local development speaks http://."""
+    cfg = AppConfig()
+    http_only = cfg.model_copy(
+        update={"auth": cfg.auth.model_copy(update={"cookie_secure": False})}
+    )
+    https = cfg.model_copy(update={"auth": cfg.auth.model_copy(update={"cookie_secure": True})})
+
+    def _headers(config):
+        app = create_app(config=config, client=FakeLLMClient(config), admin_password_hash=HASH)
+        return TestClient(app, follow_redirects=False).get("/health").headers
+
+    assert "Strict-Transport-Security" not in _headers(http_only)
+    assert "max-age=31536000" in _headers(https)["Strict-Transport-Security"]
+
+
+def test_the_font_hosts_base_html_uses_are_the_only_external_origins_allowed() -> None:
+    """The CSP has to actually permit the one external dependency the UI ships with.
+
+    A CSP that breaks the page gets removed, so this pins the pairing: if base.html stops
+    loading Google Fonts, these entries should go with it.
+    """
+    csp = _client().get("/health").headers["Content-Security-Policy"]
+    assert "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com" in csp
+    assert "font-src 'self' https://fonts.gstatic.com" in csp
+    assert "default-src 'self'" in csp
 
 
 def test_logout_revokes_session() -> None:

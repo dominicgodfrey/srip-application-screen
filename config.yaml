@@ -180,7 +180,12 @@ auth:
   # 2 h — P12.1 session cookies are stateless (signed, not stored), so nothing but expiry
   # retires a stolen one. Rotating the admin password invalidates every session at once.
   session_ttl_seconds: 7200.0
-  max_attempts: 5               # failed logins within the window before global lockout
+  # Two tiers, both counted over the same sliding window. Per-client is the one that
+  # normally fires; the global tier is the distributed-guesser backstop, priced so that
+  # ordinary abuse cannot reach it. When global was the ONLY tier, five wrong passwords
+  # from anywhere locked every staff member out — for free, indefinitely.
+  max_attempts: 5               # failed logins from ONE client before that client is locked
+  max_attempts_global: 50       # failed logins from EVERY client before all logins refuse
   lockout_seconds: 300.0
   cookie_secure: true           # false only for local http:// development
 

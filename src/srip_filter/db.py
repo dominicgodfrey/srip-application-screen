@@ -555,17 +555,32 @@ async def add_event(
 # Helpers
 # ================================================================================================
 
-async def count_recent_events(pool: asyncpg.Pool, kind: str, within_seconds: float) -> int:
+async def count_recent_events(
+    pool: asyncpg.Pool, kind: str, within_seconds: float, *, actor: str | None = None
+) -> int:
     """How many ``kind`` events landed inside the window (P12.2 login throttle).
 
     The throttle has to be shared across serverless instances, and ``events`` is already
     the cross-instance ledger. Safe for this use: a failed login is a structural fact
     about a single shared credential — no identity, no PII.
+
+    ``actor`` narrows the count to one ``details->>'actor'`` bucket, which is how the
+    per-client tier is counted. That value is a salted hash produced by
+    :func:`api.auth.client_key`, never an address — see its docstring for why the ledger
+    must not learn one.
     """
+    if actor is None:
+        return await pool.fetchval(
+            "SELECT COUNT(*) FROM events WHERE kind = $1 AND created_at > NOW() - $2::interval",
+            kind,
+            timedelta(seconds=within_seconds),
+        )
     return await pool.fetchval(
-        "SELECT COUNT(*) FROM events WHERE kind = $1 AND created_at > NOW() - $2::interval",
+        "SELECT COUNT(*) FROM events WHERE kind = $1 AND created_at > NOW() - $2::interval "
+        "AND details->>'actor' = $3",
         kind,
         timedelta(seconds=within_seconds),
+        actor,
     )
 
 

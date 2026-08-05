@@ -22,6 +22,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Query, Request, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
@@ -39,7 +40,10 @@ from .admin_api import register_admin_api
 from .auth import (
     SESSION_COOKIE,
     LoginThrottle,
+    client_key,
     is_open_path,
+    safe_next_path,
+    security_headers,
     sign_session,
     valid_session,
     verify_password,
@@ -232,41 +236,71 @@ def create_app(
     # the only revocation lever a stateless scheme has.
     app.state.session_secret = app.state.admin_password_hash or ""
     app.state.login_throttle = LoginThrottle(
-        max_attempts=cfg.auth.max_attempts, lockout_seconds=cfg.auth.lockout_seconds
+        max_attempts=cfg.auth.max_attempts,
+        lockout_seconds=cfg.auth.lockout_seconds,
+        max_attempts_global=cfg.auth.max_attempts_global,
     )
 
-    # P12.2: with a database the lockout window is counted over `events`, so it holds
+    def _client_key(request) -> str:  # type: ignore[no-untyped-def]
+        """Throttle bucket for this caller — a salted hash, never an address (see auth)."""
+        return client_key(
+            request.headers.get("x-forwarded-for"),
+            request.client.host if request.client else None,
+            app.state.session_secret or "unconfigured",
+        )
+
+    # P12.2: with a database the lockout windows are counted over `events`, so they hold
     # across serverless instances; the in-memory throttle is the local-dev fallback.
-    async def locked_out() -> bool:
+    async def locked_out(actor: str) -> bool:
         pool = app.state.db_pool
         if pool is None:
-            return app.state.login_throttle.locked_out()
-        failures = await dbmod.count_recent_events(
+            return app.state.login_throttle.locked_out(actor)
+        mine = await dbmod.count_recent_events(
+            pool, "login_failed", cfg.auth.lockout_seconds, actor=actor
+        )
+        if mine >= cfg.auth.max_attempts:
+            return True
+        everyone = await dbmod.count_recent_events(
             pool, "login_failed", cfg.auth.lockout_seconds
         )
-        return failures >= cfg.auth.max_attempts
+        return everyone >= cfg.auth.max_attempts_global
 
-    async def record_login_failure() -> None:
+    async def record_login_failure(actor: str) -> None:
         pool = app.state.db_pool
         if pool is None:
-            app.state.login_throttle.record_failure()
+            app.state.login_throttle.record_failure(actor)
         else:
-            await dbmod.add_event(pool, "login_failed")
+            await dbmod.add_event(pool, "login_failed", details={"actor": actor})
 
     @app.middleware("http")
     async def require_admin(request, call_next):  # type: ignore[no-untyped-def]
+        """Default-deny session gate, and the one place security headers are stamped.
+
+        Headers go on *every* response — error pages, redirects and static assets
+        included — so there is no route that can be added later and quietly miss them.
+        """
+        headers = security_headers(https_only=cfg.auth.cookie_secure)
         path = request.url.path
-        if is_open_path(path):
-            return await call_next(request)
-        if valid_session(request.cookies.get(SESSION_COOKIE), app.state.session_secret):
-            return await call_next(request)
-        if wants_html(request.headers.get("accept")):
+        if is_open_path(path) or valid_session(
+            request.cookies.get(SESSION_COOKIE), app.state.session_secret
+        ):
+            response = await call_next(request)
+        elif wants_html(request.headers.get("accept")):
             from fastapi.responses import RedirectResponse
 
-            return RedirectResponse(url=f"/login?next={path}", status_code=303)
-        from fastapi.responses import JSONResponse
+            # `path` is this server's own routing path, not user-supplied content, but it
+            # still lands in a URL — quote it rather than reflect it verbatim.
+            response = RedirectResponse(
+                url=f"/login?next={quote(safe_next_path(path), safe='/')}", status_code=303
+            )
+        else:
+            from fastapi.responses import JSONResponse
 
-        return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+            response = JSONResponse(
+                status_code=401, content={"detail": "Authentication required."}
+            )
+        response.headers.update(headers)
+        return response
 
     @app.get("/login", tags=["auth"])
     async def login_page(request: Request, next: str = "/"):  # type: ignore[no-untyped-def]
@@ -295,16 +329,15 @@ def create_app(
         stored = app.state.admin_password_hash
         if not stored:
             return _page("Login is not configured on this server.", 503)
-        if await locked_out():
+        actor = _client_key(request)
+        if await locked_out(actor):
             return _page("Too many failed attempts. Try again in a few minutes.", 429)
 
         form = await request.form()
         password = str(form.get("password") or "")
-        next_path = str(form.get("next") or "/")
-        if not next_path.startswith("/") or next_path.startswith("//"):
-            next_path = "/"  # open-redirect guard: same-origin paths only
+        next_path = safe_next_path(str(form.get("next") or "/"))
         if not verify_password(password, stored):
-            await record_login_failure()
+            await record_login_failure(actor)
             return _page("Incorrect password.", 401)
 
         app.state.login_throttle.reset()
