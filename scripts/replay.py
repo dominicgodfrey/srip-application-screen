@@ -39,9 +39,10 @@ sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 from api.webhook_auth import SECRET_HEADER  # noqa: E402
 
+from srip_filter.applicant import ApplicantRow  # noqa: E402
 from srip_filter.ingest import (  # noqa: E402
-    ApplicantRow,
     read_csv_records,
+    row_from_record,
     validate_headers,
 )
 
@@ -129,7 +130,7 @@ def payload_from_row(
 def payloads_from_csv(path: Path, cohort_name: str) -> list[dict]:
     headers, records = read_csv_records(path)
     resolution = validate_headers(headers)
-    rows = [ApplicantRow.from_record(record, resolution) for record in records]
+    rows = [row_from_record(record, resolution) for record in records]
     return [
         payload_from_row(r, cohort_name, submitted_at=_submitted_at(i))
         for i, r in enumerate(r for r in rows if r.submission_id)

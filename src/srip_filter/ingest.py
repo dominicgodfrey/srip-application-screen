@@ -1,8 +1,16 @@
-"""Stage 0 — ingest data contract (Phase 1.1).
+"""CSV ingest — the Fillout-export reader, kept for ``scripts/replay.py`` only.
 
-This module pins the CSV → canonical-field mapping (PRD §2) and resolves a real Fillout
-export's headers against it *gracefully* — surfacing what is missing or unrecognized rather
-than throwing on the first surprise.
+**Not part of the deployed service.** Applications arrive over the webhook; this module
+exists so the replay tool can turn a real CSV export into authenticated POSTs for
+integration testing. It is therefore the one place pandas is used, and pandas is a dev
+dependency — importing this module in a production install will fail, which is the
+intended signal. Nothing under ``api/`` or in the grading pipeline imports it; the shared
+:class:`~srip_filter.applicant.ApplicantRow` lives in its own pandas-free module to keep
+that true.
+
+It pins the CSV → canonical-field mapping and resolves a real Fillout export's headers
+against it *gracefully* — surfacing what is missing or unrecognized rather than throwing
+on the first surprise.
 
 Why matching is not a plain ``==`` on every header: Fillout column titles are the full
 question text and several are very long (the essays, the extenuating-circumstances field, the
@@ -25,8 +33,8 @@ from pathlib import Path
 from typing import IO
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict
 
+from .applicant import ApplicantRow
 from .models import DedupInfo
 
 # ================================================================================================
@@ -220,53 +228,23 @@ def validate_headers(headers: list[str]) -> HeaderResolution:
 # ================================================================================================
 
 
-class ApplicantRow(BaseModel):
-    """One CSV row mapped onto canonical roles.
+def row_from_record(record: dict[str, object], resolution: HeaderResolution) -> ApplicantRow:
+    """Build an :class:`~srip_filter.applicant.ApplicantRow` from a raw CSV record.
 
-    Every field is a whitespace-normalized string (defaulting to ""); GPA normalization, essay
-    gating, and the rest of the pipeline run on these later. Unknown keys are forbidden so a
-    mapping bug surfaces immediately.
+    Only resolved roles are populated; an unresolved optional role stays at its "" default.
+    Each value is whitespace-normalized via :func:`normalize_cell` (missing / NaN / blank →
+    "", outer whitespace trimmed).
+
+    A module function rather than an ``ApplicantRow`` classmethod: the row type lives in
+    :mod:`srip_filter.applicant` precisely so the scoring layer never imports this module
+    (and therefore never imports pandas), and a classmethod would drag ``HeaderResolution``
+    back across that line.
     """
-
-    model_config = ConfigDict(extra="forbid")
-
-    submission_id: str = ""
-    first_name: str = ""
-    last_name: str = ""
-    email: str = ""
-    institution: str = ""
-    state: str = ""
-    phone: str = ""
-    first_choice: str = ""
-    second_choice: str = ""
-    third_choice: str = ""
-    gpa: str = ""
-    gpa_explanation: str = ""
-    coursework: str = ""
-    resume_url: str = ""
-    linkedin: str = ""
-    essay1: str = ""
-    essay2: str = ""
-    affirmation: str = ""
-    # v3 webhook-only fields (blank on the CSV path): the optional technical essay and the
-    # carried-not-scored metadata (PRD v3 §2.2). Populated by ingest_webhook.
-    essay3: str = ""
-    programming_languages: str = ""
-    github_profile: str = ""
-    sub_track: str = ""
-
-    @classmethod
-    def from_record(cls, record: dict[str, object], resolution: HeaderResolution) -> ApplicantRow:
-        """Build a row from a raw header→value record using a resolved header mapping.
-
-        Only resolved roles are populated; an unresolved optional role stays at its "" default.
-        Each value is whitespace-normalized via :func:`normalize_cell` (missing / NaN / blank →
-        "", outer whitespace trimmed).
-        """
-        values: dict[str, str] = {}
-        for role, header in resolution.role_to_header.items():
-            values[role] = normalize_cell(record.get(header, ""))
-        return cls(**values)
+    values = {
+        role: normalize_cell(record.get(header, ""))
+        for role, header in resolution.role_to_header.items()
+    }
+    return ApplicantRow(**values)
 
 
 # ================================================================================================
@@ -301,7 +279,7 @@ def read_csv_records(
     a stray non-UTF-8 byte never crashes ingest. All columns are read as strings — no numeric
     inference (a GPA of ``4.0`` must not become a float) — and blanks come back as "" rather
     than NaN. Records keep the original CSV header strings as keys for
-    :meth:`ApplicantRow.from_record`.
+    :func:`row_from_record`.
     """
     raw = _read_bytes(source)
     last_err: UnicodeDecodeError | None = None
@@ -512,7 +490,7 @@ def ingest_csv(source: str | Path | bytes | IO[bytes]) -> IngestResult:
     headers, records = read_csv_records(source)
     resolution = validate_headers(headers)
 
-    rows = [ApplicantRow.from_record(record, resolution) for record in records]
+    rows = [row_from_record(record, resolution) for record in records]
     identity = validate_identity(rows)
     dedup = deduplicate(identity.kept)
 

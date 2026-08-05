@@ -24,8 +24,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from ..applicant import ApplicantRow
 from ..config import AppConfig, GpaConfig, GpaNormalizationConfig
-from ..ingest import ApplicantRow
 from ..llm.client import BaseLLMClient, LLMParseFailure
 from ..llm.prompts import task_a as task_a_prompt
 from ..llm.prompts import task_b as task_b_prompt
@@ -420,6 +420,12 @@ def gpa_gate_deterministic(
 # parse failure is unscoreable -> NEEDS_REVIEW, never a silent rejection (PRD §8).
 
 
+def _with_detail(gate_reason: str, rationale: str) -> str:
+    """``gate_reason``, plus the model's rationale when it wrote one. Never model-only."""
+    detail = rationale.strip()
+    return f"{gate_reason} — {detail}" if detail else gate_reason
+
+
 def _task_b_result(
     out: TaskBOutput,
     raw: str,
@@ -428,7 +434,14 @@ def _task_b_result(
     explanation: str,
     cfg: GpaConfig,
 ) -> GpaGateResult:
-    """Turn a Task B verdict into a gate result; store the eval in the assessment either way."""
+    """Turn a Task B verdict into a gate result; store the eval in the assessment either way.
+
+    The rejection reason is composed deterministically and only *then* extended with the
+    model's prose. Passing ``out.rationale`` through as the whole reason made invariant #3
+    ("every REJECTED record names the failing gate") depend on the model choosing to write
+    something: an empty rationale produced a rejection that could not say what rejected it.
+    The rationale is real evidence and stays — as detail after the gate, not instead of it.
+    """
     assessment = build_assessment(raw, norm, out, explanation=explanation)
     if out.recommended_outcome == "rank":
         # Below threshold -> gpa_points clamps to 0: deficit reflected, never erased (§8.1).
@@ -437,14 +450,19 @@ def _task_b_result(
             gpa_points=gpa_points(normalized_gpa, cfg),
             reason="",
             assessment=assessment,
-            gate=GpaGate(passed=True, reason=out.rationale),
+            gate=GpaGate(passed=True, reason=_with_detail(
+                f"GPA below {cfg.threshold}; explanation accepted", out.rationale
+            )),
         )
+    reason = _with_detail(
+        f"GPA below {cfg.threshold}; explanation judged inadequate", out.rationale
+    )
     return GpaGateResult(
         verdict="reject",
         gpa_points=0.0,
-        reason=out.rationale,
+        reason=reason,
         assessment=assessment,
-        gate=GpaGate(passed=False, reason=out.rationale),
+        gate=GpaGate(passed=False, reason=reason),
     )
 
 

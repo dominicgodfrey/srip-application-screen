@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .ingest import ApplicantRow
+from .applicant import ApplicantRow
 from .models import ApplicationPayload
 
 # Named answers we read out of `all_answers`. `programming_languages` and `github_profile`

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from srip_filter.applicant import ApplicantRow
 from srip_filter.ingest import (
     AFFIRMATION,
     EMAIL,
@@ -18,13 +19,13 @@ from srip_filter.ingest import (
     INSTITUTION,
     LAST_NAME,
     REQUIRED_ROLES,
-    ApplicantRow,
     HeaderValidationError,
     deduplicate,
     ingest_csv,
     normalize_cell,
     read_csv_records,
     resolve_headers,
+    row_from_record,
     validate_headers,
     validate_identity,
 )
@@ -76,7 +77,7 @@ def test_resolves_all_roles_from_good_headers() -> None:
 def test_phone_role_resolves_and_populates_row() -> None:
     res = resolve_headers(GOOD_HEADERS)
     record = {res.role_to_header["phone"]: " (555) 010-0001 "}
-    row = ApplicantRow.from_record(record, res)
+    row = row_from_record(record, res)
     assert row.phone == "(555) 010-0001"
 
 
@@ -155,7 +156,7 @@ def test_validate_returns_resolution_when_ok() -> None:
 def test_applicant_row_from_record_populates_resolved_roles() -> None:
     res = resolve_headers(GOOD_HEADERS)
     record = {h: f"value::{h[:10]}" for h in GOOD_HEADERS}
-    row = ApplicantRow.from_record(record, res)
+    row = row_from_record(record, res)
     assert row.submission_id == "value::Submission"
     assert row.essay1.startswith("value::")
     assert row.affirmation.startswith("value::")
@@ -163,7 +164,7 @@ def test_applicant_row_from_record_populates_resolved_roles() -> None:
 
 def test_applicant_row_missing_cells_become_empty_string() -> None:
     res = resolve_headers(GOOD_HEADERS)
-    row = ApplicantRow.from_record({"Submission ID": "abc"}, res)
+    row = row_from_record({"Submission ID": "abc"}, res)
     assert row.submission_id == "abc"
     assert row.email == ""  # resolved role, absent in record
     assert row.gpa == ""
@@ -172,7 +173,7 @@ def test_applicant_row_missing_cells_become_empty_string() -> None:
 def test_applicant_row_coerces_none_and_nonstring() -> None:
     res = resolve_headers(GOOD_HEADERS)
     record = {"Submission ID": None, "GPA": 3.97}
-    row = ApplicantRow.from_record(record, res)
+    row = row_from_record(record, res)
     assert row.submission_id == ""
     assert row.gpa == "3.97"
 
@@ -180,7 +181,7 @@ def test_applicant_row_coerces_none_and_nonstring() -> None:
 def test_applicant_row_normalizes_whitespace() -> None:
     res = resolve_headers(GOOD_HEADERS)
     record = {"Submission ID": "  abc  ", "GPA": "   ", "What is your email address?": "\tx@y.z\n"}
-    row = ApplicantRow.from_record(record, res)
+    row = row_from_record(record, res)
     assert row.submission_id == "abc"
     assert row.gpa == ""  # whitespace-only -> empty
     assert row.email == "x@y.z"
@@ -257,7 +258,7 @@ def test_read_csv_records_non_utf8_fallback() -> None:
 def test_read_then_build_rows_end_to_end() -> None:
     headers, records = read_csv_records(_csv_bytes([GOOD_HEADERS, ["x"] * len(GOOD_HEADERS)]))
     res = validate_headers(headers)
-    rows = [ApplicantRow.from_record(r, res) for r in records]
+    rows = [row_from_record(r, res) for r in records]
     assert len(rows) == 1
     assert rows[0].submission_id == "x"
 

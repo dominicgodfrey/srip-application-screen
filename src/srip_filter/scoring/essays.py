@@ -21,9 +21,9 @@ import asyncio
 from dataclasses import dataclass
 from typing import Literal
 
+from ..applicant import ApplicantRow
 from ..config import AppConfig, EssayScoringConfig
 from ..gates.essays import word_count
-from ..ingest import ApplicantRow
 from ..llm.client import BaseLLMClient, LLMParseFailure
 from ..llm.prompts import task_d as task_d_prompt
 from ..models import EssayRelevanceGate, EssaySubscores, HitGate, TaskDOutput
@@ -62,19 +62,17 @@ class EssayScoreResult:
         return self.is_gibberish or not self.on_topic
 
 
-def score_one_essay(
-    out: TaskDOutput, length_penalty: float, cfg: EssayScoringConfig
-) -> EssayScoreResult:
-    """Apply the PRD §8.3 per-essay post-processing to one Task D output. Pure function.
+def score_one_essay(out: TaskDOutput, cfg: EssayScoringConfig) -> EssayScoreResult:
+    """Apply the per-essay post-processing to one Task D output. Pure function.
 
     A gibberish or off-topic essay is gated → score 0 (the application is rejected upstream).
-    Otherwise ``score = max(0, quality_score - grammar_spelling_penalty - length_penalty)``,
-    capped at ``quality_max_each``. The ``max(0, …)`` floor guarantees a length penalty never
-    produces a negative subscore.
+    Otherwise ``score = max(0, quality_score - grammar_spelling_penalty)``, capped at
+    ``quality_max_each``. The ``max(0, …)`` floor guarantees the grammar penalty can never
+    produce a negative subscore.
     """
     if out.is_gibberish or not out.on_topic:
         return EssayScoreResult(is_gibberish=out.is_gibberish, on_topic=out.on_topic, score=0.0)
-    raw = out.quality_score - out.grammar_spelling_penalty - length_penalty
+    raw = out.quality_score - out.grammar_spelling_penalty
     score = max(0.0, min(float(cfg.quality_max_each), raw))
     return EssayScoreResult(is_gibberish=False, on_topic=True, score=round(score, 4))
 
@@ -134,8 +132,6 @@ def _needs_review() -> Stage4Result:
 
 async def grade_essays(
     row: ApplicantRow,
-    length_penalty_e1: float,
-    length_penalty_e2: float,
     prompt_e1: str,
     prompt_e2: str,
     client: BaseLLMClient,
@@ -144,17 +140,17 @@ async def grade_essays(
     target_range_e1: str | None = None,
     target_range_e2: str | None = None,
 ) -> Stage4Result:
-    """Stage 4 end to end: grade both essays with Task D and reduce to a verdict (PRD §8.3).
+    """Stage 4 end to end: grade both essays with Task D and reduce to a verdict.
 
-    ``prompt_e1``/``prompt_e2`` are the resolved CSV essay-question headers (the prompts the
-    applicant answered), supplied by the orchestrator. ``length_penalty_*`` are the soft penalties
-    carried from Stage 1. Both Task D calls run concurrently (the client bounds concurrency and
-    caches by the rendered prompt, so identical essays dedup within a run). Gibberish or off-topic
-    on either essay → ``reject``; an :class:`LLMParseFailure` after the client's retry →
+    ``prompt_e1``/``prompt_e2`` are the questions the applicant actually answered, taken
+    from the payload and supplied by the orchestrator, so they can never drift from the live
+    form. Both Task D calls run concurrently (the client bounds concurrency and caches by
+    the rendered prompt, so identical essays dedup within a run). Gibberish or off-topic on
+    either essay → ``reject``; an :class:`LLMParseFailure` after the client's retry →
     ``needs_review``. Otherwise ``pass`` with the composed subscores.
     """
-    # v3: per-essay target ranges come from the webhook payload metadata; None keeps the
-    # v2 fixed band (the replay/calibration path).
+    # The payload carries no per-essay bounds, so None falls back to the prompt module's
+    # own default band.
     range_kw1 = {"target_range": target_range_e1} if target_range_e1 else {}
     range_kw2 = {"target_range": target_range_e2} if target_range_e2 else {}
     try:
@@ -179,8 +175,8 @@ async def grade_essays(
     except LLMParseFailure:
         return _needs_review()
 
-    e1 = score_one_essay(out1, length_penalty_e1, cfg.essay_scoring)
-    e2 = score_one_essay(out2, length_penalty_e2, cfg.essay_scoring)
+    e1 = score_one_essay(out1, cfg.essay_scoring)
+    e2 = score_one_essay(out2, cfg.essay_scoring)
 
     relevance = EssayRelevanceGate(e1_on_topic=out1.on_topic, e2_on_topic=out2.on_topic)
     gibberish = HitGate(hit=out1.is_gibberish or out2.is_gibberish)

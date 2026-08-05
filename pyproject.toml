@@ -5,7 +5,6 @@ description = "SRIP Track 2 application filtering & ranking system (stateless: r
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pandas>=2.2",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "openai>=1.50",  # client.chat.completions.parse (structured outputs) left beta in 1.50
@@ -33,6 +32,11 @@ dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    # Only `srip_filter.ingest` uses pandas, and that module exists only for
+    # `scripts/replay.py` — a development tool. Nothing the deployed function imports
+    # touches it, so keeping it out of the runtime set drops ~0.6 s from every serverless
+    # cold start and its weight from the bundle.
+    "pandas>=2.2",
 ]
 
 [build-system]

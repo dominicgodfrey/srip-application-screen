@@ -28,8 +28,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..applicant import ApplicantRow
 from ..config import AppConfig, CourseworkConfig
-from ..ingest import ApplicantRow
 from ..llm.client import BaseLLMClient, LLMParseFailure
 from ..llm.prompts import task_c as task_c_prompt
 from ..models import CourseCategory, CourseItem, TaskCOutput

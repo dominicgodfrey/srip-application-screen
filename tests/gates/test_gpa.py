@@ -381,7 +381,7 @@ def test_gate_below_threshold_with_explanation_defers_to_task_b() -> None:
 # ================================================================================================
 
 
-def _task_b(outcome: str = "rank") -> TaskBOutput:
+def _task_b(outcome: str = "rank", rationale: str = "task b rationale") -> TaskBOutput:
     rank = outcome == "rank"
     return TaskBOutput(
         explanation_adequate=rank,
@@ -389,7 +389,7 @@ def _task_b(outcome: str = "rank") -> TaskBOutput:
         realistic=True,
         severity_vs_reason_balanced=rank,
         recommended_outcome=outcome,  # type: ignore[arg-type]
-        rationale="task b rationale",
+        rationale=rationale,
     )
 
 
@@ -459,8 +459,21 @@ async def test_assess_below_threshold_task_b_reject() -> None:
     client = _client(_dispatch(task_b=_task_b("reject")))
     res = await assess_gpa(_row("2.4", "I did not feel like studying"), client, APP)
     assert res.verdict == "reject"
-    assert res.reason == "task b rationale"  # PRD §12: rejection names its reason
+    # §10 invariant #3: the gate names itself deterministically, and the model's rationale
+    # follows as detail. It used to BE the reason, which made naming the gate contingent on
+    # the model writing prose — an empty rationale left the rejection unexplained.
+    assert res.reason.startswith("GPA below 3.3; explanation judged inadequate")
+    assert "task b rationale" in res.reason
     assert res.assessment.explanation_eval is not None
+
+
+async def test_a_rejection_names_its_gate_even_with_a_silent_model() -> None:
+    """The regression this guards: reason must never be empty just because rationale is."""
+    client = _client(_dispatch(task_b=_task_b("reject", rationale="")))
+    res = await assess_gpa(_row("2.4", "no real explanation"), client, APP)
+    assert res.verdict == "reject"
+    assert res.reason.strip()
+    assert res.gate.reason.strip()
 
 
 async def test_assess_task_b_parse_failure_needs_review_never_rejects() -> None:

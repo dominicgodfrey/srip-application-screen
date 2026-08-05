@@ -41,14 +41,6 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class EssayLengthConfig(_Strict):
-    target_min: int = 100
-    target_max: int = 350
-    hard_min: int = 60
-    hard_max: int = 500
-    len_penalty_max: int = 5
-
-
 class GibberishConfig(_Strict):
     """Cheap deterministic gibberish heuristics (PRD §4.2). ESL-safe: a hit requires
     ``min_signals`` independent signals to trip, so ordinary awkward/ESL prose passes."""
@@ -281,7 +273,6 @@ class WebhookConfig(_Strict):
 class AppConfig(_Strict):
     """All tunable knobs. Defaults mirror PRD §10.3 exactly."""
 
-    essay_length: EssayLengthConfig = Field(default_factory=EssayLengthConfig)
     gibberish: GibberishConfig = Field(default_factory=GibberishConfig)
     gpa: GpaConfig = Field(default_factory=GpaConfig)
     essay_scoring: EssayScoringConfig = Field(default_factory=EssayScoringConfig)

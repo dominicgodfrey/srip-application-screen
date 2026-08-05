@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..applicant import ApplicantRow
 from ..config import AppConfig, ResumeConfig
-from ..ingest import ApplicantRow
 from ..llm.client import BaseLLMClient, LLMParseFailure
 from ..llm.prompts import task_e as task_e_prompt
 from ..models import ResumeAssessment, TaskEOutput

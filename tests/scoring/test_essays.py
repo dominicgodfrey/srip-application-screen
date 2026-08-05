@@ -63,39 +63,53 @@ def test_user_prompt_renders_template() -> None:
 # ------------------------------------------------------------------------------------------------
 
 
-def test_clean_essay_scores_quality_minus_penalties() -> None:
-    r = score_one_essay(_task_d(quality_score=13, grammar_spelling_penalty=2), 1.0, CFG)
+def test_clean_essay_scores_quality_minus_grammar_penalty() -> None:
+    r = score_one_essay(_task_d(quality_score=13, grammar_spelling_penalty=2), CFG)
     assert not r.gated
-    assert r.score == pytest.approx(10.0)  # 13 - 2 - 1
+    assert r.score == pytest.approx(11.0)  # 13 - 2
 
 
-def test_no_penalties_scores_full_quality() -> None:
-    r = score_one_essay(_task_d(quality_score=15), 0.0, CFG)
+def test_no_penalty_scores_full_quality() -> None:
+    r = score_one_essay(_task_d(quality_score=15), CFG)
     assert r.score == pytest.approx(15.0)
 
 
-def test_length_penalty_never_drives_score_negative() -> None:
-    # quality 1, grammar 0, but a large length penalty -> floored at 0, not negative.
-    r = score_one_essay(_task_d(quality_score=1), 5.0, CFG)
+def test_the_grammar_penalty_never_drives_a_score_negative() -> None:
+    # The penalty is capped at 3 by config, but the floor is asserted here regardless: a
+    # negative subscore would be a deduction, and nothing in the model deducts.
+    r = score_one_essay(_task_d(quality_score=1, grammar_spelling_penalty=3), CFG)
     assert r.score == 0.0
     assert not r.gated  # floored, but still on-topic and genuine — not a gate
 
 
 def test_score_capped_at_quality_max_each() -> None:
-    # Defensive: even if a future model over-returns, the cap holds.
-    out = _task_d(quality_score=15)
-    r = score_one_essay(out, -5.0, CFG)  # a negative "penalty" would otherwise inflate
-    assert r.score == pytest.approx(float(CFG.quality_max_each))
+    """Defensive: the clamp holds even for a value the schema would have refused.
+
+    ``quality_score`` is ``le=15`` and the grammar penalty is ``ge=0``, so nothing valid can
+    exceed the cap today — the point is that raising ``quality_max_each`` or loosening the
+    schema later cannot silently produce an out-of-band subscore. Hence ``model_construct``,
+    which skips validation on purpose.
+    """
+    over = TaskDOutput.model_construct(
+        is_gibberish=False,
+        on_topic=True,
+        relevance_confidence=1.0,
+        quality_score=99,
+        grammar_spelling_penalty=0,
+        saliency_notes="",
+        rationale="",
+    )
+    assert score_one_essay(over, CFG).score == pytest.approx(float(CFG.quality_max_each))
 
 
 def test_gibberish_essay_is_gated_and_scores_zero() -> None:
-    r = score_one_essay(_task_d(is_gibberish=True, quality_score=13), 0.0, CFG)
+    r = score_one_essay(_task_d(is_gibberish=True, quality_score=13), CFG)
     assert r.gated and r.is_gibberish
     assert r.score == 0.0
 
 
 def test_off_topic_essay_is_gated_and_scores_zero() -> None:
-    r = score_one_essay(_task_d(on_topic=False, quality_score=13), 0.0, CFG)
+    r = score_one_essay(_task_d(on_topic=False, quality_score=13), CFG)
     assert r.gated and not r.on_topic
     assert r.score == 0.0
 
@@ -114,17 +128,17 @@ def _client(handler) -> FakeLLMClient:  # type: ignore[no-untyped-def]
 
 
 async def _grade(client: FakeLLMClient) -> object:
-    return await grade_essays(_row(), 0.0, 0.0, "P1", "P2", client, APP)
+    return await grade_essays(_row(), "P1", "P2", client, APP)
 
 
 async def test_both_essays_pass_composes_total() -> None:
     client = _client(lambda t, u, s: _task_d(quality_score=13, grammar_spelling_penalty=1))
-    r = await grade_essays(_row(), 1.0, 2.0, "P1", "P2", client, APP)
+    r = await grade_essays(_row(), "P1", "P2", client, APP)
     assert r.verdict == "pass"
     assert r.primary_reason == ""
-    assert r.subscores.e1 == pytest.approx(11.0)  # 13 - 1 - 1
-    assert r.subscores.e2 == pytest.approx(10.0)  # 13 - 1 - 2
-    assert r.subscores.total == pytest.approx(21.0)
+    assert r.subscores.e1 == pytest.approx(12.0)  # 13 - 1
+    assert r.subscores.e2 == pytest.approx(12.0)  # 13 - 1
+    assert r.subscores.total == pytest.approx(24.0)
     assert r.essay_relevance.e1_on_topic is True and r.essay_relevance.e2_on_topic is True
     assert r.gibberish.hit is False
 
@@ -178,7 +192,7 @@ async def test_parse_failure_routes_to_needs_review_never_rejects() -> None:
 
 async def test_identical_essays_dedup_within_run() -> None:
     client = _client(lambda t, u, s: _task_d())
-    await grade_essays(_row("same", "same"), 0.0, 0.0, "P", "P", client, APP)
+    await grade_essays(_row("same", "same"), "P", "P", client, APP)
     # Same prompt + same essay text + same wc -> one cache key, one call.
     assert len(client.calls) == 1
 

@@ -24,8 +24,8 @@ from functools import lru_cache
 
 from rapidfuzz import fuzz
 
+from ..applicant import ApplicantRow
 from ..config import AppConfig, SchoolConfig, project_root
-from ..ingest import ApplicantRow
 from ..models import SchoolListName, SchoolMatch
 
 _RESOURCES_DIR = project_root() / "resources"

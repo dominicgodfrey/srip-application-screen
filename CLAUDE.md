@@ -49,7 +49,9 @@ Settled (do not re-litigate without an owner decision):
 - **`rapidfuzz`** (school match), **`better-profanity`** (profanity gate),
   **`httpx`** + **`pypdf`** (resume fetch/extract), **`PyYAML`** (config).
 - **`pytest`** + **`pytest-asyncio`**, **`ruff`**.
-- `pandas` remains only for the replay tool's CSV conversion.
+- `pandas` is a **dev dependency**, used only by `srip_filter/ingest.py` (the CSV reader) for
+  `scripts/replay.py`. Nothing the deployed function imports touches it — keep it that way:
+  `ApplicantRow` lives in `applicant.py` precisely so the scoring layer never reaches `ingest`.
 
 Do not introduce LangChain/orchestration frameworks, an ORM, an external task queue, or a
 second datastore. The persistence footprint is deliberately minimal and stays that way: one
@@ -149,7 +151,9 @@ SRIP Application Filter/
 ├── src/srip_filter/             # transport-agnostic core
 │   ├── config.py · models.py    # + webhook payload contracts (versioned)
 │   ├── db.py                    # asyncpg pool, plain-SQL store, content hashes
+│   ├── applicant.py             # ApplicantRow — what every stage grades (no deps)
 │   ├── ingest_webhook.py        # payload → ApplicantRow mapping
+│   ├── ingest.py                # CSV reader; replay tool ONLY, never imported by api/
 │   ├── gates/ · scoring/ · llm/ # pipeline stages
 │   ├── worker.py                # claim → grade → persist (driven by the cron drain)
 │   ├── pipeline.py              # per-row fail-fast runner

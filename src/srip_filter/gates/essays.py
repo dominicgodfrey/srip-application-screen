@@ -1,18 +1,15 @@
-"""Stage 1 — essay deterministic gates (Phase 2).
+"""Stage 1 — essay deterministic gates (PRD v3 §4).
 
-Cheap, LLM-free checks that run on *both* essays before any token is spent. Per PRD §4 a
-*hard* failure on either essay rejects the whole application; *soft* problems (slightly-off
-length) are recorded here and carried forward to Stage 4 scoring (§8.3), never a rejection.
+Cheap, LLM-free checks that run on every essay before any token is spent:
 
-This file is built up across Phase 2:
-  * 2.1 length gate           — :func:`word_count`, :func:`length_gate`
-  * 2.2 profanity gate        — :func:`profanity_gate` (+ wordlist loader)
-  * 2.3 gibberish heuristics  — :func:`gibberish_gate`
-  * 2.4 Stage 1 aggregator    — :func:`run_essay_gates`   (this commit)
+  * :func:`word_count`      — audit data only; **no length rule rejects anyone**
+  * :func:`profanity_gate`  — all essays; a hit routes to NEEDS_REVIEW (+ wordlist loader)
+  * :func:`gibberish_gate`  — required essays; a hit REJECTS
+  * :func:`run_essay_gates_v3` — the aggregator the pipeline calls
 
-The length/gibberish math is pure; the profanity gate depends on a loaded wordlist (file I/O
-at construction only), so it takes its matcher as an argument or lazily builds a cached default.
-Thresholds come from ``AppConfig``.
+The gibberish math is pure; the profanity gate depends on a loaded wordlist (file I/O at
+construction only), so it takes its matcher as an argument or lazily builds a cached
+default. Thresholds come from ``AppConfig``.
 """
 
 from __future__ import annotations
@@ -27,8 +24,7 @@ from typing import TYPE_CHECKING
 
 from better_profanity import Profanity
 
-from ..config import AppConfig, EssayLengthConfig, GibberishConfig, project_root
-from ..ingest import ApplicantRow
+from ..config import AppConfig, GibberishConfig, project_root
 from ..models import EssayLengthGate, HitGate
 
 if TYPE_CHECKING:  # circular-import guard: ingest_webhook is a pure-mapping consumer
@@ -47,53 +43,6 @@ _WORD_RE = re.compile(r"[\w'-]+")
 def word_count(text: str) -> int:
     """Count words in an essay per the PRD §2 tokenizer (``re.findall(r"[\\w'-]+")``)."""
     return len(_WORD_RE.findall(text))
-
-
-@dataclass(frozen=True)
-class LengthResult:
-    """Outcome of the length check for one essay.
-
-    ``hard_fail`` is the only field that can reject; ``ok`` distinguishes an ideal-length essay
-    from one that merely earns a soft penalty. ``length_penalty`` is a float in
-    ``[0, len_penalty_max]`` carried to Stage 4 essay scoring (subtracted there, §8.3) — it is
-    never a rejection on its own.
-    """
-
-    wc: int
-    ok: bool  # within the target band [target_min, target_max] — no penalty, no fail
-    hard_fail: bool  # outside [hard_min, hard_max] -> REJECTED
-    length_penalty: float  # soft penalty, ramps 0 -> len_penalty_max across the off-target band
-
-
-def _soft_penalty(wc: int, cfg: EssayLengthConfig) -> float:
-    """Ramp the soft length penalty from 0 (at the target edge) to ``len_penalty_max``.
-
-    Zero inside ``[target_min, target_max]``. Below ``target_min`` it ramps linearly to the max
-    at ``hard_min``; above ``target_max`` it ramps to the max at ``hard_max``. Clamped to the
-    max so a hard-fail word count (handled separately) never reports more than ``len_penalty_max``.
-    """
-    if cfg.target_min <= wc <= cfg.target_max:
-        return 0.0
-    if wc < cfg.target_min:
-        span = cfg.target_min - cfg.hard_min
-        frac = 1.0 if span <= 0 else (cfg.target_min - wc) / span
-    else:  # wc > target_max
-        span = cfg.hard_max - cfg.target_max
-        frac = 1.0 if span <= 0 else (wc - cfg.target_max) / span
-    return min(float(cfg.len_penalty_max), max(0.0, frac) * cfg.len_penalty_max)
-
-
-def length_gate(text: str, cfg: EssayLengthConfig) -> LengthResult:
-    """Apply the PRD §4.1 length rule to one essay.
-
-    Hard fail when ``wc < hard_min`` or ``wc > hard_max`` (an empty essay hard-fails). Otherwise
-    the essay survives; a word count outside ``[target_min, target_max]`` accrues a soft penalty
-    that ramps toward ``len_penalty_max`` near the hard bounds. Pure function.
-    """
-    wc = word_count(text)
-    hard_fail = wc < cfg.hard_min or wc > cfg.hard_max
-    ok = cfg.target_min <= wc <= cfg.target_max
-    return LengthResult(wc=wc, ok=ok, hard_fail=hard_fail, length_penalty=_soft_penalty(wc, cfg))
 
 
 # ================================================================================================
@@ -288,27 +237,25 @@ def gibberish_gate(text: str, cfg: GibberishConfig) -> GibberishResult:
 
 
 # ================================================================================================
-# 2.4 — Stage 1 aggregator (PRD §4)
+# Stage 1 aggregator (PRD v3 §4)
 # ================================================================================================
-# Runs the three deterministic checks on BOTH essays and reduces them to a single verdict. All
-# checks here are token-free, so they are all computed (a complete audit Gates block) rather than
-# short-circuited; fail-fast applies to the *LLM* stages downstream. A hard length failure on
-# either essay, or any profanity/gibberish hit on either essay, rejects the whole application
-# (PRD §4 "one failed essay fails the application"). Soft length penalties never reject — they
-# are carried forward to Stage 4 essay scoring (§8.3).
+# Runs the deterministic checks over the essays and reduces them to a single verdict. Every
+# check here is token-free, so all of them are computed (a complete audit Gates block) rather
+# than short-circuited; fail-fast applies to the *LLM* stages downstream.
 
 
 @dataclass(frozen=True)
 class Stage1Result:
     """Reduced outcome of Stage 1 for one application.
 
-    ``rejected``/``needs_review``/``primary_reason`` drive the pipeline; the three audit blocks
-    (``length_gate``/``profanity``/``gibberish``) drop straight into ``AuditRecord.gates``; the
-    two ``length_penalty_*`` floats are the soft penalties handed to Stage 4 scoring.
+    ``rejected``/``needs_review``/``primary_reason`` drive the pipeline; the three audit
+    blocks (``length_gate``/``profanity``/``gibberish``) drop straight into
+    ``AuditRecord.gates``. ``length_gate`` carries word counts as audit data only — no
+    length rule decides anything (see the aggregator below).
 
-    ``needs_review`` is v3-only (owner, 2026-07-29): a profanity hit no longer rejects on its
-    own, it routes to a human. It defaults False so the frozen v2 path is unaffected. Where
-    both fire, ``rejected`` wins — a definite reject outranks a review (PRD §0.7).
+    A profanity hit sets ``needs_review`` rather than ``rejected`` (owner, 2026-07-29): it
+    routes to a human. Where both fire, ``rejected`` wins — a definite reject outranks a
+    review (PRD §0.7).
     """
 
     rejected: bool
@@ -316,123 +263,29 @@ class Stage1Result:
     length_gate: EssayLengthGate
     profanity: HitGate
     gibberish: HitGate
-    length_penalty_e1: float
-    length_penalty_e2: float
     needs_review: bool = False
 
 
-def _stage1_reason(
-    e1: LengthResult,
-    e2: LengthResult,
-    profanity_hit: bool,
-    gibberish_hit: bool,
-    cfg: EssayLengthConfig,
-) -> str:
-    """Name the failing gate for a rejected application, in deterministic fail-fast order."""
-    if e1.hard_fail or e2.hard_fail:
-        bad = [
-            f"essay {n} ({r.wc} words)"
-            for n, r in ((1, e1), (2, e2))
-            if r.hard_fail
-        ]
-        return (
-            f"Essay length outside hard bounds [{cfg.hard_min}, {cfg.hard_max}]: "
-            + ", ".join(bad)
-        )
-    if profanity_hit:
-        return "Profanity or slur detected in an essay"
-    if gibberish_hit:
-        return "Gibberish detected in an essay (>= 2 deterministic signals)"
-    return ""
-
-
-def run_essay_gates(
-    row: ApplicantRow, cfg: AppConfig, matcher: Profanity | None = None
-) -> Stage1Result:
-    """Run all Stage 1 deterministic gates on both essays and reduce to one verdict.
-
-    Rejects when either essay hard-fails length or when profanity/gibberish is hit on either
-    essay. ``matcher`` overrides the profanity wordlist (tests); otherwise the cached default
-    built from ``resources/profanity.txt`` is used. No LLM calls, no I/O beyond the one-time
-    profanity-matcher build.
-    """
-    e1 = length_gate(row.essay1, cfg.essay_length)
-    e2 = length_gate(row.essay2, cfg.essay_length)
-    profanity_hit = profanity_gate(row.essay1, matcher) or profanity_gate(row.essay2, matcher)
-    # Only resolve *which* tokens tripped when there was a hit (the common clean path stays
-    # one matcher call per essay).
-    profane_terms: tuple[str, ...] = ()
-    if profanity_hit:
-        profane_terms = tuple(
-            dict.fromkeys(
-                profanity_terms(row.essay1, matcher) + profanity_terms(row.essay2, matcher)
-            )
-        )
-    gib1 = gibberish_gate(row.essay1, cfg.gibberish)
-    gib2 = gibberish_gate(row.essay2, cfg.gibberish)
-    gibberish_hit = gib1.hit or gib2.hit
-    gib_terms = [
-        f"e{n}:{signal}"
-        for n, res in ((1, gib1), (2, gib2))
-        if res.hit
-        for signal, fired in (
-            ("consonant_run", res.consonant_run),
-            ("low_entropy", res.low_entropy),
-            ("repeat_run", res.repeat_run),
-            ("low_unique_ratio", res.low_unique_ratio),
-        )
-        if fired
-    ]
-
-    length_block = EssayLengthGate(
-        e1_wc=e1.wc,
-        e2_wc=e2.wc,
-        e1_ok=e1.ok,
-        e2_ok=e2.ok,
-        hard_fail=e1.hard_fail or e2.hard_fail,
-    )
-    rejected = length_block.hard_fail or profanity_hit or gibberish_hit
-    reason = (
-        _stage1_reason(e1, e2, profanity_hit, gibberish_hit, cfg.essay_length) if rejected else ""
-    )
-    return Stage1Result(
-        rejected=rejected,
-        primary_reason=reason,
-        length_gate=length_block,
-        profanity=HitGate(hit=profanity_hit, terms=list(profane_terms)),
-        gibberish=HitGate(hit=gibberish_hit, terms=gib_terms),
-        length_penalty_e1=e1.length_penalty,
-        length_penalty_e2=e2.length_penalty,
-    )
-
-
-# ================================================================================================
-# v3 Stage 1 — profanity across ALL essays + gibberish on the required ones (P4, PRD v3 §4)
-# ================================================================================================
-# Deltas from the v2 aggregator above (which stays for the replay/calibration path):
-#   * NO length gate. The site server-validates word bounds at submit (400, the submission never
-#     lands), so a violation cannot reach us from a real applicant — only from our own stale
-#     config. Both the v2 soft-penalty ramp and v3's strict payload-bounds reject are retired
-#     (owner, 2026-07-28). Word counts are still reported for the audit record.
-#   * profanity checks ALL essays including the optional one (good-faith violation ⇒ REJECTED —
-#     owner decision 2026-07-04).
-#   * gibberish heuristics run on the REQUIRED essays only (essay-3 gibberish merely zeroes its
-#     bonus via Task F — it stays bonus-only even though the live form makes it mandatory to
-#     submit; owner, 2026-07-28).
+# Scope notes, all owner decisions:
+#   * NO length gate. The site server-validates word bounds at submit (400, the submission
+#     never lands), so a violation cannot reach us from a real applicant — only from our own
+#     stale config, i.e. as a false positive on a good-faith one (2026-07-28). Word counts
+#     are still reported for the audit record.
+#   * profanity checks ALL essays including the optional one (2026-07-04).
+#   * gibberish heuristics run on the REQUIRED essays only — essay-3 gibberish merely zeroes
+#     its bonus via Task F, staying bonus-only even though the live form makes it mandatory
+#     to submit (2026-07-28).
 
 
 def run_essay_gates_v3(
     applicant: WebhookApplicant, cfg: AppConfig, matcher: Profanity | None = None
 ) -> Stage1Result:
-    """v3 Stage 1 over a webhook applicant: profanity(all essays) + gibberish(required essays).
+    """Stage 1 over a webhook applicant: profanity(all essays) + gibberish(required essays).
 
-    Returns the same :class:`Stage1Result` shape the pipeline already consumes; length
-    penalties are always 0 and the length gate never fails (bounds live upstream).
-
-    **Verdicts differ from v2** (owner, 2026-07-29): gibberish in a required essay still
-    ``rejected``, but a profanity hit sets ``needs_review`` instead — the matcher is a word
-    list, and a word list cannot tell "the transatlantic slave trade" from an insult. A human
-    confirms every flag, so a false positive costs a review, not an application.
+    Gibberish in a required essay is ``rejected``; a profanity hit sets ``needs_review``
+    instead (owner, 2026-07-29) — the matcher is a word list, and a word list cannot tell
+    "the transatlantic slave trade" from an insult. A human confirms every flag, so a false
+    positive costs a review, not an application.
     """
     row = applicant.row
     b1_wc, b2_wc = word_count(row.essay1), word_count(row.essay2)
@@ -488,6 +341,4 @@ def run_essay_gates_v3(
         ),
         profanity=HitGate(hit=profanity_hit, terms=list(profane_terms)),
         gibberish=HitGate(hit=gibberish_hit, terms=gib_terms),
-        length_penalty_e1=0.0,
-        length_penalty_e2=0.0,
     )

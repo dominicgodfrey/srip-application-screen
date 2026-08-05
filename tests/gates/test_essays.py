@@ -1,6 +1,8 @@
-"""Tests for Stage 1 essay gates (Phase 2). Synthetic text only — no applicant content.
+"""Tests for Stage 1 essay gates. Synthetic text only — no applicant content.
 
-2.1 covers the length gate; later sub-tasks append profanity / gibberish / aggregator tests.
+Covers the word-count tokenizer (audit data — no length rule rejects anyone), the profanity
+wordlist loader and gate, the gibberish heuristics, and the ``run_essay_gates_v3``
+aggregator that reduces them to one verdict.
 """
 
 from __future__ import annotations
@@ -9,20 +11,19 @@ from pathlib import Path
 
 from better_profanity import Profanity
 
-from srip_filter.config import AppConfig, EssayLengthConfig, GibberishConfig
+from srip_filter.applicant import ApplicantRow
+from srip_filter.config import AppConfig, GibberishConfig
 from srip_filter.gates.essays import (
-    LengthResult,
     Stage1Result,
     build_profanity_matcher,
     gibberish_gate,
-    length_gate,
     load_profanity_wordlist,
     profanity_gate,
     profanity_terms,
-    run_essay_gates,
+    run_essay_gates_v3,
     word_count,
 )
-from srip_filter.ingest import ApplicantRow
+from srip_filter.ingest_webhook import WebhookApplicant
 
 
 def _write_wordlist(tmp_path: Path, lines: list[str]) -> Path:
@@ -72,75 +73,6 @@ def test_word_count_keeps_apostrophes_and_hyphens():
 
 def test_word_count_ignores_punctuation_as_separators():
     assert word_count("one, two; three. four!") == 4
-
-
-# ------------------------------------------------------------------ length gate bands
-
-CFG = EssayLengthConfig()  # PRD defaults: target 100-350, hard 60-500, penalty max 5
-
-
-def test_in_target_band_ok_no_penalty():
-    r = length_gate(_essay(200), CFG)
-    assert r == LengthResult(wc=200, ok=True, hard_fail=False, length_penalty=0.0)
-
-
-def test_target_edges_inclusive():
-    assert length_gate(_essay(100), CFG).ok is True
-    assert length_gate(_essay(350), CFG).ok is True
-    assert length_gate(_essay(100), CFG).length_penalty == 0.0
-    assert length_gate(_essay(350), CFG).length_penalty == 0.0
-
-
-def test_below_target_but_above_hard_min_is_soft_only():
-    r = length_gate(_essay(80), CFG)
-    assert r.hard_fail is False
-    assert r.ok is False
-    assert 0.0 < r.length_penalty <= CFG.len_penalty_max
-
-
-def test_above_target_but_below_hard_max_is_soft_only():
-    r = length_gate(_essay(400), CFG)
-    assert r.hard_fail is False
-    assert r.ok is False
-    assert 0.0 < r.length_penalty <= CFG.len_penalty_max
-
-
-def test_penalty_grows_toward_hard_min():
-    # Closer to hard_min => larger soft penalty.
-    near_target = length_gate(_essay(95), CFG).length_penalty
-    near_hard = length_gate(_essay(65), CFG).length_penalty
-    assert near_hard > near_target
-
-
-def test_penalty_capped_at_max_just_inside_hard_bounds():
-    # wc == hard_min / hard_max are still survivors, at the maximum soft penalty.
-    assert length_gate(_essay(CFG.hard_min), CFG).length_penalty == CFG.len_penalty_max
-    assert length_gate(_essay(CFG.hard_max), CFG).length_penalty == CFG.len_penalty_max
-    assert length_gate(_essay(CFG.hard_min), CFG).hard_fail is False
-    assert length_gate(_essay(CFG.hard_max), CFG).hard_fail is False
-
-
-def test_below_hard_min_hard_fails():
-    r = length_gate(_essay(59), CFG)
-    assert r.hard_fail is True
-    assert r.ok is False
-
-
-def test_above_hard_max_hard_fails():
-    r = length_gate(_essay(501), CFG)
-    assert r.hard_fail is True
-    assert r.ok is False
-
-
-def test_empty_essay_hard_fails():
-    r = length_gate("", CFG)
-    assert r.wc == 0
-    assert r.hard_fail is True
-
-
-def test_penalty_never_exceeds_max_below_hard_min():
-    # Even past the hard bound the reported penalty is clamped (hard_fail carries the rejection).
-    assert length_gate(_essay(10), CFG).length_penalty == CFG.len_penalty_max
 
 
 # ------------------------------------------------------------------ profanity wordlist loader
@@ -279,97 +211,108 @@ def test_long_consonant_run_token_detected():
     assert gibberish_gate(text, GIB).consonant_run is True
 
 
-# ------------------------------------------------------------------ Stage 1 aggregator (2.4)
+# ------------------------------------------------------------------ Stage 1 aggregator
 
 APP_CFG = AppConfig()
 
 
-def _app(essay1: str, essay2: str) -> ApplicantRow:
-    return ApplicantRow(
+def _app(essay1: str, essay2: str, essay3: str = "") -> WebhookApplicant:
+    """Minimal WebhookApplicant carrying just the essays the aggregator reads."""
+    row = ApplicantRow(
         submission_id="id1",
         first_name="Ann",
         last_name="Lee",
         email="a@b.com",
         essay1=essay1,
         essay2=essay2,
+        essay3=essay3,
     )
+    return WebhookApplicant(row=row)
 
 
 def test_clean_application_passes_all_gates():
-    row = _app(_varied_essay(200), _varied_essay(180))
-    result = run_essay_gates(row, APP_CFG)
+    result = run_essay_gates_v3(_app(_varied_essay(200), _varied_essay(180)), APP_CFG)
     assert isinstance(result, Stage1Result)
-    assert result.rejected is False
+    assert result.rejected is False and result.needs_review is False
     assert result.primary_reason == ""
     assert result.profanity.hit is False
     assert result.gibberish.hit is False
-    assert result.length_gate.hard_fail is False
     assert result.length_gate.e1_wc == 200
     assert result.length_gate.e2_wc == 180
-    assert result.length_penalty_e1 == 0.0
-    assert result.length_penalty_e2 == 0.0
 
 
-def test_soft_length_penalty_carried_not_rejected():
-    # 80-word essay survives (above hard_min 60) but earns a soft penalty carried forward.
-    row = _app(_varied_essay(80), _varied_essay(200))
-    result = run_essay_gates(row, APP_CFG)
-    assert result.rejected is False
-    assert result.length_gate.e1_ok is False  # below target band
-    assert result.length_penalty_e1 > 0.0
-    assert result.length_penalty_e2 == 0.0
+def test_word_counts_are_recorded_but_never_decide_anything():
+    """No length rule rejects: the site validates bounds at submit and sends none."""
+    for e1, e2 in ((_varied_essay(3), _varied_essay(200)),
+                   (_varied_essay(200), _varied_essay(5000)),
+                   ("", "")):
+        result = run_essay_gates_v3(_app(e1, e2), APP_CFG)
+        assert result.rejected is False, (len(e1.split()), len(e2.split()))
+        assert result.length_gate.hard_fail is False
+        assert "length" not in result.primary_reason.lower()
 
 
-def test_short_essay_hard_fails_with_length_reason():
-    row = _app(_varied_essay(40), _varied_essay(200))  # 40 < hard_min 60
-    result = run_essay_gates(row, APP_CFG)
-    assert result.rejected is True
-    assert result.length_gate.hard_fail is True
-    assert "length" in result.primary_reason.lower()
-    assert "essay 1" in result.primary_reason.lower()
-
-
-def test_overlong_essay_hard_fails():
-    row = _app(_varied_essay(200), _varied_essay(600))  # 600 > hard_max 500
-    result = run_essay_gates(row, APP_CFG)
-    assert result.rejected is True
-    assert result.length_gate.hard_fail is True
-    assert "essay 2" in result.primary_reason.lower()
-
-
-def test_profanity_in_either_essay_rejects():
+def test_profanity_in_either_required_essay_needs_review_not_rejection():
     matcher = build_profanity_matcher(Path("no_such_file.txt"))  # default list
     matcher.add_censor_words(["frobslur"])
-    row = _app(_varied_essay(200), _varied_essay(180) + " frobslur")
-    result = run_essay_gates(row, APP_CFG, matcher=matcher)
-    assert result.rejected is True
+    result = run_essay_gates_v3(
+        _app(_varied_essay(200), _varied_essay(180) + " frobslur"), APP_CFG, matcher=matcher
+    )
+    assert result.rejected is False          # a word list cannot judge context
+    assert result.needs_review is True
     assert result.profanity.hit is True
     assert "profanity" in result.primary_reason.lower()
 
 
-def test_gibberish_essay_rejects_when_length_ok():
-    # 70 "asdf" tokens: passes length (60-500) but trips entropy + unique-ratio signals.
-    row = _app(" ".join(["asdf"] * 70), _varied_essay(180))
-    result = run_essay_gates(row, APP_CFG)
-    assert result.length_gate.hard_fail is False
+def test_profanity_in_the_optional_essay_also_flags_the_application():
+    matcher = build_profanity_matcher(Path("no_such_file.txt"))
+    matcher.add_censor_words(["frobslur"])
+    result = run_essay_gates_v3(
+        _app(_varied_essay(200), _varied_essay(180), _varied_essay(120) + " frobslur"),
+        APP_CFG,
+        matcher=matcher,
+    )
+    assert result.needs_review is True
+    assert any(term.startswith("e3:") for term in result.profanity.terms)
+
+
+def test_gibberish_in_a_required_essay_rejects():
+    # 70 "asdf" tokens: trips entropy + unique-ratio together.
+    result = run_essay_gates_v3(_app(" ".join(["asdf"] * 70), _varied_essay(180)), APP_CFG)
     assert result.rejected is True
     assert result.gibberish.hit is True
     assert "gibberish" in result.primary_reason.lower()
 
 
-def test_length_reason_takes_precedence_over_other_gates():
-    # An empty essay 1 hard-fails length; the reason names length, not gibberish/profanity.
-    row = _app("", _varied_essay(180))
-    result = run_essay_gates(row, APP_CFG)
-    assert result.rejected is True
-    assert "length" in result.primary_reason.lower()
+def test_gibberish_in_the_optional_essay_is_not_a_stage1_finding():
+    """Essay 3 is bonus-only — Task F zeroes its bonus; Stage 1 must not touch the outcome."""
+    result = run_essay_gates_v3(
+        _app(_varied_essay(200), _varied_essay(180), " ".join(["asdf"] * 70)), APP_CFG
+    )
+    assert result.rejected is False and result.needs_review is False
+    assert result.gibberish.hit is False
 
 
-def test_empty_essays_reject_via_length_not_silent():
-    row = _app("", "")
-    result = run_essay_gates(row, APP_CFG)
+def test_where_both_fire_the_rejection_is_the_named_verdict():
+    """A definite reject outranks a review, and primary_reason must name the decider."""
+    matcher = build_profanity_matcher(Path("no_such_file.txt"))
+    matcher.add_censor_words(["frobslur"])
+    result = run_essay_gates_v3(
+        _app(" ".join(["asdf"] * 70), _varied_essay(180) + " frobslur"),
+        APP_CFG,
+        matcher=matcher,
+    )
     assert result.rejected is True
-    assert result.primary_reason != ""  # never a silent rejection
+    assert result.profanity.hit is True       # still recorded for the audit trail
+    assert "gibberish" in result.primary_reason.lower()
+
+
+def test_a_flagged_application_never_carries_a_silent_reason():
+    for result in (
+        run_essay_gates_v3(_app(" ".join(["asdf"] * 70), _varied_essay(180)), APP_CFG),
+    ):
+        assert result.rejected or result.needs_review
+        assert result.primary_reason != ""
 
 
 # ------------------------------------------------------------ curated allowlist (real resources/)
@@ -413,10 +356,11 @@ def test_profanity_terms_empty_on_clean_text(tmp_path):
 def test_stage1_records_profanity_terms_and_gibberish_signals():
     matcher = build_profanity_matcher(Path("no_such_file.txt"))
     matcher.add_censor_words(["frobslur"])
-    row = _app(_varied_essay(200) + " frobslur", " ".join(["asdf"] * 70))
-    result = run_essay_gates(row, APP_CFG, matcher=matcher)
+    result = run_essay_gates_v3(
+        _app(_varied_essay(200) + " frobslur", " ".join(["asdf"] * 70)), APP_CFG, matcher=matcher
+    )
     assert result.rejected is True
-    assert result.profanity.terms == ["frobslur"]
+    assert result.profanity.terms == ["e1:frobslur"]
     assert result.gibberish.hit is True
     assert all(t.startswith("e2:") for t in result.gibberish.terms)
     assert result.gibberish.terms  # the fired signals are named for the audit trail
