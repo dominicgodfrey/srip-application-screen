@@ -24,7 +24,7 @@ Outcomes: `REJECTED` (failed a hard gate) · `RANKED` (scored, ranked per cohort
 | Essay 3 (technical, optional) | 0–20 | bonus | Task F: relevance to its prompt, technical depth/difficulty, real-world impact. Surface-level interest scores low; interest → side project → real impact scores high. Absent ⇒ 0 (neutral). Gibberish or off-topic ⇒ 0 bonus, never a rejection. |
 | Relevant coursework | 0–15 | bonus | Task C decomposition; CS > Math > Data, others ignored; flat weight × unit per counting course; a course explicitly graded below 80% is excluded. |
 | School | 0–20 | bonus | Fuzzy match vs curated lists: US Top-20 = 20, Intl Top-50 = 16. "High School" or unmatched ⇒ 0. |
-| Resume | 0–25 | bonus | Task E extracts signals, `config.yaml` prices them — same shape as Tasks C and F. Weights are priced for the 0–25 band: a typical resume earns ~half, a standout saturates the cap. **Disabled** (`resume.bonus_max: 0`) until the R2 host is pinned. Any failure ⇒ 0 + audit note, never a block. |
+| Resume | 0–25 | bonus | Task E extracts signals, `config.yaml` prices them — same shape as Tasks C and F. Weights are priced for the 0–25 band: a typical resume earns ~half, a standout saturates the cap. **Disabled** (`resume.bonus_max: 0`); enabling needs both `bonus_max: 25` and the R2 host pinned in `allowed_url_hosts`. Any failure ⇒ 0 + audit note, never a block. |
 
 **Required core = 70** (GPA 40 + essays 30). **Bonuses = up to 80.** Theoretical max **150**
 (125 while the resume stage is disabled).

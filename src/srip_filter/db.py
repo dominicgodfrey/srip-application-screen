@@ -228,20 +228,21 @@ async def claim_next(pool: asyncpg.Pool) -> dict[str, Any] | None:
     """
     async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
-            f"""
+            """
             SELECT * FROM applications
-             WHERE status = '{STATUS_RECEIVED}'
+             WHERE status = $1
              ORDER BY updated_at ASC
              FOR UPDATE SKIP LOCKED
              LIMIT 1
-            """
+            """,
+            STATUS_RECEIVED,
         )
         if row is None:
             return None
         await conn.execute(
-            f"UPDATE applications SET status = '{STATUS_GRADING}', updated_at = NOW() "
-            "WHERE submission_id = $1",
+            "UPDATE applications SET status = $2, updated_at = NOW() WHERE submission_id = $1",
             row["submission_id"],
+            STATUS_GRADING,
         )
         return _to_dict(row)
 
@@ -254,11 +255,13 @@ async def reap_stale_claims(pool: asyncpg.Pool, stale_seconds: float) -> int:
     forever and no drain ever looks at it again.
     """
     result = await pool.execute(
-        f"""
-        UPDATE applications SET status = '{STATUS_RECEIVED}', updated_at = NOW()
-         WHERE status = '{STATUS_GRADING}' AND updated_at < NOW() - $1::interval
+        """
+        UPDATE applications SET status = $2, updated_at = NOW()
+         WHERE status = $3 AND updated_at < NOW() - $1::interval
         """,
         timedelta(seconds=stale_seconds),
+        STATUS_RECEIVED,
+        STATUS_GRADING,
     )
     return int(result.split()[-1])
 
@@ -273,10 +276,11 @@ async def oldest_pending_seconds(pool: asyncpg.Pool) -> float | None:
     information about application volume.
     """
     age = await pool.fetchval(
-        f"""
-        SELECT EXTRACT(EPOCH FROM (NOW() - MIN(updated_at)))
-          FROM applications WHERE status = '{STATUS_RECEIVED}'
         """
+        SELECT EXTRACT(EPOCH FROM (NOW() - MIN(updated_at)))
+          FROM applications WHERE status = $1
+        """,
+        STATUS_RECEIVED,
     )
     # EXTRACT returns Postgres `numeric`, which asyncpg hands back as `Decimal` — and
     # Decimal is not JSON-serializable, so /health would 500 on the degraded path only.
@@ -293,16 +297,17 @@ async def finish_graded(
 ) -> None:
     """Persist a grading result and release the row (``status → graded``)."""
     await pool.execute(
-        f"""
+        """
         UPDATE applications
            SET audit_record = $2, outcome = $3, final_score = $4,
-               status = '{STATUS_GRADED}', updated_at = NOW()
+               status = $5, updated_at = NOW()
          WHERE submission_id = $1
         """,
         submission_id,
         json.dumps(audit_record),
         outcome,
         final_score,
+        STATUS_GRADED,
     )
 
 
@@ -312,9 +317,9 @@ async def mark_error(pool: asyncpg.Pool, submission_id: str, note: str) -> None:
     ``note`` goes to ``events`` — structural facts only, never applicant content.
     """
     await pool.execute(
-        f"UPDATE applications SET status = '{STATUS_ERROR}', updated_at = NOW() "
-        "WHERE submission_id = $1",
+        "UPDATE applications SET status = $2, updated_at = NOW() WHERE submission_id = $1",
         submission_id,
+        STATUS_ERROR,
     )
     await add_event(pool, "grading_error", submission_id=submission_id, details={"note": note})
 

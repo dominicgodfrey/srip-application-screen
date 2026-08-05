@@ -282,7 +282,7 @@ async def grade_webhook_applicant(
 def make_grade_fn(
     client: BaseLLMClient, cfg: AppConfig, fetcher: ResumeFetcher | None = None
 ):
-    """Bind the v3 runner into the worker's ``GradeFn`` shape (P3 seam).
+    """Bind the runner into the worker's ``GradeFn`` shape (P3 seam).
 
     The claimed DB row carries the raw stored payload; it is re-validated here (it was
     validated at the edge, but the DB is not trusted blindly) and mapped through
@@ -290,7 +290,16 @@ def make_grade_fn(
     request essay grading never reach this seam — they are parked in ``'stored'`` and are
     never claimed. A corrupt payload raises into the worker's per-row handler, which
     records ``NEEDS_REVIEW`` + ``status='error'`` (invariant #9).
+
+    **Stage 6:** when ``resume.bonus_max > 0`` a :class:`ResumeFetcher` is built here unless
+    the caller supplied one, and it lives as long as the returned ``grade_fn`` (one drain
+    invocation). Without it ``score_resume`` no-ops on ``fetcher is None``, so raising
+    ``bonus_max`` alone used to leave the stage silently dead — every applicant scoring a 0
+    resume bonus with no error anywhere, which is the worst way for a stage to be off. The
+    kill switch still costs nothing: at ``bonus_max: 0`` no fetcher and no client are built.
     """
+    if fetcher is None and cfg.resume.bonus_max > 0:
+        fetcher = ResumeFetcher(cfg)
 
     async def grade_fn(db_row: dict) -> GradeResult:
         payload = ApplicationPayload.model_validate(db_row["payload"])

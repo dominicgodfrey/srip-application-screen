@@ -503,6 +503,32 @@ async def test_a_resume_failure_keeps_the_applicant_ranked() -> None:
     assert any("resume" in note for note in rec.errors)
 
 
+async def test_enabling_the_resume_stage_actually_wires_a_fetcher() -> None:
+    """Raising bonus_max must be enough to make the stage run, not silently stay dead.
+
+    ``make_grade_fn`` is the only path the drain uses, and it passed ``fetcher=None``, on
+    which ``score_resume`` no-ops. So the docs' "just re-pin the R2 host" would have left
+    every applicant with a 0 resume bonus and no error anywhere to say why.
+    """
+    from srip_filter.pipeline import make_grade_fn
+
+    off = APP  # bonus_max: 0, the shipping default
+    on = APP.model_copy(update={"resume": APP.resume.model_copy(update={"bonus_max": 25.0})})
+
+    import srip_filter.pipeline as pipeline_mod
+
+    built: list[object] = []
+    original = pipeline_mod.ResumeFetcher
+    pipeline_mod.ResumeFetcher = lambda cfg: built.append(cfg) or object()  # type: ignore[assignment]
+    try:
+        make_grade_fn(_client(), off)
+        assert built == []          # kill switch: no fetcher, no cost
+        make_grade_fn(_client(), on)
+        assert len(built) == 1      # enabled: the drain now has something to fetch with
+    finally:
+        pipeline_mod.ResumeFetcher = original  # type: ignore[assignment]
+
+
 async def test_records_carry_essay_text_for_the_audit_ui() -> None:
     """Highlight-on-reject needs the text on the record, for rejections above all."""
     rec = await _rejected_by_gibberish()
