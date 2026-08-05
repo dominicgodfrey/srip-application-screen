@@ -172,9 +172,15 @@
   };
   function stageLabel(stage) { return STAGE_LABELS[stage] || stage; }
 
+  // Values are ESCAPED unless wrapped in S.raw(). This used to be the other way round —
+  // kv() inserted whatever it was handed straight into innerHTML — which made every one of
+  // its ~40 call sites individually responsible for remembering S.esc() on applicant-
+  // controlled text. S.html() flips the default, so a missed call is now a visible "&lt;"
+  // rather than executing script in a session that can trigger the bulk purge.
   function kv(pairs) {
     return '<dl class="kv">' + pairs.map(([k, v]) =>
-      "<dt>" + S.esc(k) + "</dt><dd>" + (v === "" || v === null || v === undefined ? "—" : v) + "</dd>"
+      "<dt>" + S.esc(k) + "</dt><dd>" +
+      (v === "" || v === null || v === undefined ? "—" : S.html(v)) + "</dd>"
     ).join("") + "</dl>";
   }
 
@@ -195,36 +201,37 @@
 
     const gatesHtml =
       '<h3 class="subhead">Gates</h3>' + kv([
-        ["Essay 1 length", S.esc(len.e1_wc) + " words — " + S.bool(len.e1_ok)],
-        ["Essay 2 length", S.esc(len.e2_wc) + " words — " + S.bool(len.e2_ok)],
-        ["Length hard fail", S.bool(len.hard_fail, false)],
-        ["Profanity", S.bool((g.profanity || {}).hit, false)],
-        ["Gibberish", S.bool((g.gibberish || {}).hit, false)],
-        ["GPA gate", S.bool((g.gpa_gate || {}).passed) +
-          ((g.gpa_gate || {}).reason ? " — " + S.esc(g.gpa_gate.reason) : "")],
-        ["Essay 1 on-topic", rel.e1_on_topic === null ? "—" : S.bool(rel.e1_on_topic)],
-        ["Essay 2 on-topic", rel.e2_on_topic === null ? "—" : S.bool(rel.e2_on_topic)],
+        ["Essay 1 length", S.raw(S.esc(len.e1_wc) + " words — " + S.bool(len.e1_ok))],
+        ["Essay 2 length", S.raw(S.esc(len.e2_wc) + " words — " + S.bool(len.e2_ok))],
+        ["Length hard fail", S.raw(S.bool(len.hard_fail, false))],
+        ["Profanity", S.raw(S.bool((g.profanity || {}).hit, false))],
+        ["Gibberish", S.raw(S.bool((g.gibberish || {}).hit, false))],
+        ["GPA gate", S.raw(S.bool((g.gpa_gate || {}).passed) +
+          ((g.gpa_gate || {}).reason ? " — " + S.esc(g.gpa_gate.reason) : ""))],
+        ["Essay 1 on-topic", rel.e1_on_topic === null ? "—" : S.raw(S.bool(rel.e1_on_topic))],
+        ["Essay 2 on-topic", rel.e2_on_topic === null ? "—" : S.raw(S.bool(rel.e2_on_topic))],
       ]);
 
     let gpaPairs = [
-      ["Raw value", S.esc(gpa.raw)],
+      ["Raw value", gpa.raw],
       ["Normalized", S.fmtNum(gpa.normalized_gpa, 2)],
-      ["Scale", S.esc(gpa.original_scale)],
-      ["Method", S.esc(gpa.conversion_method)],
-      ["Confidence", S.esc(gpa.confidence)],
-      ["Below 3.3", gpa.below_threshold === null ? "—" : S.bool(gpa.below_threshold, false)],
-      ["Source", S.esc(gpa.source)],
+      ["Scale", gpa.original_scale],
+      ["Method", gpa.conversion_method],
+      ["Confidence", gpa.confidence],
+      ["Below 3.3",
+        gpa.below_threshold === null ? "—" : S.raw(S.bool(gpa.below_threshold, false))],
+      ["Source", gpa.source],
     ];
     if (gpa.explanation_text) {
-      gpaPairs.push(["Applicant's explanation", S.esc(gpa.explanation_text)]);
+      gpaPairs.push(["Applicant's explanation", gpa.explanation_text]);
     }
     if (gpa.explanation_eval) {
       const e = gpa.explanation_eval;
       gpaPairs = gpaPairs.concat([
-        ["Explanation adequate", S.bool(e.explanation_adequate)],
+        ["Explanation adequate", S.raw(S.bool(e.explanation_adequate))],
         ["Reason strength", S.fmtNum(e.strength_of_reason, 2)],
-        ["Recommendation", S.esc(e.recommended_outcome)],
-        ["Eval rationale", S.esc(e.rationale)],
+        ["Recommendation", e.recommended_outcome],
+        ["Eval rationale", e.rationale],
       ]);
     }
     const gpaHtml = '<h3 class="subhead">GPA</h3>' + kv(gpaPairs);
@@ -239,13 +246,13 @@
         ["Coursework bonus", S.fmtNum(sc.coursework_bonus)],
         ["School bonus", S.fmtNum(sc.school_bonus)],
         ["Resume bonus", S.fmtNum(sc.resume_bonus)],
-        ["Final score", "<strong>" + S.fmtNum(r.final_score) + "</strong>"],
+        ["Final score", S.raw("<strong>" + S.fmtNum(r.final_score) + "</strong>")],
       ]);
 
     const schoolHtml =
       '<h3 class="subhead">School match</h3>' + kv([
-        ["Matched", S.esc(school.matched_name)],
-        ["List", S.esc(school.list)],
+        ["Matched", school.matched_name],
+        ["List", school.list],
         ["Fuzzy score", S.fmtNum(school.fuzzy_score, 0)],
       ]);
 
@@ -254,21 +261,22 @@
     const resumeHtml = renderResume(r.resume || {});
 
     const metaPairs = [
-      ["Submission", S.esc(r.submission_id)],
-      ["Email", S.esc(r.email)],
-      ["Cohort", S.esc(r.cohort_name)],
-      ["International", S.bool(r.international, false)],
-      ["Choices", S.esc([choices.first, choices.second, choices.third].filter(Boolean).join(" → "))],
-      ["Duplicate email", S.bool(dedup.is_duplicate_email, false)],
-      ["Duplicate name", S.bool(dedup.is_duplicate_name, false)],
-      ["Decided at", S.esc(stageLabel(r.decided_at_stage))],
-      ["Primary reason", S.esc(r.primary_reason)],
+      ["Submission", r.submission_id],
+      ["Email", r.email],
+      ["Cohort", r.cohort_name],
+      ["International", S.raw(S.bool(r.international, false))],
+      ["Choices", [choices.first, choices.second, choices.third].filter(Boolean).join(" → ")],
+      ["Duplicate email", S.raw(S.bool(dedup.is_duplicate_email, false))],
+      ["Duplicate name", S.raw(S.bool(dedup.is_duplicate_name, false))],
+      ["Decided at", stageLabel(r.decided_at_stage)],
+      ["Primary reason", r.primary_reason],
     ];
     if (r.manual_override) {
       const overrideNote = r.outcome === "REJECTED"
         ? "yes — removed from the ranking by a reviewer"
         : "yes — promoted by a reviewer";
-      metaPairs.push(["Manual override", '<span class="flag-bad">' + overrideNote + "</span>"]);
+      metaPairs.push(["Manual override",
+        S.raw('<span class="flag-bad">' + S.esc(overrideNote) + "</span>")]);
     }
     const metaHtml = '<h3 class="subhead">Application</h3>' + kv(metaPairs);
 
@@ -463,21 +471,21 @@
     // Scores breakdown always adds up; records written before v3 have no block.
     if (te.present === undefined) return "";
     let pairs = [
-      ["Essay 3 present", S.bool(te.present)],  // optional: present is neutral-good, absent is fine
-      ["Word count", S.esc(te.word_count)],
+      ["Essay 3 present", S.raw(S.bool(te.present))],  // optional: absence is neutral
+      ["Word count", te.word_count],
       ["Bonus", S.fmtNum(te.bonus)],
     ];
-    if (te.over_max) pairs.push(["Over max (bonus voided)", S.bool(true)]);
-    if (te.skipped_reason) pairs.push(["Not graded", S.esc(te.skipped_reason)]);
+    if (te.over_max) pairs.push(["Over max (bonus voided)", S.raw(S.bool(true))]);
+    if (te.skipped_reason) pairs.push(["Not graded", te.skipped_reason]);
     if (te.signals) {
       const sig = te.signals;
       pairs = pairs.concat([
-        ["On topic", S.bool(sig.on_topic)],
-        ["Gibberish", S.bool(sig.gibberish, false)],
-        ["Technical depth", S.esc(sig.technical_depth_0_10)],
-        ["Exploration", S.esc(sig.exploration_level_0_10)],
-        ["Impact", S.esc(sig.impact_0_10)],
-        ["Rationale", S.esc(sig.rationale)],
+        ["On topic", S.raw(S.bool(sig.on_topic))],
+        ["Gibberish", S.raw(S.bool(sig.gibberish, false))],
+        ["Technical depth", sig.technical_depth_0_10],
+        ["Exploration", sig.exploration_level_0_10],
+        ["Impact", sig.impact_0_10],
+        ["Rationale", sig.rationale],
       ]);
     }
     return '<h3 class="subhead">Technical essay (optional)</h3>' + kv(pairs);
@@ -487,29 +495,30 @@
     // Stage 6 (Phase 12). Older decisions.jsonl files have no resume block — show nothing.
     if (res.url_present === undefined) return "";
     let pairs = [
-      ["URL present", S.bool(res.url_present, false)],
-      ["Fetch attempted", S.bool(res.attempted, false)],
+      ["URL present", S.raw(S.bool(res.url_present, false))],
+      ["Fetch attempted", S.raw(S.bool(res.attempted, false))],
     ];
     if (res.url) {
       pairs.splice(1, 0, ["Resume link",
-        '<a href="' + S.esc(res.url) + '" target="_blank" rel="noopener noreferrer">open resume</a>']);
+        S.raw('<a href="' + S.esc(res.url) + '" target="_blank" rel="noopener noreferrer">' +
+          "open resume</a>")]);
     }
     if (res.attempted) {
       pairs = pairs.concat([
-        ["Downloaded", S.bool(res.fetched, false)],
-        ["Extracted chars", res.extracted_chars ? S.esc(res.extracted_chars) : "—"],
+        ["Downloaded", S.raw(S.bool(res.fetched, false))],
+        ["Extracted chars", res.extracted_chars || "—"],
       ]);
     }
-    if (res.failure) pairs.push(["Failure (bonus neutral)", S.esc(res.failure)]);
+    if (res.failure) pairs.push(["Failure (bonus neutral)", res.failure]);
     if (res.signals) {
       const sig = res.signals;
       pairs = pairs.concat([
-        ["Is a resume", S.bool(sig.is_resume)],
-        ["Relevant projects", S.esc(sig.relevant_projects)],
-        ["Relevant experience", S.esc(sig.relevant_experience)],
-        ["Relevant awards", S.esc(sig.relevant_awards)],
+        ["Is a resume", S.raw(S.bool(sig.is_resume))],
+        ["Relevant projects", sig.relevant_projects],
+        ["Relevant experience", sig.relevant_experience],
+        ["Relevant awards", sig.relevant_awards],
         ["Skills relevance", S.fmtNum(sig.skills_relevance, 2)],
-        ["Highlights", S.esc(sig.highlights)],
+        ["Highlights", sig.highlights],
       ]);
     }
     return '<h3 class="subhead">Resume</h3>' + kv(pairs);
