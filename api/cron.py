@@ -16,7 +16,6 @@ open grading trigger. The path is on the no-session allowlist because cron has n
 
 from __future__ import annotations
 
-import hmac
 import logging
 import time
 
@@ -26,6 +25,8 @@ from fastapi.responses import JSONResponse
 from srip_filter import db as dbmod
 from srip_filter.pipeline import make_grade_fn
 from srip_filter.worker import process_one
+
+from .webhook_auth import constant_time_match
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,15 @@ def _bearer(header: str | None) -> str:
     return token.strip() if scheme.lower() == "bearer" else ""
 
 
+def _authorized(header: str | None, secret: str) -> bool:
+    """Constant-time bearer check, sharing the webhook's encoding-safe comparison.
+
+    Same primitive as ``X-ATS-Secret`` deliberately: this endpoint is unauthenticated
+    until the token matches, so it must not raise on a hostile header either.
+    """
+    return constant_time_match(_bearer(header), (secret,))
+
+
 def register_cron(app: FastAPI) -> None:
     """Attach the drain endpoint. Reads secret/pool/client/config off ``app.state``."""
 
@@ -45,7 +55,7 @@ def register_cron(app: FastAPI) -> None:
         secret: str | None = app.state.cron_secret
         if not secret:
             return JSONResponse(status_code=503, content={"detail": "Cron is not configured."})
-        if not hmac.compare_digest(_bearer(request.headers.get("authorization")), secret):
+        if not _authorized(request.headers.get("authorization"), secret):
             logger.warning("cron drain rejected: bad or missing bearer token")
             return JSONResponse(status_code=401, content={"detail": "Invalid credentials."})
 

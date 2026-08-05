@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from api import cron as cron_mod
 from srip_filter.config import AppConfig
 from srip_filter.llm.client import FakeLLMClient
+from tests.api.conftest import raw_asgi_post
 
 SECRET = "test-cron-secret"
 
@@ -87,6 +88,20 @@ def test_unconfigured_secret_fails_closed(calls: _Calls) -> None:
 def test_bad_or_missing_bearer_touches_nothing(calls: _Calls, bad: str | None) -> None:
     resp = _drain(_client(), secret=bad)
     assert resp.status_code == 401
+    assert (calls.migrated, calls.reaped_with, calls.processed) == (0, [], 0)
+
+
+def test_hostile_bearer_bytes_401_not_500(calls: _Calls) -> None:
+    """A raw high byte in the Authorization header is a 401, never an unhandled 500.
+
+    Same defect as the webhook's secret header and the same fix — the drain now shares
+    ``webhook_auth.constant_time_match`` rather than calling ``compare_digest`` on a str.
+    Driven at the ASGI layer because httpx refuses to send the header (see raw_asgi_post).
+    """
+    status = raw_asgi_post(
+        _client().app, cron_mod.DRAIN_PATH, [(b"authorization", b"Bearer caf\xe9")]
+    )
+    assert status == 401
     assert (calls.migrated, calls.reaped_with, calls.processed) == (0, [], 0)
 
 

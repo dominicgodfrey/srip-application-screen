@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from api import webhooks as webhooks_mod
 from srip_filter.config import AppConfig
 from srip_filter.llm.client import FakeLLMClient
+from tests.api.conftest import raw_asgi_post
 from tests.live_payload import make_payload
 
 SECRET = "test-webhook-secret"
@@ -59,6 +60,30 @@ def test_no_secrets_configured_rejects_everything() -> None:
     with pytest.raises(WebhookAuthError) as err:
         verify_webhook(SECRET, ())
     assert err.value.reason == "no_secrets_configured"
+
+
+@pytest.mark.parametrize("hostile", ["caf\xe9", "\xff" * 32, "sécret", "\x80"])
+def test_non_ascii_header_is_a_clean_rejection_not_a_crash(hostile: str) -> None:
+    """A header byte above 0x7F must reject, never raise.
+
+    ``hmac.compare_digest`` rejects non-ASCII ``str`` with a TypeError, and ASGI servers
+    decode header values latin-1 — so before the bytes-first comparison this raised
+    straight past the endpoint's ``except WebhookAuthError`` into a 500.
+    """
+    with pytest.raises(WebhookAuthError) as err:
+        verify_webhook(hostile, (SECRET, PREVIOUS))
+    assert err.value.reason == "bad_secret"
+
+
+def test_non_ascii_secret_still_matches_itself() -> None:
+    """The encoding fix must not break a configured secret that happens to be non-ASCII.
+
+    latin-1 recovers the exact bytes the server read, which for a utf-8 client is the
+    utf-8 encoding of the configured value — so the round trip still matches.
+    """
+    secret = "sécret-ünicode"
+    as_server_reads_it = secret.encode("utf-8").decode("latin-1")
+    verify_webhook(as_server_reads_it, (secret,))
 
 
 # ------------------------------------------------------------------------------------------------
@@ -176,6 +201,23 @@ def test_unsigned_tampered_stale_all_401_and_touch_nothing(
         assert resp.json() == {"detail": "Invalid credentials."}  # generic, reason not leaked
     assert spies.upserts == []
     assert spies.events == []
+
+
+def test_hostile_header_bytes_401_not_500(client: TestClient, spies: _Spies) -> None:
+    """End to end at the ASGI layer: a raw high byte in the secret header is a 401.
+
+    Driven through :func:`raw_asgi_post` because httpx will not send this — see its
+    docstring. The endpoint's own ``except WebhookAuthError`` cannot catch a TypeError,
+    so before the fix this was an unauthenticated 500 with a stack trace.
+    """
+    status = raw_asgi_post(
+        client.app,
+        "/webhooks/applications",
+        [(b"x-ats-secret", b"caf\xe9"), (b"content-type", b"application/json")],
+        body=json.dumps(_essays_payload()).encode(),
+    )
+    assert status == 401
+    assert (spies.upserts, spies.events) == ([], [])  # invariant #7 holds on this path too
 
 
 def test_signed_test_ping_200_and_no_row(client: TestClient, spies: _Spies) -> None:
