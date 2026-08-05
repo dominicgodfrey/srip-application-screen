@@ -347,13 +347,24 @@ async def list_applications(
 
 
 async def delete_submission(pool: asyncpg.Pool, submission_id: str) -> bool:
-    """Hard-delete one applicant (individual removal request, PRD v3 §9). Tombstoned."""
-    status = await pool.execute(
-        "DELETE FROM applications WHERE submission_id = $1", submission_id
-    )
-    deleted = status.endswith("1")
-    if deleted:
-        await add_event(pool, "submission_deleted", submission_id=submission_id)
+    """Hard-delete one applicant (individual removal request, PRD v3 §9). Tombstoned.
+
+    Delete and tombstone share one transaction, matching :func:`purge_applications` and
+    the §9 guarantee. This is the removal-request path — the one case where being able to
+    show *that the deletion happened* matters later — so it must not be possible to lose
+    the ledger entry to a crash between two separate statements.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        status = await conn.execute(
+            "DELETE FROM applications WHERE submission_id = $1", submission_id
+        )
+        deleted = status.endswith("1")
+        if deleted:
+            await conn.execute(
+                "INSERT INTO events (kind, submission_id, details) VALUES ($1, $2, NULL)",
+                "submission_deleted",
+                submission_id,
+            )
     return deleted
 
 
@@ -423,11 +434,19 @@ async def purge_applications(
 
     Everything runs in one transaction, so a mid-purge failure leaves the table untouched
     rather than half-deleted. The tombstone carries counts and a timestamp only.
+
+    **The count is verified twice, before and after the delete.** ``FOR UPDATE`` locks the
+    rows it *finds*; it is not a predicate lock, so under READ COMMITTED it cannot stop an
+    INSERT landing between the count and the DELETE — and the DELETE takes a fresh snapshot
+    that would happily include the new row. Re-checking the number actually deleted closes
+    that window: a purge that would destroy a different set than the operator was shown
+    aborts and rolls back instead.
     """
     where, args = ("WHERE cohort_name = $1", [cohort_name]) if cohort_name else ("", [])
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # FOR UPDATE so a concurrent upsert cannot slip a row in between count and delete.
+            # Locks the rows we are about to delete, so a concurrent *update* cannot move a
+            # row out of scope underneath us. Arriving rows are caught by the post-check.
             live = await conn.fetchval(
                 f"SELECT COUNT(*) FROM (SELECT 1 FROM applications {where} FOR UPDATE) t",
                 *args,
@@ -436,6 +455,9 @@ async def purge_applications(
                 raise PurgeCountMismatch(expected=expected_count, actual=live)
             status = await conn.execute(f"DELETE FROM applications {where}", *args)
             deleted = int(status.rsplit(" ", 1)[-1])
+            if deleted != expected_count:
+                # Raising inside the transaction rolls the DELETE back: nothing is destroyed.
+                raise PurgeCountMismatch(expected=expected_count, actual=deleted)
             cache_cleared = 0
             if cohort_name is None:
                 cache_cleared = await conn.fetchval("SELECT COUNT(*) FROM llm_cache")

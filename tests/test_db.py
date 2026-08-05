@@ -98,6 +98,56 @@ def _payload(**overrides) -> dict:
     return base
 
 
+class _InterferingPool:
+    """Real pool whose handed-out connection misbehaves once, on cue.
+
+    The two atomicity guarantees below are about what happens *between* two statements
+    inside one transaction — a row landing mid-purge, a crash between delete and
+    tombstone. Reproducing either with genuine concurrency needs a seam in production
+    code purely for the test; intercepting one call on the connection needs none, and
+    exercises the same branch deterministically. Everything not intercepted is forwarded
+    to the real connection, so the transaction, the rollback, and the SQL are all real.
+    """
+
+    def __init__(self, pool, *, count_lie: int | None = None, fail_on: str | None = None):
+        self._pool = pool
+        self._count_lie = count_lie
+        self._fail_on = fail_on
+
+    def acquire(self):
+        outer = self
+
+        class _Ctx:
+            async def __aenter__(self):
+                self._cm = outer._pool.acquire()
+                return _Conn(await self._cm.__aenter__())
+
+            async def __aexit__(self, *exc):
+                return await self._cm.__aexit__(*exc)
+
+        class _Conn:
+            def __init__(self, conn):
+                self._conn = conn
+                self._counted = False
+
+            async def fetchval(self, query, *args):
+                # Stand in for the pre-count seeing a smaller set than the DELETE will.
+                if outer._count_lie is not None and not self._counted and "COUNT" in query:
+                    self._counted = True
+                    return outer._count_lie
+                return await self._conn.fetchval(query, *args)
+
+            async def execute(self, query, *args):
+                if outer._fail_on is not None and outer._fail_on in query:
+                    raise RuntimeError("simulated crash mid-transaction")
+                return await self._conn.execute(query, *args)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        return _Ctx()
+
+
 # ------------------------------------------------------------------------------------------------
 # Migrations
 # ------------------------------------------------------------------------------------------------
@@ -296,6 +346,25 @@ async def test_delete_submission_hard_deletes_and_tombstones(pool):
     assert "submission_deleted" in kinds
 
 
+async def test_delete_and_tombstone_are_one_transaction(pool):
+    """PRD v3 §9: the removal-request path cannot delete without recording that it did.
+
+    A crash between the DELETE and the ledger INSERT must take the DELETE with it —
+    otherwise the one case where you later need to *prove* the removal happened is
+    exactly the case with no evidence.
+    """
+    sid = _sid()
+    await upsert_application(pool, submission_id=sid, payload=_payload())
+
+    with pytest.raises(RuntimeError):
+        await delete_submission(_InterferingPool(pool, fail_on="INSERT INTO events"), sid)
+
+    assert await get_application(pool, sid) is not None  # rolled back, still there
+    assert await pool.fetchval(
+        "SELECT COUNT(*) FROM events WHERE kind = 'submission_deleted'"
+    ) == 0
+
+
 # ------------------------------------------------------------------------------------------------
 # Bulk purge (PRD v3 §9 close-cycle)
 # ------------------------------------------------------------------------------------------------
@@ -390,6 +459,29 @@ async def test_count_drift_aborts_the_purge_and_deletes_nothing(pool):
 
     assert err.value.expected == 1 and err.value.actual == 2
     assert len(await list_applications(pool)) == 2  # nothing destroyed
+    assert await pool.fetchval("SELECT COUNT(*) FROM events WHERE kind='purge'") == 0
+
+
+async def test_a_row_landing_mid_purge_aborts_it_and_deletes_nothing(pool):
+    """The pre-count is not enough: FOR UPDATE is not a predicate lock.
+
+    It locks the rows it finds, so it cannot stop an INSERT committing between the count
+    and the DELETE — and the DELETE takes a fresh READ COMMITTED snapshot that would
+    include the new row. Here the pre-count is made to report 1 while 2 rows are really
+    in scope, which is exactly what that race looks like from inside the transaction.
+    The post-check must roll the whole thing back.
+    """
+    a, b = _sid(), _sid()
+    await upsert_application(pool, submission_id=a, payload=_payload(), cohort_name="calib")
+    await upsert_application(pool, submission_id=b, payload=_payload(x=1), cohort_name="calib")
+
+    with pytest.raises(dbmod.PurgeCountMismatch) as err:
+        await dbmod.purge_applications(
+            _InterferingPool(pool, count_lie=1), cohort_name="calib", expected_count=1
+        )
+
+    assert (err.value.expected, err.value.actual) == (1, 2)
+    assert len(await list_applications(pool)) == 2  # the DELETE was rolled back
     assert await pool.fetchval("SELECT COUNT(*) FROM events WHERE kind='purge'") == 0
 
 

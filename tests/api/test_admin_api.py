@@ -199,6 +199,29 @@ def test_listing_includes_ungraded_rows_by_status(client: TestClient,
     assert body["counts"]["received"] == 1
 
 
+@pytest.mark.parametrize(
+    "route,method",
+    [
+        ("/api/applications/{}", "get"),
+        ("/api/applications/{}", "delete"),
+        ("/api/applications/{}/promote", "post"),
+        ("/api/applications/{}/demote", "post"),
+    ],
+)
+def test_malformed_submission_id_is_422_not_500(
+    client: TestClient, store: _FakeStore, route: str, method: str
+) -> None:
+    """`submission_id` is a UUID column: a junk id must be refused at the edge.
+
+    Untyped, the value reached asyncpg, which raises on anything it cannot encode as a
+    UUID — a 500 on input the API should simply reject. The fake store here cannot show
+    that (it is a dict keyed by str), which is why the type now lives on the route.
+    """
+    resp = getattr(client, method)(route.format("not-a-uuid"))
+    assert resp.status_code == 422
+    assert store.events == []  # a rejected id touches nothing
+
+
 def test_detail_404_and_full_record(client: TestClient, store: _FakeStore) -> None:
     assert client.get(f"/api/applications/{uuid.uuid4()}").status_code == 404
     sid = str(uuid.uuid4())

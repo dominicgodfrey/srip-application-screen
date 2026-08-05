@@ -24,6 +24,7 @@ under the shared-password model that is the literal ``"admin"``.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Annotated, Any
 
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -50,6 +51,13 @@ logger = logging.getLogger(__name__)
 DECIDED_BY = "admin"  # single shared credential (P5) — the only identity available
 
 _Capacity = Annotated[int | None, Query(ge=0, description="Seat cap; omit for unlimited.")]
+
+# `applications.submission_id` is a UUID column, so asyncpg raises on any value it cannot
+# encode as one. Typing the path param makes FastAPI reject a malformed id with a 422 at
+# the edge, instead of letting it reach the driver and surface as a 500 — the same
+# never-a-500-on-bad-input rule the webhook edge follows. Handlers immediately stringify
+# it, so the store layer's `str` contract is unchanged.
+SubmissionId = uuid.UUID
 
 
 def _record_from_row(row: dict[str, Any]) -> AuditRecord | None:
@@ -138,10 +146,10 @@ def register_admin_api(app: FastAPI) -> None:
         return {"applications": listing, "counts": counts, "cohorts": cohorts}
 
     @app.get("/api/applications/{submission_id}", response_model=None, tags=["admin"])
-    async def get_application(submission_id: str) -> dict:
+    async def get_application(submission_id: SubmissionId) -> dict:
         """One applicant: lifecycle status + the full audit record (rank read-time)."""
         pool = _pool()
-        row = await _row_or_404(pool, submission_id)
+        row = await _row_or_404(pool, str(submission_id))
         # Rank must reflect the applicant's place in the live cohort, so rank the cohort.
         cohort_rows = await dbmod.list_applications(
             pool, cohort_name=row.get("cohort_name") or None
@@ -158,14 +166,15 @@ def register_admin_api(app: FastAPI) -> None:
     @app.post(
         "/api/applications/{submission_id}/promote", response_model=None, tags=["admin"]
     )
-    async def promote(submission_id: str) -> dict:
+    async def promote(submission_id: SubmissionId) -> dict:
         """Manually promote into the ranking: full re-score with gates recorded-but-bypassed.
 
         Spends LLM tokens (the re-score); the durable cache makes unchanged fields free.
         409 for already-RANKED or not-yet-graded rows; 409 when no payload is stored.
         """
         pool = _pool()
-        row = await _row_or_404(pool, submission_id)
+        sid = str(submission_id)
+        row = await _row_or_404(pool, sid)
         existing = _record_from_row(row)
         if existing is None:
             raise HTTPException(
@@ -183,7 +192,7 @@ def register_admin_api(app: FastAPI) -> None:
         )
         await dbmod.finish_graded(
             pool,
-            submission_id,
+            sid,
             audit_record=record.model_dump(mode="json"),
             outcome=record.outcome,
             final_score=record.final_score,
@@ -191,7 +200,7 @@ def register_admin_api(app: FastAPI) -> None:
         await dbmod.add_event(
             pool,
             "manual_promote",
-            submission_id=submission_id,
+            submission_id=sid,
             details={"decided_by": DECIDED_BY, "final_score": record.final_score},
         )
         return {"record": record.model_dump(mode="json")}
@@ -199,13 +208,14 @@ def register_admin_api(app: FastAPI) -> None:
     @app.post(
         "/api/applications/{submission_id}/demote", response_model=None, tags=["admin"]
     )
-    async def demote(submission_id: str) -> dict:
+    async def demote(submission_id: SubmissionId) -> dict:
         """Manually remove a RANKED applicant from the ranking (→ REJECTED). No LLM spend.
 
         Every gate verdict and subscore stays on the record; reversible via promote.
         """
         pool = _pool()
-        row = await _row_or_404(pool, submission_id)
+        sid = str(submission_id)
+        row = await _row_or_404(pool, sid)
         record = _record_from_row(row)
         if record is None:
             raise HTTPException(
@@ -223,7 +233,7 @@ def register_admin_api(app: FastAPI) -> None:
         record.reasons.append("OVERRIDE: manually demoted by admin")
         await dbmod.finish_graded(
             pool,
-            submission_id,
+            sid,
             audit_record=record.model_dump(mode="json"),
             outcome=record.outcome,
             final_score=None,
@@ -231,16 +241,16 @@ def register_admin_api(app: FastAPI) -> None:
         await dbmod.add_event(
             pool,
             "manual_demote",
-            submission_id=submission_id,
+            submission_id=sid,
             details={"decided_by": DECIDED_BY},
         )
         return {"record": record.model_dump(mode="json")}
 
     @app.delete("/api/applications/{submission_id}", response_model=None, tags=["admin"])
-    async def delete_application(submission_id: str) -> Response:
+    async def delete_application(submission_id: SubmissionId) -> Response:
         """Hard-delete one applicant (individual removal request, PRD v3 §9). Tombstoned."""
         pool = _pool()
-        deleted = await dbmod.delete_submission(pool, submission_id)
+        deleted = await dbmod.delete_submission(pool, str(submission_id))
         if not deleted:
             raise HTTPException(status_code=404, detail="No application with that id.")
         return Response(status_code=204)
