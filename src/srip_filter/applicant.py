@@ -1,15 +1,9 @@
 """``ApplicantRow`` — the canonical shape every scoring stage grades.
 
-Deliberately its own module, and deliberately dependency-free beyond pydantic.
-
-This type used to live in :mod:`srip_filter.ingest`, which imports pandas for the CSV
-reader. Every scoring stage needs ``ApplicantRow``, ``pipeline`` imports the stages, and
-``api.main`` imports ``pipeline`` — so importing the app dragged pandas in, costing ~0.6 s
-of every serverless cold start for a code path the deployed service never reaches. The
-webhook is the only live source of applications; the CSV reader survives solely for
-``scripts/replay.py``, which is a development tool.
-
-Splitting the type out breaks that chain: ``ingest`` imports from here, never the reverse.
+Deliberately its own module and dependency-free beyond pydantic. It used to live in
+:mod:`srip_filter.ingest`, whose pandas import then reached the whole app through the stages —
+~0.6 s of every serverless cold start for a code path the deployed service never runs.
+``ingest`` imports from here, never the reverse.
 """
 
 from __future__ import annotations
@@ -20,12 +14,9 @@ from pydantic import BaseModel, ConfigDict
 class ApplicantRow(BaseModel):
     """One applicant, canonicalized — the input to every gate and scoring stage.
 
-    Every field is a whitespace-normalized string (defaulting to ""); GPA normalization,
-    essay gating, and the rest of the pipeline run on these. Unknown keys are forbidden so
-    a mapping bug surfaces immediately.
-
-    The field set still carries its CSV-era names because that is what the whole scoring
-    layer reads; :mod:`srip_filter.ingest_webhook` maps the live payload onto them.
+    Every field is a whitespace-normalized string, and unknown keys are forbidden so a mapping
+    bug surfaces immediately. The names are CSV-era because that is what the scoring layer
+    reads; :mod:`srip_filter.ingest_webhook` maps the live payload onto them.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -47,12 +38,11 @@ class ApplicantRow(BaseModel):
     linkedin: str = ""
     essay1: str = ""
     essay2: str = ""
-    # Retired with the v2 CSV form, which carried a truthfulness checkbox the live site
-    # enforces at submit instead. Kept as a field only because the CSV reader still maps
-    # the column for the replay tool; nothing scores it.
+    # Retired with the CSV form; the live site enforces it at submit. Kept only because the
+    # CSV reader still maps the column for the replay tool — nothing scores it.
     affirmation: str = ""
-    # v3 webhook fields (blank on the CSV path): the optional technical essay and the
-    # carried-not-scored metadata (PRD v3 §2.2). Populated by ingest_webhook.
+    # Webhook-only, blank on the CSV path: the optional technical essay plus metadata that is
+    # carried but not scored (PRD v3 §2.2).
     essay3: str = ""
     programming_languages: str = ""
     github_profile: str = ""

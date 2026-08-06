@@ -1,16 +1,11 @@
-"""`POST /api/cron/drain` — the serverless grading driver (P11.1–11.3, PRD v3 §3).
+"""`POST /api/cron/drain` — the serverless grading driver (PRD v3 §3).
 
-On an always-on host the grading worker was a loop (`worker.run_worker`). On Vercel there
-is no such process, so a per-minute cron invocation does the same work in a bounded burst:
+There is no always-on process to run a worker loop, so a per-minute cron does the same work in
+a bounded burst: migrate → reap stale claims → ``process_one`` until budget, cap, or empty. It
+drives the **unmodified** ``worker.process_one``, so per-row isolation and the ``SKIP LOCKED``
+claim are the ones already tested, and overlapping invocations are safe by construction.
 
-    migrate (advisory-locked) → reap stale claims → process_one until budget/cap/empty
-
-It drives the **unmodified** ``worker.process_one``, so per-row isolation (invariant #9)
-and the idempotent claim (``FOR UPDATE SKIP LOCKED``) are exactly the ones already tested.
-Overlapping invocations are therefore safe by construction.
-
-Auth is Vercel's own: scheduled invocations carry ``Authorization: Bearer $CRON_SECRET``.
-It fails closed — no secret configured ⇒ 503, so a misconfigured deploy never exposes an
+Auth is a bearer ``$CRON_SECRET`` and fails closed, so a misconfigured deploy never exposes an
 open grading trigger. The path is on the no-session allowlist because cron has no cookie.
 """
 
@@ -39,11 +34,8 @@ def _bearer(header: str | None) -> str:
 
 
 def _authorized(header: str | None, secret: str) -> bool:
-    """Constant-time bearer check, sharing the webhook's encoding-safe comparison.
-
-    Same primitive as ``X-ATS-Secret`` deliberately: this endpoint is unauthenticated
-    until the token matches, so it must not raise on a hostile header either.
-    """
+    """Constant-time bearer check on the webhook's encoding-safe primitive: this endpoint is
+    unauthenticated until the token matches, so a hostile header must not raise here either."""
     return constant_time_match(_bearer(header), (secret,))
 
 

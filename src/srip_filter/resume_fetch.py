@@ -1,22 +1,13 @@
-"""Stage 6 resume download layer (Phase 12.2, PRD §7.2).
+"""Stage 6 resume download layer (PRD §7.2) — the SSRF guard, kept separate from the LLM client
+and the scoring math.
 
-A network I/O boundary, deliberately separate from both the LLM client and the scoring math.
-Resume URLs arrive inside an **uploaded CSV**, so this module is the SSRF guard: only https
-URLs whose hostname is pinned in ``resume.allowed_url_hosts`` are ever fetched, redirects are
-not followed (a redirect could escape the allowlist), and the body is streamed against
-``max_download_bytes`` so an oversized file aborts early.
+Only https URLs whose hostname is pinned in ``resume.allowed_url_hosts`` are fetched, redirects
+are never followed (one could escape the allowlist), and the body streams against
+``max_download_bytes`` so an oversized file aborts early. The fetcher holds its own semaphore,
+which bounds peak transient memory at ``download_concurrency × max_download_bytes``.
 
-Bonus-only discipline (PRD §0.3): :meth:`ResumeFetcher.fetch` **never raises** — every failure
-becomes a typed reason in :class:`FetchResult` that the Stage 6 aggregator turns into a 0 bonus
-plus an audit note, never a block. Transient failures (timeout / network / 5xx) are retried
-once; 4xx are not (not transient).
-
-Memory rule: the fetcher holds its **own semaphore**
-(``download_concurrency``, separate from the LLM one), so peak transient memory is
-``download_concurrency × max_download_bytes`` regardless of batch size. The caller must
-fetch → extract → discard per applicant; resume bytes never land on an audit record.
-
-Privacy: resume URLs embed applicant names, so nothing here logs a URL — only failure types.
+:meth:`ResumeFetcher.fetch` **never raises**: every failure is a typed reason the aggregator
+turns into a 0 bonus plus an audit note. Nothing here logs a URL — they embed applicant names.
 """
 
 from __future__ import annotations
@@ -47,12 +38,8 @@ _RETRYABLE_5XX_PREFIX = f"{_HTTP_STATUS_PREFIX}5"
 
 @dataclass(frozen=True)
 class FetchResult:
-    """Outcome of one resume download.
-
-    ``content`` is the PDF bytes on success and ``b""`` on failure; the caller extracts text
-    and **discards it immediately** (the per-applicant memory rule). ``failure`` is ``""`` on
-    success, else a typed reason for ``AuditRecord.resume.failure``.
-    """
+    """Outcome of one resume download. ``content`` is the PDF bytes, which the caller extracts
+    from and **discards immediately**; ``failure`` is a typed reason for the audit record."""
 
     ok: bool
     content: bytes
@@ -68,17 +55,15 @@ def _fail(reason: str) -> FetchResult:
 
 
 def validate_resume_url(url: str, cfg: AppConfig) -> str:
-    """Apply the SSRF policy to a URL: return ``""`` if fetchable, else the typed reason.
+    """Apply the SSRF policy to a URL: ``""`` if fetchable, else the typed reason.
 
-    Policy: https only; hostname must match ``resume.allowed_url_hosts`` exactly
-    (case-insensitive — no wildcard/suffix matching, so ``evil-prod-fillout...com`` can't
-    sneak by); only the default port (an explicit ``:443`` is fine). ``urlsplit().hostname``
-    strips any userinfo, so ``https://allowed-host@evil.com/`` resolves to ``evil.com`` and
-    fails the allowlist.
+    https only, default port only, and the hostname must match the allowlist *exactly* — no
+    suffix matching, so ``evil-prod-fillout...com`` cannot sneak by. ``urlsplit().hostname``
+    strips userinfo, so ``https://allowed-host@evil.com/`` resolves to ``evil.com`` and fails.
     """
     try:
         parts = urlsplit(url.strip())
-        port = parts.port  # property access can raise ValueError on a malformed port
+        port = parts.port  # can raise ValueError on a malformed port
     except ValueError:
         return FAIL_INVALID_URL
     if parts.scheme.lower() != "https":
@@ -94,15 +79,10 @@ def validate_resume_url(url: str, cfg: AppConfig) -> str:
 
 
 class ResumeFetcher:
-    """Batch-scoped resume downloader: one per ``grade_batch`` run.
+    """Run-scoped resume downloader owning the semaphore and one redirect-disabled
+    ``httpx.AsyncClient``. Use as an async context manager so the client closes with the run.
 
-    Owns the download semaphore and one ``httpx.AsyncClient`` (redirects disabled, timeout
-    from config). Use as an async context manager so the client is closed with the run::
-
-        async with ResumeFetcher(cfg) as fetcher:
-            result = await fetcher.fetch(url)
-
-    ``transport`` is a test seam (``httpx.MockTransport``) — no real network in unit tests.
+    ``transport`` is a test seam — no real network in unit tests.
     """
 
     def __init__(
@@ -126,12 +106,8 @@ class ResumeFetcher:
         await self.aclose()
 
     async def fetch(self, url: str) -> FetchResult:
-        """Download one resume under the SSRF policy. Never raises.
-
-        Validates the URL first (no network for a disallowed host), then streams the body
-        under the size cap, holding the download semaphore. Transient failures (timeout,
-        network error, 5xx) are retried once; everything else fails fast.
-        """
+        """Download one resume under the SSRF policy; never raises. The URL is validated before
+        any network call, and transient failures are retried once — everything else fails fast."""
         reason = validate_resume_url(url, self._cfg)
         if reason:
             return _fail(reason)

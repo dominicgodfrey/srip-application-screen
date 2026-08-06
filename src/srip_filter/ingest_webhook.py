@@ -1,29 +1,16 @@
-"""Webhook payload → pipeline input mapping (P4, PRD v3 §2.2/§4).
-
-The v3 front door's equivalent of Stage 0: turn a validated
-:class:`~srip_filter.models.EssaysModePayload` (plus the optionally stored resume-mode
-payload) into the :class:`~srip_filter.ingest.ApplicantRow` the existing stages consume,
-plus the per-essay metadata (exact word bounds, question text) that v3's strict Stage 1
-needs. No LLM, no I/O.
+"""Webhook payload → pipeline input mapping (PRD v3 §2.2/§4). No LLM, no I/O.
 
 Mapping rules that carry decisions:
 
-* **Essays:** ``required_essays[0]`` → essay 1, ``[1]`` → essay 2 (the site orders by
-  ``sort_order``: motivation, then trajectory). The bonus essay is ``optional_essays[0]``.
-  The site tags these via ``ats_role`` on the live question config, so the arrays are
-  authoritative — no field_key guessing. Fewer than two required essays ⇒ unscoreable →
-  ``NEEDS_REVIEW`` (never silently rejected); surplus entries are noted in
-  ``mapping_notes`` (contract-drift signal), not graded.
-* **Named fields come from ``all_answers``** — the full form dump is the only place
-  ``field_key`` exists. An expected-but-absent key appends a ``mapping_notes`` entry;
-  absent and blank are the same thing to the gates (owner decision D3, 2026-07-27).
-* **GPA:** ``gpa_unweighted`` is primary (deterministic path). A weighted-only
-  submission sets ``force_task_a`` — the deterministic /5 conversion would misread a
-  weighted scale (PRD v3 §4 Stage 2).
-* **International:** derived, not trusted from a sentinel — a non-blank
-  ``state_of_residence`` that is not a US state/DC/territory name ⇒ international. The
-  live dropdown's sole non-US value, ``"Non-U.S. Territory"``, falls out of this
-  unchanged.
+* **Essays:** the arrays are authoritative and ordered by the site's own ``ats_role`` tagging,
+  so there is no field_key guessing. Fewer than two required essays is unscoreable →
+  ``NEEDS_REVIEW``; surplus entries are noted as contract drift, not graded.
+* **Named fields come from ``all_answers``** — the only place ``field_key`` exists. An
+  expected-but-absent key is noted, and absent and blank are the same to the gates (D3).
+* **GPA:** ``gpa_unweighted`` is primary; a weighted-only submission sets ``force_task_a``,
+  since the deterministic /5 conversion would misread a weighted scale.
+* **International:** derived rather than trusted from a sentinel — a non-blank state that is
+  not a US state/DC/territory name.
 """
 
 from __future__ import annotations
@@ -33,9 +20,8 @@ from dataclasses import dataclass, field
 from .applicant import ApplicantRow
 from .models import ApplicationPayload
 
-# Named answers we read out of `all_answers`. `programming_languages` and `github_profile`
-# are NOT on the live CS form (repo seed only, verified 2026-07-28) — absent is normal for
-# them, so they stay out of the expected set and never raise a drift note.
+# `programming_languages` and `github_profile` are deliberately absent: they are not on the
+# live CS form, so their absence is normal and must never raise a drift note.
 EXPECTED_ANSWER_KEYS: tuple[str, ...] = (
     "gpa_explanation",
     "relevant_coursework",
@@ -69,19 +55,15 @@ def is_international(state_of_residence: str) -> bool:
 
 @dataclass(frozen=True)
 class EssayMeta:
-    """Per-essay metadata carried alongside the text — question text only.
-
-    Word bounds retired 2026-07-28: the site server-validates them at submit (400, the
-    submission never lands), so re-checking here could only ever fire on our own stale
-    config. Task D falls back to its module-default target range.
-    """
+    """Per-essay metadata alongside the text — question only. Word bounds retired 2026-07-28:
+    the site validates them at submit, so re-checking here could only fire on stale config."""
 
     question: str = ""
 
 
 @dataclass(frozen=True)
 class WebhookApplicant:
-    """Everything the v3 per-row runner needs for one application."""
+    """Everything the per-row runner needs for one application."""
 
     row: ApplicantRow
     e1: EssayMeta = field(default_factory=EssayMeta)
@@ -91,7 +73,7 @@ class WebhookApplicant:
     state_of_residence: str = ""
     international: bool = False
     force_task_a: bool = False  # weighted-only GPA → Task A, never the /5 fraction path
-    missing_required_essays: bool = False  # <2 required essays delivered → NEEDS_REVIEW
+    missing_required_essays: bool = False  # → NEEDS_REVIEW
     mapping_notes: tuple[str, ...] = ()  # contract-drift observations for the audit trail
 
 
@@ -143,8 +125,8 @@ def map_application_payload(payload: ApplicationPayload) -> WebhookApplicant:
 
     row = ApplicantRow(
         submission_id=str(payload.submission_id),
-        # The webhook carries one display name; keep it whole in first_name (the audit
-        # record joins first+last with a space, so this renders correctly).
+        # One display name arrives; keep it whole here — the audit record joins first+last
+        # with a space, so it still renders correctly.
         first_name=(payload.student_name or "").strip(),
         last_name="",
         email=payload.user_email.strip(),

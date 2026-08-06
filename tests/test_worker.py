@@ -1,8 +1,7 @@
-"""P3 worker tests — queue draining, per-row crash isolation, durable LLM cache.
+"""Worker tests — queue draining, per-row crash isolation, durable LLM cache.
 
-No real database: the store boundary is monkeypatched with an in-memory fake queue,
-which is exactly the right altitude — SKIP LOCKED semantics were proven in test_db.py;
-here we prove the loop's behavior around them (PRD v3 invariants #8 and #9).
+No real database: the store boundary is an in-memory fake queue, which is the right altitude
+— SKIP LOCKED was proven in test_db.py, and what matters here is the loop around it.
 """
 
 from __future__ import annotations
@@ -18,9 +17,7 @@ from srip_filter.config import AppConfig
 from srip_filter.llm.client import FakeLLMClient
 from srip_filter.worker import GradeResult, process_one, run_worker
 
-# ------------------------------------------------------------------------------------------------
-# Fake store boundary
-# ------------------------------------------------------------------------------------------------
+# --- Fake store boundary ---
 
 
 class _FakeStore:
@@ -65,9 +62,7 @@ async def _ok_grade(row: dict) -> GradeResult:
                        final_score=100.0)
 
 
-# ------------------------------------------------------------------------------------------------
-# process_one / run_worker
-# ------------------------------------------------------------------------------------------------
+# --- process_one / run_worker ---
 
 
 async def test_process_one_grades_and_persists(store) -> None:
@@ -97,11 +92,9 @@ async def test_crash_isolates_row_and_loop_continues(store) -> None:
 async def test_crash_log_line_carries_no_applicant_text(store, caplog) -> None:
     """The log path obeys the same non-PII law as the events ledger.
 
-    `logger.exception` here would print a traceback, and a traceback ends with the exception
-    *message* — which for a grading crash can be a pydantic ValidationError quoting an essay or
-    an OpenAI refusal naming the content it refused. These records now reach real handlers
-    (api.main._wire_core_logging), so on Vercel they land in function logs the partner team can
-    read.
+    `logger.exception` would print a traceback, which ends with the exception *message* — for a
+    grading crash, possibly a ValidationError quoting an essay. These records reach real
+    handlers, so they land in function logs the partner team can read.
     """
     secret = "essay text that must never reach a log"
     s = store([_row("poison")])
@@ -159,9 +152,7 @@ async def test_run_worker_survives_claim_failure(store, monkeypatch) -> None:
     assert [g[0] for g in s.graded] == ["a"]  # blip absorbed, row still graded
 
 
-# ------------------------------------------------------------------------------------------------
-# Durable LLM cache (invariant #8: identical re-delivery re-bills nothing)
-# ------------------------------------------------------------------------------------------------
+# --- Durable LLM cache (invariant #8: identical re-delivery re-bills nothing) ---
 
 
 class _Out(BaseModel):

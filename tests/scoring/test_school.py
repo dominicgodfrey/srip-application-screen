@@ -1,9 +1,8 @@
-"""Tests for Stage 7 school bonus (Phase 6.1/6.2). Deterministic, no API spend.
+"""Tests for the Stage 7 school bonus. Deterministic, no API spend.
 
-6.1 pins :func:`match_school` (exact / alias / light misspelling / normalization / "High School"
-/ blank → no match / both-lists → higher-bonus list); 6.2 pins :func:`score_school` (list → bonus
-mapping, unmatched → 0, never negative, and the §12 invariant that a school bonus can neither
-manufacture nor rescue a ``REJECTED`` outcome).
+Pins matching (exact, alias, light misspelling, normalization, no-match cases, and the
+both-lists tiebreak) and scoring: unmatched is 0, never negative, and a school bonus can
+neither manufacture nor rescue a ``REJECTED`` outcome.
 """
 
 from __future__ import annotations
@@ -21,9 +20,7 @@ def _row(institution: str = "") -> ApplicantRow:
     return ApplicantRow(submission_id="s1", institution=institution)
 
 
-# ------------------------------------------------------------------------------------------------
-# 6.1 — match_school
-# ------------------------------------------------------------------------------------------------
+# --- 6.1 — match_school ---
 
 
 def test_exact_name_matches() -> None:
@@ -85,9 +82,7 @@ def test_unrelated_school_does_not_match() -> None:
     assert m.list is None
 
 
-# ------------------------------------------------------------------------------------------------
-# 6.2 — score_school aggregator
-# ------------------------------------------------------------------------------------------------
+# --- 6.2 — score_school aggregator ---
 
 
 def test_us_top20_maps_to_us_bonus() -> None:

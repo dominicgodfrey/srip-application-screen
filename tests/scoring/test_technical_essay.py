@@ -37,9 +37,7 @@ def _task_f(
     )
 
 
-# ------------------------------------------------------------------------------------------------
-# Pure pricing math
-# ------------------------------------------------------------------------------------------------
+# --- Pure pricing math ---
 
 
 def test_max_signals_price_to_bonus_max() -> None:
@@ -75,9 +73,7 @@ def test_bonus_never_negative_and_capped() -> None:
         assert 0.0 <= b <= CFG.bonus_max
 
 
-# ------------------------------------------------------------------------------------------------
-# Aggregator ladder (absent -> over-max -> Task F -> parse failure)
-# ------------------------------------------------------------------------------------------------
+# --- Aggregator ladder (absent -> over-max -> Task F -> parse failure) ---
 
 
 async def test_absent_essay_is_neutral_and_free() -> None:

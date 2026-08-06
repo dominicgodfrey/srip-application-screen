@@ -1,8 +1,7 @@
-"""P2/P10 webhook receiver tests — auth vectors, contract validation, idempotent ACK.
+"""Webhook receiver tests — auth vectors, contract validation, idempotent ACK.
 
-No real database: the store boundary (``db.upsert_application`` / ``db.add_event``) is
-monkeypatched with spies, which is exactly what proves PRD v3 invariant #7 — on every
-4xx path the spies must never fire. Synthetic data only.
+No real database: the store boundary is monkeypatched with spies, which is exactly what proves
+invariant #7 — on every 4xx path the spies must never fire. Synthetic data only.
 """
 
 from __future__ import annotations
@@ -24,9 +23,7 @@ SECRET = "test-webhook-secret"
 PREVIOUS = "rotated-out-secret"
 
 
-# ------------------------------------------------------------------------------------------------
-# verify_webhook — pure static-secret vectors
-# ------------------------------------------------------------------------------------------------
+# --- verify_webhook — pure static-secret vectors ---
 
 
 def _headers(body: bytes = b"", *, secret: str = SECRET) -> dict[str, str]:
@@ -86,9 +83,7 @@ def test_non_ascii_secret_still_matches_itself() -> None:
     verify_webhook(as_server_reads_it, (secret,))
 
 
-# ------------------------------------------------------------------------------------------------
-# Endpoint — spies + TestClient
-# ------------------------------------------------------------------------------------------------
+# --- Endpoint — spies + TestClient ---
 
 
 class _Spies:

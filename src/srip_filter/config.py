@@ -1,11 +1,8 @@
-"""Configuration loading for the SRIP filter (Phase 0.2).
+"""Configuration loading. Two deliberately separate sources: ``config.yaml`` for tunable knobs
+and pinned model IDs (committed), the environment for secrets (never committed or logged).
 
-Two sources, deliberately separated:
-  * config.yaml -> tunable knobs (PRD §10.3) + pinned model IDs. Non-secret, committed.
-  * .env / env  -> secrets (OPENAI_API_KEY). Never committed, never logged.
-
-Every magic number used by the pipeline must come from ``AppConfig``; nothing is hard-coded
-in business logic.
+Every magic number the pipeline uses comes from ``AppConfig``; nothing is hard-coded in the
+business logic.
 """
 
 from __future__ import annotations
@@ -19,13 +16,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def project_root() -> Path:
-    """Where the repo's data files (config.yaml, db/migrations, resources) live.
-
-    Normally two levels above this file. On a host that *installs* the package the source
-    sits in site-packages instead, so fall back to the process working directory — which
-    is the project base on Vercel. ponytail: a two-branch guess beats a config knob;
-    if a third layout ever shows up, make it an env var then.
-    """
+    """Where config.yaml, db/migrations, and resources live: normally two levels up, but a host
+    that *installs* the package puts the source in site-packages, so fall back to cwd (the
+    project base on Vercel)."""
     here = Path(__file__).resolve().parents[2]
     return here if (here / "config.yaml").exists() else Path.cwd()
 
@@ -45,28 +38,24 @@ class GibberishConfig(_Strict):
     """Cheap deterministic gibberish heuristics (PRD §4.2). ESL-safe: a hit requires
     ``min_signals`` independent signals to trip, so ordinary awkward/ESL prose passes."""
 
-    min_signals: int = 2  # number of signals that must fire to call it gibberish
-    max_consonant_run: int = 7  # longest run of consecutive consonants ABOVE this -> signal
+    min_signals: int = 2  # signals that must fire together to call it gibberish
+    max_consonant_run: int = 7  # consecutive consonants ABOVE this -> signal
     min_char_entropy: float = 2.5  # Shannon entropy of letters BELOW this -> signal
-    max_repeat_run: int = 5  # run of one identical char AT/ABOVE this (aaaaa) -> signal
+    max_repeat_run: int = 5  # run of one identical char AT/ABOVE this -> signal
     min_unique_word_ratio: float = 0.3  # unique/total words BELOW this -> signal
-    min_words_for_ratio: int = 20  # only evaluate the unique-word ratio with at least this many
-    min_chars: int = 20  # below this many letters, skip detection (too little signal)
+    min_words_for_ratio: int = 20  # fewer words than this: skip the ratio signal
+    min_chars: int = 20  # fewer letters than this: too little signal, skip detection
 
 
 class GpaPercentageBand(_Strict):
-    """One row of the PRD §6.1 percentage→4.0 table.
-
-    A percentage at or above ``min_pct`` (and below the next-higher band's ``min_pct``) maps to
-    ``gpa``. Below the lowest band the normalizer scales linearly toward 0 (§6.1: "< 73 → scale
-    linearly toward 0"), anchored on the lowest band's ``(min_pct, gpa)`` point.
-    """
+    """One row of the PRD §6.1 percentage→4.0 table: a percentage at or above ``min_pct`` maps
+    to ``gpa``, and below the lowest band the normalizer scales linearly toward 0."""
 
     min_pct: float
     gpa: float
 
 
-# PRD §6.1 default table (the 87-89 → 3.3 row is the gate threshold; 83-86 → 3.0 is a B average).
+# PRD §6.1 default table; the 87-89 → 3.3 row is the gate threshold.
 _DEFAULT_PERCENTAGE_TABLE: list[GpaPercentageBand] = [
     GpaPercentageBand(min_pct=93, gpa=4.0),
     GpaPercentageBand(min_pct=90, gpa=3.7),
@@ -79,16 +68,11 @@ _DEFAULT_PERCENTAGE_TABLE: list[GpaPercentageBand] = [
 
 
 class GpaNormalizationConfig(_Strict):
-    """Deterministic GPA-normalization knobs (PRD §6.1).
-
-    The percentage table and the clean-scale ceiling are the only magic numbers in the Stage-2
-    deterministic path; everything else (which scale a ``a/b`` fraction is) follows from the
-    denominator. A bare value above ``gpa_max`` is treated as weighted/out-of-scale and routed
-    to LLM Task A rather than resolved deterministically.
-    """
+    """Deterministic GPA-normalization knobs (PRD §6.1). The table and the ceiling are the only
+    magic numbers in the Stage-2 path — a fraction's scale follows from its denominator."""
 
     gpa_max: float = 4.0  # clean-scale ceiling + final cap; bare values above this -> Task A
-    percentage_max: float = 100.0  # a percentage above this is invalid -> Task A
+    percentage_max: float = 100.0  # above this a percentage is invalid -> Task A
     percentage_table: list[GpaPercentageBand] = Field(
         default_factory=lambda: list(_DEFAULT_PERCENTAGE_TABLE)
     )
@@ -96,19 +80,19 @@ class GpaNormalizationConfig(_Strict):
 
 class GpaConfig(_Strict):
     threshold: float = 3.3
-    hard_floor: float = 2.0  # below this, no explanation can rescue -> REJECTED outright
+    hard_floor: float = 2.0  # below this no explanation can rescue -> REJECTED
     score_max: float = 40.0
     normalization: GpaNormalizationConfig = Field(default_factory=GpaNormalizationConfig)
 
 
 class EssayScoringConfig(_Strict):
-    quality_max_each: int = 15  # v3 (SCORING.md): 15 per required essay, 30 total
+    quality_max_each: int = 15  # 30 across the two required essays
     grammar_penalty_max: int = 3
 
 
 class TechnicalEssayConfig(_Strict):
-    """Stage 4b Task F bonus pricing (v3, SCORING.md). Model judges 0-10 signals; this
-    prices them: ``bonus_max * Σ(w·signal) / (10·Σw)``. Bonus-only — never rejects."""
+    """Stage 4b Task F pricing: the model judges 0-10 signals, this prices them as
+    ``bonus_max * Σ(w·signal) / (10·Σw)``."""
 
     bonus_max: float = 20.0
     weight_depth: float = 1.0
@@ -127,25 +111,20 @@ class CourseworkConfig(_Strict):
 
 
 class SchoolConfig(_Strict):
-    bonus_us_top20: float = 20.0  # v3 (SCORING.md)
+    bonus_us_top20: float = 20.0
     bonus_intl_top50: float = 16.0
     fuzzy_match_threshold: int = 88
 
 
 class ResumeConfig(_Strict):
-    """Stage 6 resume bonus (PRD §7.2).
+    """Stage 6 resume bonus (PRD §7.2). ``allowed_url_hosts`` is the https-only SSRF allowlist —
+    only pinned hosts are ever fetched. Peak transient memory is
+    ``download_concurrency × max_download_bytes``."""
 
-    ``bonus_max`` is the kill switch: at 0 the stage performs **zero fetches and zero LLM
-    calls**. Peak transient memory is ``download_concurrency × max_download_bytes``.
-    ``allowed_url_hosts`` is the https-only SSRF allowlist — only pinned hosts are ever
-    fetched (empty list = nothing fetchable). The ``weight_*`` knobs price the Task E signals
-    deterministically: the model counts and classifies, config prices (the Task C pattern).
-    """
-
-    # 0 = shipping default (zero fetches, zero LLM calls). Raising it to 25 needs only the R2
-    # host pinned in allowed_url_hosts; the weights below are already priced for that scale.
+    # Kill switch: 0 means zero fetches and zero LLM calls. Raising it to 25 needs only the R2
+    # host pinned below; the weights are already priced for that scale.
     bonus_max: float = 0.0
-    max_download_bytes: int = 10_485_760  # 10 MiB streaming cap per resume; abort above this
+    max_download_bytes: int = 10_485_760  # 10 MiB streaming cap per resume
     download_timeout_s: float = 20.0
     download_concurrency: int = 4  # own semaphore, separate from the LLM one
     allowed_url_hosts: list[str] = Field(
@@ -154,8 +133,7 @@ class ResumeConfig(_Strict):
     )
     max_text_chars: int = 15_000  # extracted-text cap; bounds Task E token spend
     # Priced for the 0-25 band (owner, 2026-07-30): the v2 values x2.5, which moves the approved
-    # shape onto the new maximum instead of re-deciding it. See config.yaml for where realistic
-    # applicant profiles land; tests/scoring/test_resume.py pins them.
+    # shape onto the new maximum rather than re-deciding it. test_resume.py pins the landings.
     weight_project: float = 3.75  # per relevant project
     weight_experience: float = 5.0  # per relevant internship/job/research entry
     weight_award: float = 2.5  # per relevant award/competition
@@ -163,14 +141,12 @@ class ResumeConfig(_Strict):
 
 
 class CohortConfig(_Strict):
-    """Cohort assignment (PRD §11, Phase 11; tiered cost model since 11.5).
+    """Cohort assignment (PRD §11). ``tiers`` are the canonical program tokens, matched by
+    case-insensitive containment because the form emits inconsistent strings.
 
-    ``tiers`` are the canonical program tokens, matched case-insensitively by containment inside
-    the free-text choice strings (the form emits inconsistent values like ``Summer 2026- HONORS``
-    vs ``Summer 2026 - HONORS``). **List order is load-bearing:** it is the competitiveness/cost
-    order, most expensive first — the cost ceiling ("never place a student above their first
-    choice") is computed from list position. Per-tier capacities are NOT config — they are a
-    per-request staff input (:class:`~srip_filter.models.CohortCapacities`).
+    **List order is load-bearing:** most expensive first, since the cost ceiling ("never place a
+    student above their first choice") is computed from list position. Per-tier capacities are a
+    per-request staff input, not config.
     """
 
     tiers: list[str] = Field(default_factory=lambda: ["honors", "intensive", "regular"])
@@ -181,91 +157,76 @@ class TaskModels(_Strict):
     task_b: str = "gpt-4.1"
     task_c: str = "gpt-4.1-mini"
     task_d: str = "gpt-4.1"
-    task_e: str = "gpt-4.1-mini"  # E: resume signal extraction (mechanical, Phase 12)
-    task_f: str = "gpt-4.1"  # F: technical-essay bonus (judgment, bonus-only — v3)
+    task_e: str = "gpt-4.1-mini"  # resume signal extraction (mechanical)
+    task_f: str = "gpt-4.1"  # technical-essay bonus (judgment, bonus-only)
 
 
 class LlmConfig(_Strict):
     models: TaskModels = Field(default_factory=TaskModels)
     temperature: float = 0.2
-    # Transient-failure budget (429 / timeout / connection / 5xx), with exponential backoff
-    # capped at backoff_max_s. Sized so a sustained rate limit is ridden out rather than
-    # dumping healthy applications into NEEDS_REVIEW: 6 attempts spans ~1+2+4+8+16 = 31 s of
-    # waiting. Measured 2026-07-29 — at 2 attempts a 30k-TPM ceiling failed 307 of 466 rows.
-    # Terminal failures (unparseable output) still get exactly one retry, per PRD §8.
+    # Transient-failure budget (429 / timeout / connection / 5xx), backoff capped at
+    # backoff_max_s. Sized to ride out a sustained rate limit rather than dump healthy
+    # applications into NEEDS_REVIEW — at 2 attempts a 30k-TPM ceiling failed 307 of 466 rows
+    # (2026-07-29). Terminal failures still get exactly one retry, per PRD §8.
     max_attempts: int = 6
     backoff_max_s: float = 30.0
-    # Proactive pacing: set to the OpenAI account's tokens-per-minute limit for the *judgment*
-    # models (gpt-4.1 is the binding one). 0 disables pacing and relies on backoff alone.
-    # Default is OpenAI's tier-1 figure, the most restrictive real limit — being wrong this
-    # way only makes a batch slower, whereas being wrong the other way wastes calls on 429s.
-    # RAISE THIS to the deployment account's actual limit; a burst is paced, never dropped.
+    # ⚠️ RAISE to the deploying account's real TPM limit for the judgment models (gpt-4.1 is
+    # the binding one); 0 disables pacing. The default is OpenAI's tier-1 figure — being wrong
+    # low only makes a batch slower, being wrong high wastes calls on 429s.
     tokens_per_minute: int = 30_000
-    estimated_output_tokens: int = 400  # per-call output allowance for the pacing estimate
+    estimated_output_tokens: int = 400  # per-call allowance for the pacing estimate
     max_concurrency: int = 8
     max_retries: int = 2
     request_timeout_s: float = 60.0
 
 
 class ApiConfig(_Strict):
-    """Edge caps for the FastAPI shell's one remaining upload route (``POST /cohorts``).
-
-    These are magic numbers and belong in config, not the request handlers. ``max_upload_bytes``
-    bounds the multipart body; ``max_rows`` caps the parsed records (~2000, PRD §12 scale target).
-    """
+    """Edge caps for the shell's one upload route (``POST /cohorts``)."""
 
     max_upload_bytes: int = 26_214_400  # 25 MiB — comfortably fits ~2000 records
     max_rows: int = 2000
 
 
 class DbConfig(_Strict):
-    """asyncpg pool sizing (P1). The DSN itself is a secret and lives in the env, not here.
-
-    Sized for serverless (P11.4): many short-lived instances, each holding as little as
-    possible. ``min_size: 0`` means a cold start pays for no connection it never uses.
-    """
+    """asyncpg pool sizing; the DSN itself is a secret and lives in the env. Sized for
+    serverless — many short-lived instances, and ``min_size: 0`` so a cold start pays for
+    no connection it never uses."""
 
     pool_min_size: int = 0
     pool_max_size: int = 2
 
 
 class AuthConfig(_Strict):
-    """Admin-session knobs (P5, PRD v3 §6). The password hash itself is a secret (env)."""
+    """Admin-session knobs (PRD v3 §6). The password hash itself is a secret (env)."""
 
-    # 2 h. Short because P12.1 sessions are stateless: there is no server-side revocation,
-    # so expiry is the only thing that retires a stolen cookie on its own.
+    # Short because sessions are stateless: with no server-side revocation, expiry is the only
+    # thing that retires a stolen cookie on its own.
     session_ttl_seconds: float = 7_200.0
-    max_attempts: int = 5  # failed logins from ONE client within the window before lockout
-    # Failed logins from EVERY client before all logins are refused — the distributed-guesser
-    # backstop. Deliberately far above max_attempts: when this was the only tier, any
-    # anonymous caller could hold staff out permanently with five requests per window.
+    max_attempts: int = 5  # failed logins from ONE client per window before lockout
+    # Failed logins across ALL clients — the distributed-guesser backstop. Deliberately far
+    # above max_attempts: as the only tier, it let any anonymous caller hold staff out.
     max_attempts_global: int = 50
     lockout_seconds: float = 300.0  # sliding lockout window
     cookie_secure: bool = True  # set False only for local http:// development
 
 
 class WorkerConfig(_Strict):
-    """Grading-worker knobs (P3 loop, P11 cron drain)."""
+    """Grading-worker knobs: the local loop and the cron drain."""
 
     poll_seconds: float = 2.0  # idle sleep between queue polls (stop wakes it immediately)
-    # Cron drain (P11.1/11.2). The budget sits well inside Vercel's 800 s maxDuration;
-    # stale_grading_seconds must exceed the slowest realistic single-row grade.
+    # The budget sits well inside Vercel's 800 s maxDuration; stale_grading_seconds must
+    # exceed the slowest realistic single-row grade.
     drain_budget_seconds: float = 600.0
     drain_max_rows: int = 50
     stale_grading_seconds: float = 900.0
-    # /health reports "degraded" once the oldest ungraded row is older than this. Sized off
-    # the drain's own throughput: at drain_max_rows 50/min a full ~2 000-application cohort
-    # burst takes ~40 min to clear, so anything under an hour would cry wolf at the busiest
-    # moment of the cycle. Raise this if drain_max_rows drops.
+    # /health goes "degraded" once the oldest ungraded row is older than this. Sized off drain
+    # throughput: 50 rows/min clears a ~2,000-application burst in ~40 min, so anything under
+    # an hour cries wolf at the busiest moment of the cycle. Raise it if drain_max_rows drops.
     queue_alert_seconds: float = 3600.0
 
 
 class WebhookConfig(_Strict):
-    """Webhook edge knobs (P2/P10).
-
-    ``max_body_bytes`` bounds a single application payload (a few KB in practice — 1 MiB is
-    generous). The HMAC replay window retired with the static-secret swap (P10).
-    """
+    """Webhook edge knobs. A real payload is a few KB, so the cap is generous."""
 
     max_body_bytes: int = 1_048_576  # 1 MiB
 
@@ -290,12 +251,7 @@ class AppConfig(_Strict):
 
 
 class Secrets(BaseSettings):
-    """Secrets from environment / .env. Never written to outputs or logs.
-
-    v3 additions: ``database_url`` (the ATS's own Neon Postgres — credentials inside, so
-    env-only), ``database_url_test`` (dev Neon branch for the P1 test suite; tests skip
-    cleanly when unset).
-    """
+    """Secrets from environment / .env. Never written to outputs or logs."""
 
     model_config = SettingsConfigDict(
         env_file=str(DEFAULT_ENV_PATH),
@@ -305,27 +261,20 @@ class Secrets(BaseSettings):
 
     openai_api_key: str | None = None
     database_url: str | None = None
-    database_url_test: str | None = None
-    # Webhook auth (P10): the static shared secret the website sends as X-ATS-Secret.
-    # "previous" enables zero-downtime rotation: both are accepted while the website
-    # flips to a new value, then previous is cleared.
+    database_url_test: str | None = None  # separate Neon branch; DB tests skip when unset
+    # The website's X-ATS-Secret. "previous" enables zero-downtime rotation: both are
+    # accepted while the website flips over, then previous is cleared.
     ats_webhook_secret: str | None = None
     ats_webhook_secret_previous: str | None = None
-    # Admin login (P5): PBKDF2 hash only, never plaintext. Generate:
-    #   uv run python -m api.auth '<password>'
+    # PBKDF2 hash only, never plaintext. Generate: uv run python -m api.auth '<password>'
     admin_password_hash: str | None = None
-    # Cron drain (P11.1): Vercel sends this as `Authorization: Bearer <CRON_SECRET>` on
-    # scheduled invocations. Unset ⇒ the drain endpoint 503s (fail closed).
+    # Vercel sends this as `Authorization: Bearer …` on cron invocations; unset ⇒ 503.
     cron_secret: str | None = None
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
-    """Load and validate config.yaml.
-
-    With no argument, loads the project-root ``config.yaml``; if that default file is absent,
-    falls back to the PRD-default values. An explicitly supplied path that does not exist is an
-    error (so a typo fails loudly rather than silently using defaults).
-    """
+    """Load and validate config.yaml, falling back to defaults when the project-root file is
+    absent. An explicitly supplied path that does not exist raises, so a typo fails loudly."""
     if path is not None:
         cfg_path = Path(path)
         if not cfg_path.exists():
@@ -352,7 +301,7 @@ def get_secrets() -> Secrets:
 
 
 def require_openai_key() -> str:
-    """Return the OpenAI key, or raise if missing (used by the LLM client in later phases)."""
+    """Return the OpenAI key, or raise if missing."""
     key = get_secrets().openai_api_key
     if not key:
         raise RuntimeError(

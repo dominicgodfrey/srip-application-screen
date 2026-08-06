@@ -1,17 +1,13 @@
-"""Task F — optional technical-essay bonus (v3, PRD v3 §4 Stage 4b).
+"""Task F — optional technical-essay bonus (PRD v3 §4 Stage 4b).
 
-Judgment tier, **bonus-only**: this task can add 0–20 points and can never reject —
-``on_topic=false`` or ``gibberish=true`` merely zeroes the bonus (profanity was already a
-Stage-1 reject). The model judges three 0–10 signals; the deterministic layer
-(:func:`srip_filter.scoring.technical_essay.technical_essay_bonus`) prices them from
-config — the Task C "model judges, config prices" pattern. Output parses into
-:class:`srip_filter.models.TaskFOutput`.
+Bonus-only: this can never reject, and either gate flag merely zeroes the bonus. The model
+judges three 0–10 signals and config prices them, the same split as Task C.
 
-Calibration is the owner's (2026-07-04): surface-level interest scores low; sustained
-exploration scores mid; interest turned side-project turned real impact scores high.
+Calibration is the owner's (2026-07-04): surface-level interest scores low, sustained
+exploration mid, interest turned side project turned real impact high.
 
-``prompt_text`` is the question exactly as delivered in the webhook payload — never a
-frozen copy in config, so it cannot drift from the live form.
+``prompt_text`` is the question exactly as delivered in the payload — never a frozen copy in
+config, so it cannot drift from the live form.
 """
 
 from __future__ import annotations

@@ -1,19 +1,11 @@
-"""Stage 9 — output emission (Phase 7.3, PRD §10/§12).
+"""Stage 9 — output emission (PRD §10/§12).
 
-Pure serializers that turn the finalized :class:`AuditRecord` list into the five deliverables.
-Each returns an **in-memory** artifact (a ``str`` or ``dict``) so the stateless API (Phase 9) can
-hand results straight back to the user as downloadables without ever touching disk; a thin
-:func:`write_outputs` convenience writes the five files for local/CLI use.
+Pure serializers turning finalized :class:`AuditRecord`s into the five deliverables. Each
+returns an **in-memory** artifact so the stateless API can hand it straight back as a download
+without touching disk; :func:`write_outputs` writes the files for local use.
 
-Artifacts (PRD §12):
-  1. ``decisions.jsonl`` — one audit record per applicant (§9)            — :func:`decisions_jsonl`
-  2. ``ranked.csv``      — ``RANKED`` only, sorted by rank                — :func:`ranked_csv`
-  3. ``rejected.csv``    — ``REJECTED``, naming the failing gate          — :func:`rejected_csv`
-  4. ``needs_review.csv``— ``NEEDS_REVIEW``, naming the blocker           — :func:`needs_review_csv`
-  5. ``summary.json``    — counts, ``RANKED`` score histogram, review list — :func:`build_summary`
-
-All emitters are deterministic: ``ranked`` sorts by ``rank``; ``rejected``/``needs_review`` sort
-by ``submission_id`` so reruns produce byte-identical files (§12 #5).
+Every emitter is deterministic — ``ranked`` sorts by rank, the rest by ``submission_id`` — so
+reruns produce byte-identical files (§12 #5).
 """
 
 from __future__ import annotations
@@ -28,11 +20,9 @@ from .models import AuditRecord
 # Histogram bucket width for the RANKED final_score distribution in summary.json.
 _HISTOGRAM_BUCKET = 10
 
-# Leading characters a spreadsheet (Excel / Google Sheets / LibreOffice) treats as the start of
-# a formula. Applicant-controlled free text (name, choices, reasons) lands in these CSVs and is
-# opened by staff in a spreadsheet, so a cell beginning with one of these is a CSV-injection
-# vector. We neutralize it by prefixing a single quote (the spreadsheet then renders it as
-# literal text). Tab and CR are included per the OWASP guidance.
+# Leading characters a spreadsheet reads as the start of a formula. Applicant-controlled free
+# text lands in these CSVs and staff open them in Excel, so a cell starting with one of these
+# is a CSV-injection vector. Tab and CR are included per OWASP guidance.
 _FORMULA_TRIGGERS = frozenset("=+-@\t\r")
 
 # Output filenames (PRD §12).
@@ -48,13 +38,8 @@ def _by_outcome(records: list[AuditRecord], outcome: str) -> list[AuditRecord]:
 
 
 def _sanitize_cell(value: object) -> object:
-    """Neutralize spreadsheet formula injection in a string cell (CSV-injection guard).
-
-    A string whose first character is a formula trigger (``= + - @``, tab, CR) is prefixed with a
-    single quote so Excel/Sheets render it as literal text rather than evaluating it. Non-string
-    cells (ints, floats, ``None``) pass through unchanged — a numeric ``-3.0`` is a number, not a
-    formula. Pure function.
-    """
+    """Prefix a formula-triggering string with a single quote so a spreadsheet renders it as
+    literal text. Non-string cells pass through — a numeric ``-3.0`` is a number, not a formula."""
     if isinstance(value, str) and value and value[0] in _FORMULA_TRIGGERS:
         return "'" + value
     return value

@@ -1,8 +1,7 @@
-"""Tests for Stage 9 output emission (Phase 7.3). Deterministic, no API spend.
+"""Tests for Stage 9 output emission. Deterministic, no API spend.
 
-Pins the five artifacts (PRD §12): decisions.jsonl round-trips every record; ranked.csv carries
-the right columns sorted by rank; rejected.csv names the failing gate; needs_review.csv names the
-blocker; summary.json counts reconcile to the total. Also checks the on-disk ``write_outputs``.
+Pins the five artifacts (PRD §12): decisions.jsonl round-trips every record, each CSV carries
+its columns and names its gate or blocker, and summary.json's counts reconcile to the total.
 """
 
 from __future__ import annotations
@@ -78,9 +77,7 @@ def _parse_csv(text: str) -> list[list[str]]:
     return list(csv.reader(io.StringIO(text)))
 
 
-# ------------------------------------------------------------------------------------------------
-# decisions.jsonl
-# ------------------------------------------------------------------------------------------------
+# --- decisions.jsonl ---
 
 
 def test_decisions_jsonl_one_record_per_line_roundtrips() -> None:
@@ -93,9 +90,7 @@ def test_decisions_jsonl_one_record_per_line_roundtrips() -> None:
     assert [r.submission_id for r in parsed] == [r.submission_id for r in records]
 
 
-# ------------------------------------------------------------------------------------------------
-# ranked.csv
-# ------------------------------------------------------------------------------------------------
+# --- ranked.csv ---
 
 
 def test_ranked_csv_columns_and_sorted_by_rank() -> None:
@@ -118,9 +113,7 @@ def test_ranked_csv_columns_and_sorted_by_rank() -> None:
     assert rows[1][5] == "35.0"  # essay_total column
 
 
-# ------------------------------------------------------------------------------------------------
-# rejected.csv
-# ------------------------------------------------------------------------------------------------
+# --- rejected.csv ---
 
 
 def test_rejected_csv_names_the_failing_gate() -> None:
@@ -132,9 +125,7 @@ def test_rejected_csv_names_the_failing_gate() -> None:
     assert "length gate" in rows[1][3]
 
 
-# ------------------------------------------------------------------------------------------------
-# needs_review.csv
-# ------------------------------------------------------------------------------------------------
+# --- needs_review.csv ---
 
 
 def test_needs_review_csv_names_the_blocker() -> None:
@@ -144,9 +135,7 @@ def test_needs_review_csv_names_the_blocker() -> None:
     assert "GPA scale" in rows[1][2]
 
 
-# ------------------------------------------------------------------------------------------------
-# summary.json
-# ------------------------------------------------------------------------------------------------
+# --- summary.json ---
 
 
 def test_summary_counts_reconcile() -> None:
@@ -175,9 +164,7 @@ def test_summary_empty_ranked_histogram_is_empty() -> None:
     assert summary["counts"] == {"total": 1, "RANKED": 0, "REJECTED": 1, "NEEDS_REVIEW": 0}
 
 
-# ------------------------------------------------------------------------------------------------
-# write_outputs (on-disk convenience)
-# ------------------------------------------------------------------------------------------------
+# --- write_outputs (on-disk convenience) ---
 
 
 def test_write_outputs_writes_five_files(tmp_path) -> None:
@@ -196,9 +183,7 @@ def test_outputs_are_deterministic_across_calls() -> None:
     assert build_summary(records) == build_summary(records)
 
 
-# ------------------------------------------------------------------------------------------------
-# CSV formula-injection guard
-# ------------------------------------------------------------------------------------------------
+# --- CSV formula-injection guard ---
 
 
 def test_csv_injection_in_name_is_neutralized() -> None:

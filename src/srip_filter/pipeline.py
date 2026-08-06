@@ -3,20 +3,11 @@
 The transport-agnostic core that wires the stages together; ``api/`` is a thin shell over
 :func:`make_grade_fn`. Nothing here knows about HTTP.
 
-Fail-fast order — hard rejections precede soft routing, so an applicant who both fails a
-hard gate *and* leaves a blocker blank is ``REJECTED``, never ``NEEDS_REVIEW`` (§0.7):
+Stages run in fail-fast order, hard rejections before soft routing, so an applicant who both
+fails a hard gate *and* leaves a blocker blank is ``REJECTED``, never ``NEEDS_REVIEW`` (§0.7).
 
-  Stage 1  essay gates          → REJECTED (gibberish) / NEEDS_REVIEW (profanity), no LLM spend
-  Stage 2-3 GPA                 → REJECTED / NEEDS_REVIEW
-  Stage 4  required essays      → REJECTED / NEEDS_REVIEW
-  Stage 4b technical essay      → bonus only
-  Stages 5/6/7 bonuses          → additive only (never change the outcome)
-  survivor                      → RANKED, final_score composed here (rank is read-time, §7)
-
-``llm_calls`` is inferred from the stage results rather than by instrumenting the client: a
-GPA assessment with ``source="llm"`` means Task A ran, a populated ``explanation_eval``
-means Task B ran; reaching Stage 4 means both Task D calls were attempted; a non-empty
-coursework cell means Task C.
+``llm_calls`` is inferred from the stage results rather than by instrumenting the client —
+e.g. a GPA assessment with ``source="llm"`` means Task A ran.
 """
 
 from __future__ import annotations
@@ -42,12 +33,11 @@ from .scoring.school import score_school
 from .scoring.technical_essay import score_technical_essay
 from .worker import GradeResult
 
-# The AuditRecord Outcome literal has no "pending" value, so RANKED is the non-terminal
-# placeholder a base record starts at — a hard gate may overwrite it with
-# REJECTED/NEEDS_REVIEW before the record is ever scored.
+# The Outcome literal has no "pending" value, so a base record starts here and a hard gate
+# may overwrite it before the record is ever scored.
 _PLACEHOLDER_OUTCOME = "RANKED"
 
-# decided_at_stage labels (PRD §4 pipeline); "error" marks the per-row isolation fallback.
+# decided_at_stage labels; "error" marks the per-row isolation fallback.
 _STAGE_1 = "stage1"
 _STAGE_3 = "stage3"
 _STAGE_4 = "stage4"
@@ -66,12 +56,8 @@ def _terminal(record: AuditRecord, outcome: str, stage: str, reason: str) -> Aud
 
 
 def _reconcile_gibberish(stage1: Stage1Result, stage4: Stage4Result) -> HitGate:
-    """Merge Stage 1's heuristic gibberish finding with Task D's per-essay backstop.
-
-    Terms stay essay-attributed (``e1:``/``e2:`` prefixes) so the audit UI can open and
-    highlight the right essay: Stage 1 already prefixes its fired signal names; a Task D
-    backstop hit contributes ``eN:task_d`` for whichever essay the model flagged.
-    """
+    """Merge Stage 1's heuristic gibberish finding with Task D's backstop, keeping terms
+    essay-attributed (``eN:``) so the audit UI can highlight the right essay."""
     terms = list(stage1.gibberish.terms)
     for n, grade in ((1, stage4.e1_grade), (2, stage4.e2_grade)):
         if grade is not None and grade.is_gibberish:
@@ -79,12 +65,8 @@ def _reconcile_gibberish(stage1: Stage1Result, stage4: Stage4Result) -> HitGate:
     return HitGate(hit=stage1.gibberish.hit or stage4.gibberish.hit, terms=terms)
 
 
-# ================================================================================================
-# The per-application runner
-# ================================================================================================
-# One applicant, driven by a WebhookApplicant mapped from the stored payload. The score is
-# composed here on the way out; rank is computed at read time, per cohort, and never stored
-# (§7). `bypass_gates` is the manual-promote path and the only other caller.
+# --- The per-application runner ---
+# The score is composed here on the way out; rank is read-time, per cohort, never stored (§7).
 
 _STAGE_4B = "stage4b"
 
@@ -123,22 +105,20 @@ async def grade_webhook_applicant(
     *,
     bypass_gates: bool = False,
 ) -> AuditRecord:
-    """Grade one webhook application through the v3 fail-fast pipeline (PRD v3 §4).
+    """Grade one webhook application through the fail-fast pipeline (PRD v3 §4).
 
     Returns a terminal record: ``REJECTED``/``NEEDS_REVIEW`` unscored, or ``RANKED`` with
-    ``final_score`` composed (rank stays None — computed at read time per cohort, §7).
-    Per-row isolation: any unexpected error → ``NEEDS_REVIEW`` with an ``errors[]`` note.
+    ``final_score`` composed. Any unexpected error becomes ``NEEDS_REVIEW`` plus an
+    ``errors[]`` note (invariant #9).
 
-    ``bypass_gates`` is the manual-promote path (PRD v3 §6, the v2 ``rescore_one``
-    semantics): every gate verdict is still computed and recorded in the audit blocks,
-    but none is terminal — unscoreable signals contribute 0 and the record leaves as
-    ``RANKED`` with ``manual_override=True``. Never used by the worker.
+    ``bypass_gates`` is the manual-promote path (PRD v3 §6), never used by the worker: every
+    gate verdict is still computed and recorded, but none is terminal — unscoreable signals
+    contribute 0 and the record leaves ``RANKED`` with ``manual_override=True``.
     """
     record = _build_webhook_base_record(applicant)
     row = applicant.row
     try:
-        # A payload that did not deliver two required essays is unscoreable — NEEDS_REVIEW
-        # before any gate could misread the blanks as an applicant failure (§0.7).
+        # Unscoreable before any gate can misread the blanks as an applicant failure (§0.7).
         essays_scoreable = not applicant.missing_required_essays
         if applicant.missing_required_essays and not bypass_gates:
             return _terminal(
@@ -148,9 +128,7 @@ async def grade_webhook_applicant(
                 "Payload delivered fewer than two required essays (contract drift)",
             )
 
-        # Stage 1 — profanity (ALL essays) + gibberish (required essays). Gibberish rejects;
-        # profanity routes to a human (owner, 2026-07-29) because the gate is a word list and
-        # cannot distinguish a slur from ordinary vocabulary in context. Rejection is checked
+        # Stage 1 — gibberish rejects, profanity routes to a human. Rejection is checked
         # first: where both fire, the definite verdict wins (PRD §0.7).
         stage1 = run_essay_gates_v3(applicant, cfg)
         record.gates.essay_length = stage1.length_gate
@@ -180,12 +158,12 @@ async def grade_webhook_applicant(
         if gpa.verdict == "pass":
             record.scores.gpa_points = gpa.gpa_points
             record.reasons.append(f"PASS gpa_gate: {gpa.gate.reason}")
-        else:  # bypassed reject/needs_review: unscoreable GPA contributes 0, never blocks
+        else:  # bypassed: an unscoreable GPA contributes 0, never blocks
             record.scores.gpa_points = 0.0
             record.reasons.append(f"OVERRIDE: gpa gate bypassed ({gpa.reason}); 0 points")
 
-        # Stage 4 — required essays (Task D ×2), 0-15 each; prompts + target ranges come
-        # from the payload itself, so they can never drift from the live form.
+        # Stage 4 — required essays (Task D ×2); prompts come from the payload itself, so
+        # they can never drift from the live form.
         if essays_scoreable:
             stage4 = await grade_essays(
                 row,
@@ -193,8 +171,7 @@ async def grade_webhook_applicant(
                 applicant.e2.question or "(essay question not delivered in payload)",
                 client,
                 cfg,
-                # No per-essay range: the payload carries no bounds, so Task D uses its
-                # module default (the live required essays are both 100-350 anyway).
+                # No per-essay range: the payload carries no bounds, so Task D uses its default.
             )
             record.llm_calls.extend(("task_d_e1", "task_d_e2"))
             record.gates.essay_relevance = stage4.essay_relevance
@@ -213,7 +190,7 @@ async def grade_webhook_applicant(
                     f"OVERRIDE: essay gate bypassed ({stage4.primary_reason}); "
                     "gated essays score 0"
                 )
-        else:  # bypass with missing essays: nothing to grade, contributes 0
+        else:  # bypass with missing essays: nothing to grade
             record.reasons.append("OVERRIDE: required essays missing from payload; essays 0")
 
         # Stage 4b — technical-essay bonus (Task F; bonus-only, absent → free no-op).
@@ -222,8 +199,8 @@ async def grade_webhook_applicant(
             applicant.e3.question or "(technical essay prompt not delivered in payload)",
             client,
             cfg,
-            # No max_words: the site server-validates the 500-word cap at submit, so the
-            # over-max rung cannot fire from a real applicant.
+            # No max_words: the site server-validates the cap at submit, so the over-max
+            # rung cannot fire from a real applicant.
         )
         record.scores.technical_essay_bonus = stage4b.bonus
         record.technical_essay = stage4b.assessment
@@ -245,7 +222,7 @@ async def grade_webhook_applicant(
         if counting:
             record.reasons.append(f"coursework: {counting} counting course(s)")
 
-        # Stage 6 — resume bonus (behind the pluggable seam; bonus_max=0 → free no-op).
+        # Stage 6 — resume bonus (bonus_max=0 → free no-op).
         stage6 = await score_resume(row, fetcher, client, cfg)
         record.scores.resume_bonus = stage6.bonus
         record.resume = stage6.assessment
@@ -263,7 +240,7 @@ async def grade_webhook_applicant(
                 f"school match: {school.match.matched_name} ({school.match.list})"
             )
 
-        # Survivor — compose the score now (Stage 8); rank is read-time, per cohort (§7).
+        # Survivor — compose the score (Stage 8); rank is read-time, per cohort (§7).
         record.outcome = "RANKED"
         if bypass_gates:
             record.manual_override = True
@@ -282,21 +259,14 @@ async def grade_webhook_applicant(
 def make_grade_fn(
     client: BaseLLMClient, cfg: AppConfig, fetcher: ResumeFetcher | None = None
 ):
-    """Bind the runner into the worker's ``GradeFn`` shape (P3 seam).
+    """Bind the runner into the worker's ``GradeFn`` shape.
 
-    The claimed DB row carries the raw stored payload; it is re-validated here (it was
-    validated at the edge, but the DB is not trusted blindly) and mapped through
-    :func:`~srip_filter.ingest_webhook.map_application_payload`. Deliveries that did not
-    request essay grading never reach this seam — they are parked in ``'stored'`` and are
-    never claimed. A corrupt payload raises into the worker's per-row handler, which
-    records ``NEEDS_REVIEW`` + ``status='error'`` (invariant #9).
+    The stored payload is re-validated here — it passed validation at the edge, but the DB is
+    not trusted blindly. A corrupt one raises into the worker's per-row handler (invariant #9).
 
-    **Stage 6:** when ``resume.bonus_max > 0`` a :class:`ResumeFetcher` is built here unless
-    the caller supplied one, and it lives as long as the returned ``grade_fn`` (one drain
-    invocation). Without it ``score_resume`` no-ops on ``fetcher is None``, so raising
-    ``bonus_max`` alone used to leave the stage silently dead — every applicant scoring a 0
-    resume bonus with no error anywhere, which is the worst way for a stage to be off. The
-    kill switch still costs nothing: at ``bonus_max: 0`` no fetcher and no client are built.
+    The Stage-6 fetcher is built off ``resume.bonus_max``, so raising it is what turns the
+    stage on: without a fetcher ``score_resume`` no-ops silently, which is the worst way for a
+    stage to be off. At ``bonus_max: 0`` nothing is built and the kill switch stays free.
     """
     if fetcher is None and cfg.resume.bonus_max > 0:
         fetcher = ResumeFetcher(cfg)

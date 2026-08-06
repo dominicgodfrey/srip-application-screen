@@ -1,15 +1,11 @@
-"""Task D — essay grading: gibberish backstop + relevance gate + quality (PRD §4, §8.3).
+"""Task D — essay grading: gibberish backstop, relevance gate, quality (PRD §4, §8.3).
 
-Runs once per essay on Stage 1-3 survivors. Two of its outputs are *gates* that disqualify the
-whole application — ``is_gibberish`` (the LLM backstop to the cheap Stage 1 heuristics) and
-``on_topic`` (the relevance gate) — while the remaining fields feed the additive essay score.
-Length/profanity/the cheap gibberish heuristics already passed deterministically (Stage 1);
-this task adds the judgment those cannot make. Output parses into
-:class:`srip_filter.models.TaskDOutput`.
+Runs once per essay on Stage 1-3 survivors, adding the judgment the deterministic gates cannot
+make. Two of its outputs are gates that disqualify the whole application; the rest feed the
+additive essay score.
 
-``prompt_text`` is the *resolved CSV essay-question header* — the exact prompt the applicant
-answered — supplied by the orchestrator from ``HeaderResolution.role_to_header``. It is never a
-frozen copy in config, so it cannot drift from the form per cycle.
+``prompt_text`` is the question exactly as delivered in the payload — never a frozen copy in
+config, so it cannot drift from the live form.
 """
 
 from __future__ import annotations

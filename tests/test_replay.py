@@ -1,8 +1,8 @@
-"""P7 — replay-tool conversion tests (no network; the send path is exercised in E2E).
+"""Replay-tool conversion tests; no network, since the send path is exercised end to end.
 
-Proves the CSV→payload conversion emits the LIVE combined contract exactly (it must
-round-trip through the real edge models), that submission-id mapping is deterministic,
-and that the synthetic fixtures are contract-valid and span the outcome space.
+Proves the CSV→payload conversion emits the live contract exactly — it must round-trip through
+the real edge models — that id mapping is deterministic, and that the fixtures span the
+outcome space.
 """
 
 from __future__ import annotations

@@ -1,22 +1,12 @@
-"""Stage 6 resume PDF text extraction (Phase 12.3, PRD §7.2).
+"""Stage 6 resume PDF text extraction (PRD §7.2). Pure: bytes in, text out, and it never raises
+— every failure is a typed reason that becomes a 0 bonus plus an audit note.
 
-Pure transformation: PDF bytes in, plain text out — no network, no LLM. Sits between the
-download layer (:mod:`srip_filter.resume_fetch`) and Task E. Mirrors the fetch layer's
-bonus-only discipline: :func:`extract_resume_text` **never raises** — every failure becomes a
-typed reason the Stage 6 aggregator turns into a 0 bonus plus an audit note, never a block.
+``pypdf`` over the PRD's ``pdfplumber``: a much lighter tree for text-only extraction
+(documented deviation), and there is deliberately no OCR dependency, so a scanned PDF is a
+typed failure. Magic bytes are checked first so a non-PDF fails cheaply, and page iteration
+stops at ``resume.max_text_chars``, which bounds Task E spend and makes a 200-page upload free.
 
-Design points:
-
-* ``pypdf`` over the PRD's ``pdfplumber`` — a much lighter dependency tree for text-only
-  extraction on small hosts (documented deviation).
-* Magic-bytes check first, so a non-PDF upload (image, docx, HTML error page) fails fast and
-  cheaply with ``not_a_pdf``.
-* Extracted text is capped at ``resume.max_text_chars`` (bounds Task E token spend); page
-  iteration stops as soon as the cap is reached, so a 200-page upload costs no extra work.
-* A PDF with no extractable text (scanned/image-only) is a typed failure — there is
-  deliberately **no OCR dependency** (hosting analysis: keep the tree small).
-* The caller discards the PDF bytes immediately after this returns (the per-applicant
-  fetch → extract → discard memory rule); nothing here retains or logs resume content.
+Nothing here retains or logs resume content; the caller discards the bytes on return.
 """
 
 from __future__ import annotations
@@ -37,8 +27,7 @@ FAIL_PDF_ENCRYPTED = "pdf_encrypted"
 FAIL_PDF_PARSE = "pdf_parse_error"
 FAIL_NO_TEXT = "no_extractable_text"
 
-# %PDF- must appear near the start; some generators prepend a little junk, so search a
-# small window rather than byte 0 only.
+# Some generators prepend junk, so search a small window rather than byte 0 only.
 _MAGIC = b"%PDF-"
 _MAGIC_WINDOW = 1024
 
@@ -61,12 +50,7 @@ def _fail(reason: str) -> ExtractResult:
 
 
 def extract_resume_text(content: bytes, cfg: AppConfig) -> ExtractResult:
-    """Extract plain text from PDF bytes, capped at ``resume.max_text_chars``. Never raises.
-
-    Failure reasons: ``not_a_pdf`` (magic bytes missing), ``pdf_encrypted`` (password-protected
-    beyond an empty-password unlock), ``pdf_parse_error`` (malformed), ``no_extractable_text``
-    (scanned/image-only — no OCR by design).
-    """
+    """Extract plain text from PDF bytes, capped at ``resume.max_text_chars``. Never raises."""
     if _MAGIC not in content[:_MAGIC_WINDOW]:
         return _fail(FAIL_NOT_PDF)
     max_chars = cfg.resume.max_text_chars
@@ -74,7 +58,7 @@ def extract_resume_text(content: bytes, cfg: AppConfig) -> ExtractResult:
         reader = PdfReader(BytesIO(content))
         if reader.is_encrypted:
             try:
-                if not reader.decrypt(""):  # some PDFs are "encrypted" with an empty password
+                if not reader.decrypt(""):  # some are "encrypted" with an empty password
                     return _fail(FAIL_PDF_ENCRYPTED)
             except Exception:
                 return _fail(FAIL_PDF_ENCRYPTED)

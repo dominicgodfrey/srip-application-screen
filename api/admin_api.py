@@ -1,24 +1,10 @@
-"""Admin JSON API over the live database (P6, PRD v3 §6).
+"""Admin JSON API over the live database (PRD v3 §6) — the review UI's data source.
 
-The review UI's data source: everything here reads/writes ``applications`` via
-``srip_filter.db`` and is session-gated by the P5 middleware (this module adds no auth of
-its own). Rank is assigned at read time, per cohort, on every response — never stored.
+Everything here goes through ``srip_filter.db`` and is session-gated by the middleware; this
+module adds no auth of its own. Rank is assigned at read time, per cohort, on every response.
 
-Routes (all under ``/api``):
-
-* ``GET    /api/applications``               — dashboard listing (+ ``?cohort=`` filter)
-* ``GET    /api/applications/{sid}``         — one full record (status + audit record)
-* ``POST   /api/applications/{sid}/promote`` — manual re-score with gates bypassed (LLM spend)
-* ``POST   /api/applications/{sid}/demote``  — manual removal from the ranking (no spend)
-* ``DELETE /api/applications/{sid}``         — hard delete (individual removal requests)
-* ``GET    /api/exports/{artifact}``         — decisions.jsonl / CSVs / summary from the DB
-* ``POST   /api/cohorts``                    — cohort what-if over the live ranking
-* ``POST   /api/admin/migrate``              — apply pending migrations (P11.3 bootstrap)
-* ``GET    /api/admin/purge-preview``        — what a purge would destroy (read-only)
-* ``POST   /api/admin/purge``                — bulk hard delete, count-guarded (§9)
-
-Manual overrides append a non-PII ``events`` entry with ``decided_by`` (PRD v3 §1.1);
-under the shared-password model that is the literal ``"admin"``.
+Manual overrides append a non-PII ``events`` entry with ``decided_by``, which under the shared
+credential is the literal ``"admin"``.
 """
 
 from __future__ import annotations
@@ -48,15 +34,13 @@ from .schemas import PurgeRequest
 
 logger = logging.getLogger(__name__)
 
-DECIDED_BY = "admin"  # single shared credential (P5) — the only identity available
+DECIDED_BY = "admin"  # one shared credential — the only identity available
 
 _Capacity = Annotated[int | None, Query(ge=0, description="Seat cap; omit for unlimited.")]
 
-# `applications.submission_id` is a UUID column, so asyncpg raises on any value it cannot
-# encode as one. Typing the path param makes FastAPI reject a malformed id with a 422 at
-# the edge, instead of letting it reach the driver and surface as a 500 — the same
-# never-a-500-on-bad-input rule the webhook edge follows. Handlers immediately stringify
-# it, so the store layer's `str` contract is unchanged.
+# Typed so FastAPI rejects a malformed id with a 422 at the edge rather than letting asyncpg
+# raise on the UUID column and surface as a 500. Handlers stringify it immediately, so the
+# store layer's `str` contract is unchanged.
 SubmissionId = uuid.UUID
 
 
@@ -68,7 +52,7 @@ def _record_from_row(row: dict[str, Any]) -> AuditRecord | None:
     try:
         return AuditRecord.model_validate(raw)
     except ValidationError:
-        # A record written by an older schema version must not 500 the dashboard.
+        # A record from an older schema version must not 500 the dashboard.
         logger.warning("stored audit_record failed validation sid=%s", row["submission_id"])
         return None
 
@@ -85,11 +69,10 @@ def _ranked_records(rows: list[dict[str, Any]]) -> dict[str, AuditRecord]:
 
 
 def _summary_row(row: dict[str, Any], record: AuditRecord | None) -> dict[str, Any]:
-    """One listing entry — identity, status, outcome and GPA. Never essay text.
+    """One listing entry — identity, status, outcome and GPA, never essay text.
 
-    Feeds both the dashboard and the audit browser's table. ``gpa`` carries the normalized
-    value plus the raw cell, because a reviewer working the NEEDS_REVIEW queue needs to see
-    what the applicant actually typed when normalization could not resolve it.
+    ``gpa`` carries the raw cell alongside the normalized value, because a reviewer working
+    the NEEDS_REVIEW queue has to see what the applicant actually typed.
     """
     gpa = record.gpa if record else None
     return {
@@ -128,21 +111,14 @@ def register_admin_api(app: FastAPI) -> None:
 
     @app.post("/api/admin/migrate", response_model=None, tags=["admin"])
     async def migrate() -> dict:
-        """Apply pending migrations (P11.3) — the manual first run on a new database.
-
-        Session-gated like everything else under ``/api``. The cron drain runs the same
-        advisory-locked pass every minute, so this is only needed to bootstrap a database
-        before any cron has fired.
-        """
+        """Apply pending migrations — the manual first run on a new database. The cron drain
+        runs the same advisory-locked pass every minute, so this only bootstraps."""
         return {"applied": await dbmod.apply_migrations(_pool())}
 
     @app.get("/api/applications", response_model=None, tags=["admin"])
     async def list_applications(cohort: str | None = None) -> dict:
-        """Live cohort listing with read-time ranks and outcome counts.
-
-        The summary projection, not the full rows: this is the most-hit endpoint in the
-        service and none of it renders essay text or the stored payload.
-        """
+        """Live cohort listing with read-time ranks and outcome counts. The summary projection,
+        not full rows — this is the most-hit endpoint and renders no essay text."""
         pool = _pool()
         rows = await dbmod.list_application_summaries(pool, cohort_name=cohort)
         records = _ranked_records(rows)
@@ -157,13 +133,11 @@ def register_admin_api(app: FastAPI) -> None:
 
     @app.get("/api/applications/{submission_id}", response_model=None, tags=["admin"])
     async def get_application(submission_id: SubmissionId) -> dict:
-        """One applicant: lifecycle status + the full audit record (rank read-time).
+        """One applicant: lifecycle status plus the full audit record.
 
-        Two reads on purpose. The applicant's own row is fetched whole — the audit UI needs
-        the essay text for highlight-on-reject. Their *rank* only exists relative to the
-        cohort, so the cohort is read through the summary projection and the resulting rank
-        copied onto the full record. Ranking the cohort off full rows meant opening one
-        audit detail loaded every payload and every essay in that cohort.
+        Two reads on purpose. Their own row comes whole, since the audit UI needs the essay
+        text; their *rank* only exists relative to the cohort, which is read through the
+        summary projection — ranking off full rows loaded every essay in the cohort.
         """
         pool = _pool()
         sid = str(submission_id)
@@ -186,11 +160,8 @@ def register_admin_api(app: FastAPI) -> None:
         "/api/applications/{submission_id}/promote", response_model=None, tags=["admin"]
     )
     async def promote(submission_id: SubmissionId) -> dict:
-        """Manually promote into the ranking: full re-score with gates recorded-but-bypassed.
-
-        Spends LLM tokens (the re-score); the durable cache makes unchanged fields free.
-        409 for already-RANKED or not-yet-graded rows; 409 when no payload is stored.
-        """
+        """Manually promote into the ranking: a full re-score with gates recorded but bypassed.
+        Spends LLM tokens, though the durable cache makes unchanged fields free."""
         pool = _pool()
         sid = str(submission_id)
         row = await _row_or_404(pool, sid)
@@ -228,10 +199,8 @@ def register_admin_api(app: FastAPI) -> None:
         "/api/applications/{submission_id}/demote", response_model=None, tags=["admin"]
     )
     async def demote(submission_id: SubmissionId) -> dict:
-        """Manually remove a RANKED applicant from the ranking (→ REJECTED). No LLM spend.
-
-        Every gate verdict and subscore stays on the record; reversible via promote.
-        """
+        """Manually remove a RANKED applicant from the ranking. No LLM spend, every gate verdict
+        stays on the record, and promote reverses it."""
         pool = _pool()
         sid = str(submission_id)
         row = await _row_or_404(pool, sid)
@@ -277,19 +246,16 @@ def register_admin_api(app: FastAPI) -> None:
     @app.get("/api/admin/purge-preview", response_model=None, tags=["admin"])
     async def purge_preview(cohort: str | None = None) -> dict:
         """What a purge of this scope would destroy — the confirmation dialog's source.
-
-        Read-only. ``cohort`` omitted means every cohort (a full wipe, which also clears
-        ``llm_cache``). Returns counts and date spans only, never applicant fields.
-        """
+        Read-only, and returns counts and date spans only, never applicant fields."""
         return await dbmod.purge_preview(_pool(), cohort_name=cohort)
 
     @app.post("/api/admin/purge", response_model=None, tags=["admin"])
     async def purge(body: PurgeRequest) -> dict:
         """Hard-delete every application in scope (PRD v3 §9). Irreversible; tombstoned.
 
-        ``expected_count`` must match the live count or this 409s without deleting anything:
-        webhook deliveries keep landing while a human reads the dialog, and the operator only
-        consented to the number they were shown. The client re-previews and asks again.
+        ``expected_count`` must match the live count or this 409s without deleting anything —
+        deliveries keep landing while a human reads the dialog, and the operator consented only
+        to the number they were shown.
         """
         try:
             receipt = await dbmod.purge_applications(

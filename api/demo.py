@@ -1,22 +1,12 @@
-"""Dev-only demo LLM handler (Phase 10).
+"""Dev-only demo LLM handler, active only under ``SRIP_DEV_FAKE_LLM=1``, so the whole UI can be
+demoed end to end with no API key and zero token spend.
 
-A tiny, deterministic stand-in for the OpenAI calls so the **whole UI can be demoed end-to-end
-with no API key and zero token spend**. Activated only when the app is launched with the
-``SRIP_DEV_FAKE_LLM=1`` environment flag (see ``api.main``); production always uses the real
-:class:`~srip_filter.llm.client.OpenAILLMClient`.
+Outputs are deliberately *optimistic* (on-topic, plausible grades) so gate-survivors become
+richly-scored ``RANKED`` records — what makes the audit browser worth looking at. Outcome
+variety comes from the deterministic gates, which run first. Two sentinels, ``[[OFFTOPIC]]``
+and ``[[GIBBERISH]]``, let a crafted demo CSV exercise the LLM-driven reject paths.
 
-It returns *optimistic* outputs (on-topic, non-gibberish, plausible grades) so gate-survivors
-become richly-scored ``RANKED`` records — exactly what makes the audit browser and cohort tool
-worth looking at. Outcome variety in a demo run comes from the **deterministic** gates instead
-(short essays → REJECTED, blank/low GPA → REJECTED/NEEDS_REVIEW), which run before any LLM call.
-
-Two sentinels let a crafted demo CSV exercise the LLM-driven reject/needs-review paths:
-
-* an essay containing ``[[OFFTOPIC]]``  → Task D ``on_topic = False`` (off-topic REJECTED);
-* an essay containing ``[[GIBBERISH]]`` → Task D ``is_gibberish = True`` (gibberish REJECTED).
-
-This module imports nothing from FastAPI and is never used by the test suite (which injects its
-own scripted ``FakeLLMClient``). It is intentionally simple and clearly dev-only.
+Never used by the test suite, which injects its own scripted ``FakeLLMClient``.
 """
 
 from __future__ import annotations
@@ -67,8 +57,8 @@ def _task_b(user: str) -> TaskBOutput:
     )
 
 
-# Grade tokens interleaved in a run of courses: a letter grade after a dash ("Biology - A"),
-# or a standalone fraction/percentage ("Biology 9/10", "AP Calc 92%") — no dash required.
+# Grade tokens interleaved in a run of courses: a letter after a dash ("Biology - A"), or a
+# standalone fraction/percentage ("AP Calc 92%") with no dash.
 _GRADE_RE = re.compile(
     r"(?:-\s*[A-DF][+\-]?\*?|\d{1,3}(?:\.\d+)?\s*/\s*\d{1,3}|\d{1,3}(?:\.\d+)?\s*%)(?=\s|$)"
 )
@@ -126,14 +116,10 @@ def _split_pairs(fragment: str) -> list[tuple[str, str]]:
 
 
 def _task_c(user: str) -> TaskCOutput:
-    """Decompose the coursework cell with light splitting (demo only).
-
-    Splits on commas/semicolons/newlines, then unpacks grade-interleaved runs — both
-    "Name - A Name2 - B" dash pairs and "Name 9/10 Name2 92%" fraction/percent pairs.
-    A course without an explicit grade gets grade_pct=None (never an invented grade) —
-    matching the real Task C contract.
-    """
-    # The user prompt wraps the raw cell as COURSEWORK_RAW: """...""" — pull the inner text.
+    """Decompose the coursework cell with light splitting: separators first, then
+    grade-interleaved runs. A course with no explicit grade gets ``grade_pct=None`` rather than
+    an invented one, matching the real Task C contract."""
+    # The prompt wraps the raw cell in triple quotes — pull the inner text back out.
     inner = user
     match = re.search(r'"""(.*)"""', user, flags=re.DOTALL)
     if match:
@@ -174,8 +160,7 @@ def _task_d(user: str) -> TaskDOutput:
 
 
 def _task_e(user: str) -> TaskEOutput:
-    """Extract plausible resume signals (demo only; reached only if a demo CSV carries a
-    fetchable resume URL — the shipped sample leaves the column blank)."""
+    """Extract plausible resume signals; reached only if a demo CSV carries a fetchable URL."""
     return TaskEOutput(
         is_resume=True,
         relevant_projects=2,
@@ -188,12 +173,8 @@ def _task_e(user: str) -> TaskEOutput:
 
 
 def _task_f(user: str) -> TaskFOutput:
-    """Score the optional technical essay mid-range (demo only).
-
-    Deliberately not full marks: a demo where every bonus maxes out hides the arithmetic.
-    Honors the same two sentinels as Task D, which here only zero the bonus — Stage 4b can
-    never reject.
-    """
+    """Score the optional technical essay mid-range — deliberately not full marks, since a demo
+    where every bonus maxes out hides the arithmetic. The sentinels only zero the bonus here."""
     off_topic = _OFFTOPIC in user
     gibberish = _GIBBERISH in user
     return TaskFOutput(
@@ -207,12 +188,8 @@ def _task_f(user: str) -> TaskFOutput:
 
 
 def demo_handler(task: str, user: str, schema: type[BaseModel]) -> BaseModel:
-    """Route a faked LLM call to the matching optimistic builder.
-
-    Matches the :data:`~srip_filter.llm.client.FakeHandler` signature
-    ``(task, user, schema) -> BaseModel``; ``schema`` is unused (we construct the concrete
-    contract model directly).
-    """
+    """Route a faked LLM call to the matching builder. ``schema`` is unused — each builder
+    constructs its concrete contract model directly."""
     builders: dict[TaskName, object] = {
         "task_a": _task_a,
         "task_b": _task_b,

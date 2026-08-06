@@ -1,15 +1,8 @@
 """Stage 1 — essay deterministic gates (PRD v3 §4).
 
-Cheap, LLM-free checks that run on every essay before any token is spent:
-
-  * :func:`word_count`      — audit data only; **no length rule rejects anyone**
-  * :func:`profanity_gate`  — all essays; a hit routes to NEEDS_REVIEW (+ wordlist loader)
-  * :func:`gibberish_gate`  — required essays; a hit REJECTS
-  * :func:`run_essay_gates_v3` — the aggregator the pipeline calls
-
-The gibberish math is pure; the profanity gate depends on a loaded wordlist (file I/O at
-construction only), so it takes its matcher as an argument or lazily builds a cached
-default. Thresholds come from ``AppConfig``.
+LLM-free checks run before any token is spent: profanity over all essays (a hit routes to
+NEEDS_REVIEW), gibberish over the required ones (a hit rejects), and word counts as audit data
+only — **no length rule rejects anyone**. Thresholds come from ``AppConfig``.
 """
 
 from __future__ import annotations
@@ -30,13 +23,10 @@ from ..models import EssayLengthGate, HitGate
 if TYPE_CHECKING:  # circular-import guard: ingest_webhook is a pure-mapping consumer
     from ..ingest_webhook import WebhookApplicant
 
-# resources/profanity.txt lives at the project root (see config.project_root — the source
-# tree and an installed package resolve it differently).
 DEFAULT_PROFANITY_PATH = project_root() / "resources" / "profanity.txt"
 _ALLOW_PREFIX = "ALLOW:"
 
-# PRD §2 word-count rule: tokens are runs of word chars, apostrophes, and hyphens. This is the
-# single source of truth for "how long is an essay" across the whole pipeline.
+# PRD §2 tokenizer — the single source of truth for "how long is an essay".
 _WORD_RE = re.compile(r"[\w'-]+")
 
 
@@ -45,14 +35,10 @@ def word_count(text: str) -> int:
     return len(_WORD_RE.findall(text))
 
 
-# ================================================================================================
-# 2.2 — Profanity gate (PRD §4.2)
-# ================================================================================================
-# Built on better-profanity (whole-token matching, case-insensitive, light leetspeak via its
-# CHARS_MAPPING). The matcher = better-profanity's DEFAULT list + our curated BLOCK terms − our
-# medical/anatomical ALLOW terms, so clinical vocabulary in a good-faith extenuating-circumstances
-# explanation never trips the gate. The curated lists currently live as an inert placeholder in
-# resources/profanity.txt; until it is filled, the gate behaves as the default list.
+# --- Profanity gate (PRD §4.2) ---
+# matcher = better-profanity's default list + curated BLOCK terms − medical/anatomical ALLOW
+# terms, so clinical vocabulary in a good-faith explanation never trips the gate. The curated
+# lists in resources/profanity.txt are still an inert placeholder.
 
 
 @dataclass(frozen=True)
@@ -64,12 +50,9 @@ class ProfanityWordlist:
 
 
 def load_profanity_wordlist(path: str | Path = DEFAULT_PROFANITY_PATH) -> ProfanityWordlist:
-    """Parse the profanity wordlist file into BLOCK and ALLOW term tuples.
+    """Parse the wordlist into BLOCK and ALLOW terms (see the file's own header for the format).
 
-    Format (see the file's own header): blank lines and ``#`` comments are ignored; a line
-    starting with ``ALLOW:`` is a medical/anatomical exemption; every other non-comment line is
-    a term to block. Terms are lowercased for case-insensitive matching. A missing file yields
-    empty lists (the gate then == better-profanity's default list) rather than raising.
+    A missing file yields empty lists — the gate then equals better-profanity's default.
     """
     file_path = Path(path)
     if not file_path.exists():
@@ -92,10 +75,8 @@ def load_profanity_wordlist(path: str | Path = DEFAULT_PROFANITY_PATH) -> Profan
 def build_profanity_matcher(path: str | Path = DEFAULT_PROFANITY_PATH) -> Profanity:
     """Build a configured :class:`Profanity` matcher: default list + BLOCK − ALLOW.
 
-    Loads better-profanity's built-in list, adds our curated BLOCK terms, then drops any entry
-    (default or added) matching an ALLOW term so clinical/anatomical words are exempt.
-    ``CENSOR_WORDSET`` is a plain list, so the allow filter is a straightforward comprehension;
-    ``VaryingString`` compares equal to a plain string, which is what powers the match.
+    ``CENSOR_WORDSET`` entries are ``VaryingString``s, which compare equal to a plain string —
+    that is what lets the ALLOW filter be a straight comprehension.
     """
     wordlist = load_profanity_wordlist(path)
     matcher = Profanity()
@@ -111,28 +92,20 @@ def build_profanity_matcher(path: str | Path = DEFAULT_PROFANITY_PATH) -> Profan
 
 @lru_cache(maxsize=1)
 def _default_matcher() -> Profanity:
-    """Lazily build and cache the matcher from the default wordlist path (built once per run)."""
+    """Build the matcher from the default wordlist path once per run."""
     return build_profanity_matcher()
 
 
 def profanity_gate(text: str, matcher: Profanity | None = None) -> bool:
-    """Return ``True`` if ``text`` contains profanity/a slur (a hard-reject signal, PRD §4.2).
-
-    Empty/whitespace text is never a hit. Pass an explicit ``matcher`` (e.g. in tests) or rely
-    on the cached default built from ``resources/profanity.txt``.
-    """
+    """Return ``True`` if ``text`` trips the profanity matcher (PRD §4.2); blank text never does."""
     if not text.strip():
         return False
     return (matcher or _default_matcher()).contains_profanity(text)
 
 
 def profanity_terms(text: str, matcher: Profanity | None = None) -> tuple[str, ...]:
-    """Return the distinct tokens in ``text`` that individually trip the profanity matcher.
-
-    Used for the audit trail (and the audit-UI highlight) when :func:`profanity_gate` hits —
-    a human auditor must be able to see *which* word caused a rejection. Tokenized with the
-    same PRD §2 word rule as everything else; lowercased, order of first appearance.
-    """
+    """Distinct tokens in ``text`` that individually trip the matcher, in order of first
+    appearance — the auditor has to see *which* word caused the flag."""
     if not text.strip():
         return ()
     m = matcher or _default_matcher()
@@ -144,23 +117,17 @@ def profanity_terms(text: str, matcher: Profanity | None = None) -> tuple[str, .
     return tuple(seen)
 
 
-# ================================================================================================
-# 2.3 — Gibberish heuristics (PRD §4.2, no dictionary)
-# ================================================================================================
-# Cheap deterministic signals only — the dictionary-hit-ratio check from the PRD is intentionally
-# dropped (see PLAN decisions log) so there is no English-dictionary dependency and far lower ESL
-# false-positive risk; subtler gibberish is caught later by LLM Task D. A hit requires >= 2 of the
-# signals below to fire together, so ordinary awkward/ESL prose (which trips at most one) passes.
+# --- Gibberish heuristics (PRD §4.2) ---
+# The PRD's dictionary-hit-ratio check is deliberately dropped (see the decisions log): no
+# English-dictionary dependency, far lower ESL false-positive risk, and Task D catches the
+# subtler cases. A hit needs >= 2 signals together, which ordinary awkward prose never trips.
 
-_VOWELS = frozenset("aeiouy")  # 'y' counted as a vowel to avoid false consonant runs (rhythm)
+_VOWELS = frozenset("aeiouy")  # 'y' counts as a vowel so "rhythm" isn't a consonant run
 
 
 @dataclass(frozen=True)
 class GibberishResult:
-    """Which cheap signals fired, and whether their count crosses ``min_signals``.
-
-    The individual booleans are kept for the audit/debug trail; only ``hit`` gates the pipeline.
-    """
+    """Which signals fired; only ``hit`` gates the pipeline, the rest are the audit trail."""
 
     hit: bool
     consonant_run: bool
@@ -205,12 +172,8 @@ def _char_entropy(letters: list[str]) -> float:
 
 
 def gibberish_gate(text: str, cfg: GibberishConfig) -> GibberishResult:
-    """Flag keyboard-mashing / good-faith-failure essays via cheap deterministic signals.
-
-    Computes up to four independent signals (long consonant run, low letter entropy, a long
-    identical-char run, a low unique-word ratio) and reports a hit only when at least
-    ``cfg.min_signals`` of them fire — the ESL safeguard. Text with too few letters
-    (``< cfg.min_chars``) carries too little signal and is never flagged. Pure function.
+    """Flag keyboard-mashing via four independent signals, hitting only when at least
+    ``cfg.min_signals`` fire — the ESL safeguard. Text under ``cfg.min_chars`` is never flagged.
     """
     letters = [c for c in text.lower() if c.isalpha()]
     if len(letters) < cfg.min_chars:
@@ -236,27 +199,15 @@ def gibberish_gate(text: str, cfg: GibberishConfig) -> GibberishResult:
     )
 
 
-# ================================================================================================
-# Stage 1 aggregator (PRD v3 §4)
-# ================================================================================================
-# Runs the deterministic checks over the essays and reduces them to a single verdict. Every
-# check here is token-free, so all of them are computed (a complete audit Gates block) rather
-# than short-circuited; fail-fast applies to the *LLM* stages downstream.
+# --- Stage 1 aggregator (PRD v3 §4) ---
+# Every check here is token-free, so all of them run (a complete audit Gates block) rather than
+# short-circuiting; fail-fast applies to the LLM stages downstream.
 
 
 @dataclass(frozen=True)
 class Stage1Result:
-    """Reduced outcome of Stage 1 for one application.
-
-    ``rejected``/``needs_review``/``primary_reason`` drive the pipeline; the three audit
-    blocks (``length_gate``/``profanity``/``gibberish``) drop straight into
-    ``AuditRecord.gates``. ``length_gate`` carries word counts as audit data only — no
-    length rule decides anything (see the aggregator below).
-
-    A profanity hit sets ``needs_review`` rather than ``rejected`` (owner, 2026-07-29): it
-    routes to a human. Where both fire, ``rejected`` wins — a definite reject outranks a
-    review (PRD §0.7).
-    """
+    """Reduced Stage-1 outcome. The three gate blocks drop straight into ``AuditRecord.gates``;
+    ``length_gate`` is audit data only. Where both gates fire, ``rejected`` wins (PRD §0.7)."""
 
     rejected: bool
     primary_reason: str  # "" unless flagged; names the deciding gate (PRD §12 invariant)
@@ -266,26 +217,20 @@ class Stage1Result:
     needs_review: bool = False
 
 
-# Scope notes, all owner decisions:
-#   * NO length gate. The site server-validates word bounds at submit (400, the submission
-#     never lands), so a violation cannot reach us from a real applicant — only from our own
-#     stale config, i.e. as a false positive on a good-faith one (2026-07-28). Word counts
-#     are still reported for the audit record.
-#   * profanity checks ALL essays including the optional one (2026-07-04).
-#   * gibberish heuristics run on the REQUIRED essays only — essay-3 gibberish merely zeroes
-#     its bonus via Task F, staying bonus-only even though the live form makes it mandatory
-#     to submit (2026-07-28).
+# Scope, all owner decisions: no length gate (the site server-validates bounds at submit, so a
+# check here could only false-positive on a good-faith applicant, 2026-07-28); profanity covers
+# ALL essays including the optional one (2026-07-04); gibberish covers the REQUIRED ones only,
+# since essay-3 gibberish merely zeroes its bonus via Task F (2026-07-28).
 
 
 def run_essay_gates_v3(
     applicant: WebhookApplicant, cfg: AppConfig, matcher: Profanity | None = None
 ) -> Stage1Result:
-    """Stage 1 over a webhook applicant: profanity(all essays) + gibberish(required essays).
+    """Stage 1: profanity (all essays) + gibberish (required essays).
 
-    Gibberish in a required essay is ``rejected``; a profanity hit sets ``needs_review``
-    instead (owner, 2026-07-29) — the matcher is a word list, and a word list cannot tell
-    "the transatlantic slave trade" from an insult. A human confirms every flag, so a false
-    positive costs a review, not an application.
+    Gibberish rejects; profanity only sets ``needs_review`` (owner, 2026-07-29) — a word list
+    cannot tell "the transatlantic slave trade" from an insult, so a false positive must cost a
+    review rather than an application.
     """
     row = applicant.row
     b1_wc, b2_wc = word_count(row.essay1), word_count(row.essay2)
@@ -320,9 +265,8 @@ def run_essay_gates_v3(
         if fired
     ]
 
-    # Gibberish is checked first because it is the only Stage-1 gate that still rejects
-    # outright; profanity routes to a human (owner, 2026-07-29), so where both fire the
-    # rejection is the deciding verdict and must be the one named.
+    # Gibberish first: it is the only Stage-1 gate that rejects, so where both fire it is the
+    # deciding verdict and must be the one named.
     if gibberish_hit:
         reason = "Essay flagged as gibberish by deterministic heuristics"
     elif profanity_hit:
@@ -334,8 +278,7 @@ def run_essay_gates_v3(
         rejected=gibberish_hit,
         needs_review=profanity_hit,
         primary_reason=reason,
-        # Word counts are audit data only — ok/hard_fail are pinned True/False because the
-        # length gate retired (bounds are enforced by the site at submit).
+        # ok/hard_fail are pinned: the length gate retired, word counts are audit data only.
         length_gate=EssayLengthGate(
             e1_wc=b1_wc, e2_wc=b2_wc, e1_ok=True, e2_ok=True, hard_fail=False
         ),

@@ -1,9 +1,5 @@
-"""Upload size capping + the five downloadable result artifacts.
-
-Two things survive here from the v2 upload edge (P11.5 retired the rest with the in-memory
-job machinery): the streaming byte cap used by ``POST /cohorts``, and the artifact
-serialization used by the v3 ``/api/exports/{artifact}`` route. Every rejection is a
-graceful 4xx (413 too-large, 422 unprocessable) — **never a 500**.
+"""Upload size capping plus the five downloadable result artifacts. Every rejection is a
+graceful 4xx — **never a 500**.
 """
 
 from __future__ import annotations
@@ -19,18 +15,15 @@ logger = logging.getLogger(__name__)
 
 _READ_CHUNK = 1 << 20  # 1 MiB streaming chunk — bounds memory to max_bytes + one chunk
 
-# Status codes as plain ints: Starlette renamed its 413/422 constants across versions and the old
-# names warn on access, so literals stay correct across the whole supported FastAPI range.
-_HTTP_413_TOO_LARGE = 413  # Content Too Large
-_HTTP_422_UNPROCESSABLE = 422  # Unprocessable Content
+# Plain ints: Starlette renamed these constants across versions and the old names warn on
+# access, so literals stay correct across the whole supported FastAPI range.
+_HTTP_413_TOO_LARGE = 413
+_HTTP_422_UNPROCESSABLE = 422
 
 
 async def read_upload_capped(upload: UploadFile, max_bytes: int) -> bytes:
-    """Stream the upload into memory, aborting with 413 the moment it exceeds ``max_bytes``.
-
-    Reads in chunks so an oversize body is rejected without buffering the whole thing — peak
-    memory is ``max_bytes`` plus one chunk.
-    """
+    """Stream the upload into memory, aborting with 413 the moment it exceeds ``max_bytes`` —
+    so peak memory is ``max_bytes`` plus one chunk rather than the whole body."""
     buffer = bytearray()
     while chunk := await upload.read(_READ_CHUNK):
         buffer.extend(chunk)
@@ -65,11 +58,8 @@ _ARTIFACTS: dict[ArtifactName, tuple[str, str]] = {
 
 
 def artifact_response_from_records(records: list, artifact: ArtifactName) -> Response:
-    """v3 (P6): the same five artifacts, generated on demand from live DB records.
-
-    The DB is the source of truth in v3, so an export serializes whatever the caller just
-    read (already ranked at read time).
-    """
+    """The five artifacts, generated on demand from live DB records — an export serializes
+    whatever the caller just read, already ranked at read time."""
     from srip_filter.outputs import (
         build_summary,
         decisions_jsonl,

@@ -1,21 +1,9 @@
-"""Stage 6 — resume bonus (Phase 12, PRD §7.2 — in scope; supersedes the deferred stub).
+"""Stage 6 — resume bonus (PRD §7.2). Bonus-only: never subtracts, never changes an outcome.
 
-A **bonus-only** stage (PRD §0.3): it can add up to ``resume.bonus_max`` to ``final_score``,
-never subtracts, and can never change a ``REJECTED``/``NEEDS_REVIEW`` outcome. It runs only on
-gate-survivors inside ``grade_one``, so rejected rows cost zero downloads and zero tokens.
-
-Per applicant the flow is **fetch → extract → Task E → price → discard** (the hosting memory
-rule: resume bytes/text never outlive the call and never land on an audit record). Any failure
-at any step — disallowed/missing URL, download error, non-PDF, scanned PDF, Task E parse
-failure — degrades to a **0 bonus plus an audit note**, never a block (the Task C precedent:
-a bonus-only signal that cannot be extracted is neutral).
-
-Kill switch: ``resume.bonus_max: 0`` restores exact stub behavior — zero fetches, zero tokens.
-
-Split (the Phases 3-5 isolate-the-LLM pattern):
-
-  * 12.4 pure pricing math   — :func:`resume_signal_bonus` (pure, no LLM)
-  * 12.5 Stage 6 aggregator  — :func:`score_resume`        (network + LLM)
+Per applicant: **fetch → extract → Task E → price → discard** — resume bytes and text never
+outlive the call and never reach an audit record. Any failure along the way degrades to 0 bonus
+plus an audit note, never a block. ``resume.bonus_max: 0`` is the kill switch: zero fetches,
+zero tokens.
 """
 
 from __future__ import annotations
@@ -30,20 +18,15 @@ from ..models import ResumeAssessment, TaskEOutput
 from ..resume_extract import extract_resume_text
 from ..resume_fetch import ResumeFetcher
 
-# ================================================================================================
-# 12.4 — Pure resume bonus math (no LLM, PRD §7.2)
-# ================================================================================================
-# Task E counts and classifies; config prices (the Task C "model classifies, config prices"
-# pattern). The sum is capped at bonus_max and floored at 0 — bonus-only, never negative
-# (PRD §0.3). With bonus_max = 0 (the kill switch) every input prices to 0.
+# --- Pure resume bonus math (no LLM, PRD §7.2) ---
+# Task E counts and classifies; config prices — the same split as Task C.
 
 
 def resume_signal_bonus(out: TaskEOutput, cfg: ResumeConfig) -> float:
-    """Price the Task E signal counts from config. Pure function, in ``[0, bonus_max]``.
+    """Price the Task E signal counts from config. Pure, in ``[0, bonus_max]``.
 
-    ``weight_project``/``weight_experience``/``weight_award`` are per-item prices on the
-    counts; ``weight_skills`` scales the 0-1 ``skills_relevance``. A document that is not
-    actually a resume (``is_resume`` false) prices to 0 — neutral, never a penalty.
+    The count weights are per-item; ``weight_skills`` scales the 0-1 ``skills_relevance``. A
+    document that is not a resume prices to 0 — neutral, never a penalty.
     """
     if not out.is_resume:
         return 0.0
@@ -56,20 +39,14 @@ def resume_signal_bonus(out: TaskEOutput, cfg: ResumeConfig) -> float:
     return round(max(0.0, min(cfg.bonus_max, raw)), 4)
 
 
-# ================================================================================================
-# 12.5 — Stage 6 aggregator (network + LLM)
-# ================================================================================================
+# --- Stage 6 aggregator (network + LLM) ---
 
 
 @dataclass(frozen=True)
 class Stage6Result:
-    """Reduced outcome of Stage 6 for one application.
-
-    ``bonus`` drops into ``Scores.resume_bonus`` and ``assessment`` into
-    ``AuditRecord.resume``. ``error`` is "" normally; on any fetch/extract/Task-E failure it
-    carries a note for ``AuditRecord.errors`` while the applicant stays scoreable (bonus 0).
-    ``task_e_called`` feeds the ``llm_calls`` audit list (true even when the call failed).
-    """
+    """Reduced Stage-6 outcome. ``error`` is "" normally; on any fetch/extract/Task-E failure it
+    carries a note for ``AuditRecord.errors`` while the applicant stays scoreable at bonus 0.
+    ``task_e_called`` feeds the ``llm_calls`` audit list, true even when the call failed."""
 
     bonus: float
     assessment: ResumeAssessment
@@ -108,11 +85,9 @@ async def score_resume(
 ) -> Stage6Result:
     """Stage 6 end to end: fetch the resume PDF, extract text, run Task E, price the signals.
 
-    Skips with zero cost when the kill switch is on (``bonus_max <= 0``), the ``Resume
-    (optional)`` cell is blank (148 applicants — absence is neutral), or no ``fetcher`` was
-    provided. Every failure path returns ``bonus=0`` plus a typed audit note — **never**
-    ``NEEDS_REVIEW``/``REJECTED``. The PDF bytes and extracted text are discarded before this
-    returns; only counted signals reach the audit record.
+    Skips at zero cost when the kill switch is on, the URL is blank, or no ``fetcher`` was
+    provided. Every failure path returns ``bonus=0`` plus a typed audit note. The PDF bytes and
+    extracted text are discarded before this returns; only counted signals reach the audit.
     """
     url = row.resume_url.strip()
     if cfg.resume.bonus_max <= 0 or not url or fetcher is None:
@@ -126,7 +101,7 @@ async def score_resume(
     assessment.fetched = True
 
     extracted = extract_resume_text(fetched.content, cfg)
-    del fetched  # discard the PDF bytes immediately (per-applicant memory rule)
+    del fetched  # discard the PDF bytes immediately
     if not extracted.ok:
         return _failed(assessment, extracted.failure)
     assessment.extracted_chars = len(extracted.text)

@@ -1,16 +1,10 @@
-"""Pydantic v2 schemas (Phase 0.3).
+"""Pydantic v2 schemas. Three families:
 
-Two families of models:
-
-* **LLM contracts** — the structured-output shapes for Tasks A/B/C/D (PRD §8) and Task E
-  (resume signal extraction, Phase 12). Every field is
-  required (no defaults) and unknown keys are forbidden, so each maps cleanly to an OpenAI
-  Structured Outputs ``json_schema`` (``additionalProperties: false``, all-required).
-* **Audit record** — the per-applicant decision record (PRD §9), built in Python and emitted
-  to ``decisions.jsonl``. These carry convenience defaults.
-
-Deviation note: ``TaskDOutput.is_gibberish`` is an addition to the PRD §8.3 schema — gibberish
-detection was moved into the LLM as a Task-D backstop.
+* **LLM contracts** (Tasks A–F, PRD §8) — every field required and unknown keys forbidden, so
+  each maps cleanly onto an OpenAI Structured Outputs ``json_schema``. The ``description``
+  strings are prompt content, not documentation.
+* **Audit record** (PRD §9) — the per-applicant decision record, with convenience defaults.
+* **Webhook payload** — the live contract, tolerant of unknown keys.
 """
 
 from __future__ import annotations
@@ -35,9 +29,7 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-# ============================================================================================
-# LLM contracts (PRD §8) — all fields required, structured-output friendly
-# ============================================================================================
+# --- LLM contracts (PRD §8) ---
 
 
 class TaskAOutput(_Model):
@@ -100,11 +92,8 @@ class TaskCOutput(_Model):
 
 
 class TaskDOutput(_Model):
-    """Task D — per-essay gibberish/relevance gates + quality score (PRD §8.3).
-
-    ``is_gibberish`` and ``on_topic`` are gates: either one failing disqualifies the whole
-    application. The remaining fields feed the additive essay score.
-    """
+    """Task D — per-essay gates + quality score (PRD §8.3). Either gate failing disqualifies the
+    whole application; the rest feeds the additive essay score."""
 
     is_gibberish: bool = Field(
         description="Checked first; true => REJECTED (keyboard-mashing / good-faith failure)."
@@ -122,14 +111,11 @@ class TaskDOutput(_Model):
 
 
 class TaskFOutput(_Model):
-    """Task F — optional technical-essay bonus (v3, PRD v3 §4 Stage 4b).
+    """Task F — optional technical-essay bonus (PRD v3 §4 Stage 4b). Bonus-only: nothing here
+    can reject, and either gate flag zeroes the bonus.
 
-    Judgment tier, **bonus-only**: nothing here can reject (profanity was already a
-    Stage-1 reject). ``on_topic=False`` or ``gibberish=True`` ⇒ 0 bonus. The three 0–10
-    signals are judged by the model and priced deterministically by
-    ``TechnicalEssayConfig`` (the Task C "model judges, config prices" pattern).
-    Calibration (owner, 2026-07-04): generic interest / surface-level online reading ⇒
-    low; sustained exploration ⇒ mid; interest → side project → real impact ⇒ high.
+    Calibration (owner, 2026-07-04): generic interest or surface-level online reading scores
+    low, sustained exploration mid, interest → side project → real impact high.
     """
 
     on_topic: bool = Field(
@@ -152,13 +138,8 @@ class TaskFOutput(_Model):
 
 
 class TaskEOutput(_Model):
-    """Task E — resume signal extraction (PRD §7.2, Phase 12).
-
-    Mechanical extraction (mini tier): the model **counts and classifies** signals relevant to
-    software engineering; it never prices them. The deterministic layer
-    (:func:`srip_filter.scoring.resume.resume_signal_bonus`) applies the config weights —
-    the Task C "model classifies, config prices" pattern. Bonus-only: nothing here can reject.
-    """
+    """Task E — resume signal extraction (PRD §7.2). The model counts and classifies; config
+    prices. Bonus-only: nothing here can reject."""
 
     is_resume: bool = Field(
         description="True if the text is actually a resume/CV (not a cover letter, blank page, "
@@ -185,9 +166,7 @@ class TaskEOutput(_Model):
     rationale: str = Field(description="1-2 sentence justification for the audit log.")
 
 
-# ============================================================================================
-# Audit record (PRD §9) — built in Python, emitted to decisions.jsonl
-# ============================================================================================
+# --- Audit record (PRD §9) ---
 
 
 class ProgramChoices(_Model):
@@ -212,12 +191,8 @@ class EssayLengthGate(_Model):
 
 
 class HitGate(_Model):
-    """A boolean gate result (profanity, gibberish) plus what tripped it.
-
-    ``terms`` makes a hit auditable: for profanity it lists the offending tokens; for
-    gibberish it names the deterministic signals that fired (prefixed ``e1:``/``e2:``) or
-    ``task_d`` when the LLM backstop flagged it. Empty when ``hit`` is False.
-    """
+    """A boolean gate result plus what tripped it: ``terms`` lists the offending tokens
+    (profanity) or the fired signals (gibberish), essay-prefixed and empty on no hit."""
 
     hit: bool = False
     terms: list[str] = Field(default_factory=list)
@@ -242,7 +217,7 @@ class Gates(_Model):
 
 
 class GpaAssessment(_Model):
-    """Stage-2/3 GPA result for the audit record (PRD §9 'gpa' block + §6.1 fields)."""
+    """Stage-2/3 GPA result for the audit record (PRD §9 'gpa' block)."""
 
     raw: str | None = None
     normalized_gpa: float | None = None
@@ -252,8 +227,8 @@ class GpaAssessment(_Model):
     below_threshold: bool | None = None
     requires_manual_review: bool = False
     source: GpaSource | None = None
-    explanation_text: str = ""  # the applicant's extenuating-circumstances text, verbatim
-    explanation_eval: TaskBOutput | None = None  # populated only if Task B ran
+    explanation_text: str = ""  # the applicant's text, verbatim
+    explanation_eval: TaskBOutput | None = None  # only if Task B ran
 
 
 class EssaySubscores(_Model):
@@ -265,10 +240,10 @@ class EssaySubscores(_Model):
 class Scores(_Model):
     gpa_points: float = 0.0
     essay: EssaySubscores = Field(default_factory=EssaySubscores)
-    technical_essay_bonus: float = 0.0  # Stage 4b Task F (v3); absent essay -> 0, neutral
+    technical_essay_bonus: float = 0.0
     coursework_bonus: float = 0.0
     school_bonus: float = 0.0
-    resume_bonus: float = 0.0  # 0 unless Stage 6 extracts signals (Phase 12); kill switch -> 0
+    resume_bonus: float = 0.0  # 0 under the Stage-6 kill switch
 
 
 class SchoolMatch(_Model):
@@ -278,29 +253,21 @@ class SchoolMatch(_Model):
 
 
 class ResumeAssessment(_Model):
-    """Stage-6 resume result for the audit record (Phase 12, PRD §7.2).
-
-    Carries the fetch/extract/Task-E trail — **never the resume bytes or text** (the
-    fetch→extract→discard memory rule; resume content is PII and is dropped the moment the
-    signals are extracted). ``failure`` holds a typed reason when any step failed; the bonus
-    degrades to 0 and the applicant is unaffected otherwise (bonus-only, §0.3).
-    """
+    """Stage-6 resume trail for the audit record (PRD §7.2) — the fetch/extract/Task-E outcome,
+    **never the resume bytes or text**, which are discarded the moment signals are extracted."""
 
     url_present: bool = False
-    url: str = ""  # the resume link as submitted, so a reviewer can open it from the audit UI
-    attempted: bool = False  # False when the kill switch (bonus_max == 0) or no URL skipped it
+    url: str = ""  # as submitted, so a reviewer can open it from the audit UI
+    attempted: bool = False  # False when the kill switch or a missing URL skipped it
     fetched: bool = False
     extracted_chars: int = 0
-    signals: TaskEOutput | None = None  # populated only when Task E ran
-    failure: str = ""  # "" = no failure; otherwise a typed reason for the audit log
+    signals: TaskEOutput | None = None  # only when Task E ran
+    failure: str = ""  # "" = none; otherwise a typed reason for the audit log
 
 
 class TechnicalEssayAssessment(_Model):
-    """Stage-4b technical-essay result for the audit record (v3).
-
-    ``skipped_reason`` explains a 0 bonus without a Task F call ("absent", "over_max",
-    "stage1_reject"); ``signals`` is populated only when Task F actually ran.
-    """
+    """Stage-4b result for the audit record. ``skipped_reason`` explains a 0 bonus that cost no
+    Task F call; ``signals`` is populated only when Task F ran."""
 
     present: bool = False
     word_count: int = 0
@@ -311,12 +278,8 @@ class TechnicalEssayAssessment(_Model):
 
 
 class EssayTexts(_Model):
-    """The applicant's essays, verbatim, carried on the audit record for the audit UI.
-
-    v3: persisted in ``applications.audit_record`` (JSONB) under the §9 retention policy —
-    a reviewer must be able to read the essays (with highlight-on-reject) in the audit
-    detail without the original payload. ``e3`` is the optional technical essay.
-    """
+    """The applicant's essays verbatim (``e3`` optional), so the audit detail can show them with
+    highlight-on-reject without reaching for the original payload."""
 
     e1: str = ""
     e2: str = ""
@@ -330,11 +293,11 @@ class AuditRecord(_Model):
     name: str = ""
     email: str = ""
     phone: str = ""
-    cohort_name: str = ""  # v3: ranking is scoped per cohort (PRD v3 §7)
-    state_of_residence: str = ""  # v3 metadata; full state name or "Non-U.S. Territory"
-    international: bool = False  # v3: derived from state_of_residence (not scored)
-    programming_languages: str = ""  # v3 metadata (not scored; future resume-eval input)
-    github_profile: str = ""  # v3 metadata (not scored; GitHub fetching is out of scope)
+    cohort_name: str = ""  # ranking is scoped per cohort (PRD v3 §7)
+    state_of_residence: str = ""  # full state name or "Non-U.S. Territory"
+    international: bool = False  # derived from state_of_residence, not scored
+    programming_languages: str = ""  # metadata, not scored
+    github_profile: str = ""  # metadata, not scored
     sub_track: str = ""
     program_choices: ProgramChoices = Field(default_factory=ProgramChoices)
     dedup: DedupInfo = Field(default_factory=DedupInfo)
@@ -350,9 +313,8 @@ class AuditRecord(_Model):
     scores: Scores = Field(default_factory=Scores)
     essays: EssayTexts = Field(default_factory=EssayTexts)
 
-    # True when a human pushed a REJECTED/NEEDS_REVIEW applicant into the ranking via the
-    # audit UI (the §10.2 human-resolution path). The original gate verdicts stay visible in
-    # `gates`/`reasons`; this flag keeps the override honest in the audit trail.
+    # A human pushed this applicant into the ranking from the audit UI. The original gate
+    # verdicts stay in `gates`/`reasons`, so the override is honest in the trail.
     manual_override: bool = False
 
     coursework_breakdown: list[CourseItem] = Field(default_factory=list)
@@ -365,18 +327,12 @@ class AuditRecord(_Model):
     errors: list[str] = Field(default_factory=list)
 
 
-# ============================================================================================
-# Cohort assignment (PRD §11, Phase 11) — downstream of ranking, consumes AuditRecords
-# ============================================================================================
+# --- Cohort assignment (PRD §11) — downstream of ranking, consumes AuditRecords ---
 
 
 class CohortCapacities(_Model):
-    """Per-tier seat caps for cohort assignment (PRD §11).
-
-    ``None`` = unlimited — the default, since demand realistically won't hit any cap, in which
-    case every applicant lands in their first choice. These are a per-request staff knob, not
-    config: the whole point is live what-if recomputation as the numbers change.
-    """
+    """Per-tier seat caps (PRD §11); ``None`` is unlimited, which lands everyone in their first
+    choice. A per-request staff knob rather than config — the point is live what-if recompute."""
 
     honors: int | None = Field(default=None, ge=0)
     intensive: int | None = Field(default=None, ge=0)
@@ -389,13 +345,11 @@ class CohortCapacities(_Model):
 
 
 class CohortAssignment(_Model):
-    """One applicant's cohort outcome — a row in ``cohort_assignments.csv`` / the staff UI table.
+    """One applicant's cohort outcome — a row in the export and the staff UI table.
 
     ``choice_number`` is the 1-based position of the assigned tier among the applicant's
-    *distinct* listed choices (repeats collapse). ``excluded_by_cost`` lists the tiers the
-    applicant ranked *above* their first choice — never assignable under the cost ceiling
-    (higher tiers cost more; the first choice caps what they signed up to pay) — kept visible
-    for the staff audit trail.
+    *distinct* choices. ``excluded_by_cost`` lists tiers ranked above their first choice, never
+    assignable under the cost ceiling, kept visible for the audit trail.
     """
 
     submission_id: str
@@ -435,11 +389,8 @@ class CohortSummary(_Model):
 
 
 class CohortResult(_Model):
-    """Full output of :func:`srip_filter.cohort.assign_cohorts`.
-
-    Returned to the staff user (JSON or CSV), never persisted — stateless like everything else.
-    Each list is rank-ordered; every ``RANKED`` input record appears in exactly one of them.
-    """
+    """Full output of :func:`srip_filter.cohort.assign_cohorts` — never persisted. Each list is
+    rank-ordered, and every ``RANKED`` input appears in exactly one of them."""
 
     assignments: list[CohortAssignment] = Field(default_factory=list)
     waitlist: list[CohortAssignment] = Field(default_factory=list)
@@ -447,16 +398,11 @@ class CohortResult(_Model):
     summary: CohortSummary = Field(default_factory=CohortSummary)
 
 
-# ============================================================================================
-# Webhook payload contract (P9, live) — one combined payload per applicant
-# ============================================================================================
-# Pinned against the partner's actual dispatcher (`thinkNeuroWebsite/lib/ats.ts`
-# `buildAtsPayload`) and the live SP27-CSE question config, read 2026-07-28. The v3
-# `ats_mode` discriminated union retired: they POST ONE body containing every sector, and
-# `ats_run` selects which grader(s) to run. Edge philosophy unchanged: *required essentials
-# strict, everything else tolerant* — a payload missing `submission_id` is unprocessable
-# (422), but a missing optional field must never bounce a real applicant. Unknown keys are
-# ignored (`referral`, `referral_code`, `time_spent_seconds`, legacy `ats_mode`).
+# --- Webhook payload contract (live) — one combined payload per applicant ---
+# Pinned against the partner's dispatcher and the live question config (read 2026-07-28).
+# Edge philosophy: required essentials strict, everything else tolerant — a payload missing
+# `submission_id` is unprocessable (422), but a missing optional field must never bounce a
+# real applicant, and unknown keys are ignored.
 
 
 class _Payload(BaseModel):
@@ -466,11 +412,8 @@ class _Payload(BaseModel):
 
 
 class AnswerEntry(_Payload):
-    """One entry of ``all_answers`` — the full form dump.
-
-    The only place ``field_key`` appears in the payload: the essay arrays carry question
-    text and answer alone, so this is the sole source of field identity.
-    """
+    """One entry of ``all_answers`` — the only place ``field_key`` appears in the payload, and
+    so the sole source of field identity."""
 
     field_key: str = ""
     question: str = ""
@@ -478,20 +421,16 @@ class AnswerEntry(_Payload):
 
 
 class EssayEntry(_Payload):
-    """One essay as delivered. The site sends ``question`` + ``answer`` only — no
-    ``field_key`` and no word bounds (bounds are server-enforced
-    at submit, so the ATS does not re-check them)."""
+    """One essay as delivered — question and answer only, no ``field_key`` and no word bounds
+    (the site enforces those at submit)."""
 
     question: str = ""
     answer: str = ""
 
 
 class FinaidPayload(_Payload):
-    """Financial-aid block: **stored, never scored** (owner, 2026-07-21).
-
-    Present on every payload, empty-ish for non-finaid applicants (`ats_run` drops
-    ``"finaid"`` instead of omitting the block).
-    """
+    """Financial-aid block: **stored, never scored** (owner, 2026-07-21). Present on every
+    payload, empty-ish when not applicable — `ats_run` drops "finaid" rather than the block."""
 
     sat_score: str | None = None
     test_score_scale: dict[str, int] = Field(default_factory=dict)
@@ -499,11 +438,8 @@ class FinaidPayload(_Payload):
 
 
 class ApplicationPayload(_Payload):
-    """The one combined payload the website POSTs per applicant.
-
-    ``ats_run`` is the grader selector (any subset of essays/resume/finaid); every sector's
-    data is present regardless. Only ``submission_id`` and ``user_email`` are strict.
-    """
+    """The one combined payload the website POSTs per applicant. ``ats_run`` selects which
+    graders run; every sector's data is present regardless."""
 
     submission_id: UUID
     user_email: str = Field(min_length=1)
@@ -521,7 +457,7 @@ class ApplicationPayload(_Payload):
     gpa_unweighted: str | None = None  # "3.95/4.0"
     gpa_weighted: str | None = None  # "4.23/4.0"
     all_answers: list[AnswerEntry] = Field(default_factory=list)
-    resume_url: str | None = None  # presigned R2 GET, 10-min expiry, or null
+    resume_url: str | None = None  # presigned R2 GET, short expiry, or null
     required_essays: list[EssayEntry] = Field(default_factory=list)
     optional_essays: list[EssayEntry] = Field(default_factory=list)
     finaid: FinaidPayload = Field(default_factory=FinaidPayload)
@@ -536,8 +472,5 @@ class ApplicationPayload(_Payload):
 
 
 def parse_webhook_payload(data: dict) -> ApplicationPayload:
-    """Validate a decoded JSON body. Pydantic ``ValidationError`` propagates to the 422 path.
-
-    There is no mode dispatch any more — one payload shape, `ats_run` selects the graders.
-    """
+    """Validate a decoded JSON body; ``ValidationError`` propagates to the 422 path."""
     return ApplicationPayload.model_validate(data)

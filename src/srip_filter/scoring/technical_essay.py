@@ -1,14 +1,7 @@
-"""Stage 4b — optional technical-essay bonus via Task F (v3, PRD v3 §4).
+"""Stage 4b — optional technical-essay bonus via Task F (PRD v3 §4).
 
-Bonus-only by construction (SCORING.md / §0.3 law): absent essay ⇒ 0 with **no LLM
-call**; gibberish/off-topic ⇒ 0; over ``max_words`` ⇒ 0 (the site does not
-server-validate optional essays, so the bound is enforced here — voided, never a
-rejection); a Task F parse failure ⇒ 0 + an audit error note (the Task C precedent).
-Nothing in this module can reject or subtract.
-
-Split in the house style: :func:`technical_essay_bonus` is the pure config-priced math
-(zero spend, fully testable); :func:`score_technical_essay` is the LLM-touching
-aggregator.
+Bonus-only by construction: nothing here can reject or subtract. Absent essay, gibberish,
+off-topic, over ``max_words``, or a parse failure all resolve to 0 bonus.
 """
 
 from __future__ import annotations
@@ -23,12 +16,8 @@ from ..models import TaskFOutput, TechnicalEssayAssessment
 
 
 def technical_essay_bonus(out: TaskFOutput, cfg: TechnicalEssayConfig) -> float:
-    """Price Task F signals into a 0–``bonus_max`` bonus (pure, config-owned).
-
-    ``bonus = bonus_max · Σ(wᵢ·signalᵢ) / (10·Σwᵢ)`` — a weighted mean of the three 0–10
-    signals scaled onto the bonus range. Gated to 0 by ``on_topic``/``gibberish``.
-    Clamped to ``[0, bonus_max]``; never negative (bonuses only add).
-    """
+    """Price Task F signals: ``bonus_max · Σ(wᵢ·signalᵢ) / (10·Σwᵢ)``, a weighted mean of the
+    three 0–10 signals scaled onto ``[0, bonus_max]``. Gated to 0 by ``on_topic``/``gibberish``."""
     if not out.on_topic or out.gibberish:
         return 0.0
     weight_sum = cfg.weight_depth + cfg.weight_exploration + cfg.weight_impact
@@ -61,11 +50,10 @@ async def score_technical_essay(
     *,
     max_words: int | None = None,
 ) -> Stage4bResult:
-    """Run Stage 4b for one applicant.
+    """Run Stage 4b for one applicant: absent → over-max → Task F. Each rung yields 0 bonus and
+    never a rejection, and only the last spends a token.
 
-    Fail-safe ladder (each rung ⇒ 0 bonus, never a rejection, and only the last rung
-    spends a token): absent → over-max → Task F (parse failure → 0 + error note).
-    Profanity in this essay was already a Stage-1 reject and never reaches here.
+    ``max_words`` is enforced here because the site does not server-validate optional essays.
     """
     text = essay_text.strip()
     if not text:

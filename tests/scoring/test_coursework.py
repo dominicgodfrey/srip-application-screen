@@ -1,8 +1,7 @@
-"""Tests for Stage 5 coursework bonus (Phase 5, Task C). Synthetic data only, no API spend.
+"""Tests for the Stage 5 coursework bonus (Task C). Synthetic data only, no API spend.
 
-5.1 pins the Task C prompt shape; 5.2 pins the pure bonus math (weights by category, the <80% and
-'other' zero-outs, the cap, never-negative, empty->0); 5.3 drives the aggregator with a
-:class:`FakeLLMClient` (empty->no call, parse-failure->0 bonus, bonus composition).
+Pins the prompt shape, the pure bonus math (category weights, the grade floor and 'other'
+zero-outs, the cap), and the aggregator's degradation paths under a :class:`FakeLLMClient`.
 """
 
 from __future__ import annotations
@@ -43,9 +42,7 @@ def _task_c(*courses: CourseItem) -> TaskCOutput:
     return TaskCOutput(courses=list(courses), rationale="")
 
 
-# ------------------------------------------------------------------------------------------------
-# 5.1 — Task C prompt shape
-# ------------------------------------------------------------------------------------------------
+# --- 5.1 — Task C prompt shape ---
 
 
 def test_system_prompt_is_json_only_and_names_categories() -> None:
@@ -59,9 +56,7 @@ def test_user_prompt_renders_template() -> None:
     assert rendered == 'COURSEWORK_RAW: """AP CS A: 95, Calculus BC: 88"""'
 
 
-# ------------------------------------------------------------------------------------------------
-# 5.2 — coursework_bonus (pure)
-# ------------------------------------------------------------------------------------------------
+# --- 5.2 — coursework_bonus (pure) ---
 
 
 def test_empty_coursework_scores_zero() -> None:
@@ -143,9 +138,7 @@ def test_bonus_never_negative() -> None:
     assert r.bonus >= 0.0
 
 
-# ------------------------------------------------------------------------------------------------
-# 5.3 — score_coursework aggregator (mocked Task C)
-# ------------------------------------------------------------------------------------------------
+# --- 5.3 — score_coursework aggregator (mocked Task C) ---
 
 
 def _row(coursework: str = "AP CS A: 95") -> ApplicantRow:

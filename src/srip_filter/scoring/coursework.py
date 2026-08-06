@@ -1,27 +1,11 @@
-"""Stage 5 — coursework bonus (Phase 5, Task C).
+"""Stage 5 — coursework bonus, Task C (PRD §0.3/§5/§7).
 
-Runs only on Stage 1-4 survivors and is **bonus-only** (PRD §0.3/§5/§7): it can add to
-``final_score``, never subtract, and can never change a ``REJECTED``/``NEEDS_REVIEW`` outcome.
-Empty ``Relevant Coursework`` → 0 bonus with no LLM call.
-
-Task C decomposes the free-text cell into courses, classifies each cs/math/data/other, and
-normalizes each grade to a 0-100 percentage. The deterministic layer then applies the config
-weights + the 80% floor and sums a capped bonus. The work is split so the LLM call is isolated
-and the §8.4 bonus math stays fully testable with zero API spend:
-
-  * 5.2 pure bonus math — :func:`coursework_bonus`  (pure, no LLM)
-  * 5.3 Stage 5 aggregator — :func:`score_coursework` (LLM)
-
-Two deliberate decisions:
-
-* **Weights/counts are recomputed from config**, never trusted from the model — the model
-  classifies ``category`` and normalizes ``grade_pct``; the system owns the tunable weights and
-  the 80% floor (mirroring how Stage 3 computes ``gpa_points`` deterministically).
-* A Task C parse failure → **0 bonus + an audit error note, not NEEDS_REVIEW** — a bonus-only
-  signal that cannot be extracted is neutral; the applicant stays fully scoreable on the required
-  signals (GPA + essays).
-
-Thresholds come from ``AppConfig.coursework``; no magic numbers here.
+Bonus-only: it can add to ``final_score``, never subtract, and never changes an outcome. Task C
+decomposes the free-text cell into classified courses with normalized grades; the deterministic
+layer then applies the config weights and the 80% floor. Two deliberate choices: weights and
+``counts`` are recomputed from config rather than trusted from the model, and a parse failure
+degrades to 0 bonus plus an audit note rather than ``NEEDS_REVIEW`` — a bonus-only signal that
+cannot be extracted is neutral, and the required signals still score.
 """
 
 from __future__ import annotations
@@ -34,30 +18,21 @@ from ..llm.client import BaseLLMClient, LLMParseFailure
 from ..llm.prompts import task_c as task_c_prompt
 from ..models import CourseCategory, CourseItem, TaskCOutput
 
-# ================================================================================================
-# 5.2 — Pure coursework bonus math (no LLM, PRD §5 / §8.4)
-# ================================================================================================
-# Recompute each course's weight + counts from config (using the LLM's category + grade_pct),
-# then sum per_course = weight * (grade_pct/100) * unit over counting courses, capped and floored
-# at 0. The reconciled courses[] (with recomputed weight/counts) is what goes into the audit, so
-# the record shows exactly what the system used — not the model's own guesses.
+# --- Pure coursework bonus math (no LLM, PRD §5 / §8.4) ---
 
 
 @dataclass(frozen=True)
 class CourseworkResult:
-    """Bonus + the reconciled per-course breakdown for the audit record.
-
-    ``courses`` carries each :class:`CourseItem` with ``category_weight``/``counts`` recomputed
-    from config, so :attr:`bonus` is fully reconstructable from it. ``bonus`` is in
-    ``[0, coursework_bonus_max]``.
-    """
+    """Bonus in ``[0, bonus_max]`` plus the reconciled breakdown: each :class:`CourseItem` carries
+    the weight/counts actually applied, so the audit shows what the system used, not the model's
+    guesses, and the bonus is reconstructable from it."""
 
     bonus: float
     courses: list[CourseItem] = field(default_factory=list)
 
 
 def _weight_for(category: CourseCategory, cfg: CourseworkConfig) -> float:
-    """Resolve the config weight for a category (cs/math/data/other)."""
+    """Resolve the config weight for a category."""
     return {
         "cs": cfg.weight_cs,
         "math": cfg.weight_math,
@@ -67,15 +42,11 @@ def _weight_for(category: CourseCategory, cfg: CourseworkConfig) -> float:
 
 
 def coursework_bonus(out: TaskCOutput, cfg: CourseworkConfig) -> CourseworkResult:
-    """Apply the coursework bonus math to a Task C output. Pure function, never negative.
+    """Apply the coursework bonus math to a Task C output. Pure, never negative.
 
-    For each course, weight and ``counts`` are **recomputed from config**. Grades are ignored
-    unless explicitly stated below a B: a course counts when ``category != "other"`` and its
-    grade is either unstated (``grade_pct is None``) or at/above ``min_grade_pct``; an explicit
-    grade below the floor excludes the course entirely. A counting course contributes a flat
-    ``weight * unit`` — the grade never scales the bonus. The sum is capped at ``bonus_max`` and
-    floored at 0. Returns the bonus plus the reconciled ``courses[]`` (weights/counts as
-    actually applied).
+    Grades are exclusion-only: a course counts unless it is ``"other"`` or carries an explicit
+    grade below ``min_grade_pct``, and a counting course contributes a flat ``weight * unit`` —
+    the grade never scales the bonus. The sum is capped at ``bonus_max``.
     """
     reconciled: list[CourseItem] = []
     total = 0.0
@@ -90,23 +61,14 @@ def coursework_bonus(out: TaskCOutput, cfg: CourseworkConfig) -> CourseworkResul
     return CourseworkResult(bonus=round(bonus, 4), courses=reconciled)
 
 
-# ================================================================================================
-# 5.3 — Stage 5 aggregator (LLM)
-# ================================================================================================
-# score_coursework short-circuits an empty cell (no token), otherwise calls Task C and applies
-# 5.2. A parse failure degrades to 0 bonus + an error note — never NEEDS_REVIEW/REJECTED, because
-# a bonus-only signal that cannot be extracted is neutral (PRD §0.3).
+# --- Stage 5 aggregator (LLM) ---
 
 
 @dataclass(frozen=True)
 class Stage5Result:
-    """Reduced outcome of Stage 5 for one application.
-
-    ``bonus`` drops into ``Scores.coursework_bonus`` and ``courses`` into
-    ``AuditRecord.coursework_breakdown``. ``error`` is "" normally; on a Task C parse failure it
-    carries a note for ``AuditRecord.errors`` while the applicant stays scoreable (bonus 0).
-    ``raw`` is the Task C output for the audit, or ``None`` when no call was made / it failed.
-    """
+    """Reduced Stage-5 outcome. ``error`` is "" normally; on a parse failure it carries a note for
+    ``AuditRecord.errors`` while the applicant stays scoreable at bonus 0. ``raw`` is ``None``
+    when no call was made or it failed."""
 
     bonus: float
     courses: list[CourseItem]
@@ -119,10 +81,8 @@ async def score_coursework(
 ) -> Stage5Result:
     """Stage 5 end to end: decompose coursework with Task C and compute the capped bonus.
 
-    An empty ``Relevant Coursework`` cell → ``bonus=0`` with no token spent. Otherwise Task C
-    runs (cached/bounded by the client) and 5.2 applies the config weights + 80% floor. A Task C
-    :class:`LLMParseFailure` (after the client's retry) degrades to ``bonus=0`` with an audit
-    error note — never ``NEEDS_REVIEW``/``REJECTED`` (bonus-only signal; absence is neutral).
+    An empty cell short-circuits to ``bonus=0`` with no token spent; a parse failure degrades to
+    ``bonus=0`` plus an audit note, never ``NEEDS_REVIEW``/``REJECTED``.
     """
     if not row.coursework.strip():
         return Stage5Result(bonus=0.0, courses=[], error="", raw=None)

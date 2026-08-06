@@ -1,12 +1,9 @@
-"""Shared API-test wiring (P5).
+"""Shared API-test wiring.
 
-The admin-auth middleware (default-deny) would force a login round-trip into every
-pre-existing API test. Instead — mirroring the FakeLLMClient pattern of not re-testing a
-boundary everywhere — an autouse fixture stamps every session check as valid, and the
-dedicated ``tests/api/test_auth.py`` suite (marked ``real_auth``) exercises the actual
-barrier: redirects, 401s, throttling, cookies, logout.
-
-:func:`raw_asgi_post` is the escape hatch for header bytes ``TestClient`` will not send.
+The default-deny middleware would force a login round-trip into every API test, so an autouse
+fixture stamps every session check as valid and ``test_auth.py`` (marked ``real_auth``)
+exercises the actual barrier. :func:`raw_asgi_post` is the escape hatch for header bytes
+``TestClient`` will not send.
 """
 
 from __future__ import annotations
@@ -32,11 +29,9 @@ def _bypass_admin_auth(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
 def raw_asgi_post(app, path: str, headers: list[tuple[bytes, bytes]], body: bytes = b"{}") -> int:
     """POST to ``app`` at the ASGI layer with raw header BYTES; return the status code.
 
-    ``TestClient`` cannot express this case: httpx rejects a non-ASCII header value on the
-    client side, so a header byte above 0x7F — which a real HTTP client sends freely, and
-    which an ASGI server hands us latin-1 decoded — is unreachable through it. That gap is
-    what let an unhandled ``TypeError`` sit in both unauthenticated auth paths. Any
-    exception escaping the app is re-raised here so the test sees the 500 for what it is.
+    ``TestClient`` cannot express this: httpx rejects a non-ASCII header value client-side, so
+    a byte above 0x7F — which a real client sends freely — is unreachable through it. That gap
+    is what let an unhandled ``TypeError`` sit in both unauthenticated auth paths.
     """
     scope = {
         "type": "http",

@@ -1,12 +1,8 @@
-"""P1 persistence-layer tests.
+"""Persistence-layer tests, run against a REAL Postgres via ``DATABASE_URL_TEST`` — asyncpg has
+no useful in-memory stand-in, and hash/locking semantics are exactly what must be proven. The
+module skips cleanly when the env var is unset, so the core suite stays zero-dependency.
 
-Run against a REAL Postgres (dev Neon branch) via ``DATABASE_URL_TEST`` — asyncpg has no
-useful in-memory stand-in, and hash/locking semantics are exactly what must be proven.
-The whole module skips cleanly when the env var is unset, so the core suite stays
-zero-dependency (CLAUDE.md testing rules).
-
-Isolation: each test run works in a throwaway schema (``srip_test_<pid>``) created by the
-session fixture and dropped afterward, so parallel/aborted runs never collide and the dev
+Each run works in a throwaway schema, so parallel or aborted runs never collide and the dev
 branch stays clean. Synthetic data only.
 """
 
@@ -41,9 +37,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-# ------------------------------------------------------------------------------------------------
-# Fixtures
-# ------------------------------------------------------------------------------------------------
+# --- Fixtures ---
 
 
 @pytest.fixture(scope="session")
@@ -55,12 +49,9 @@ def schema_name() -> str:
 async def pool(schema_name: str):
     """Fresh pool bound to a throwaway schema; migrations applied; dropped on teardown.
 
-    ``setup=`` (per acquire), NOT ``init=`` (once per connection): asyncpg runs ``RESET
-    ALL`` when a connection is released back to the pool, which wipes a search_path set
-    in ``init``. With ``init`` only the very first acquire was isolated and every one
-    after silently operated on ``public`` — which is how a "throwaway schema" suite
-    ended up writing to the real tables. ``server_settings={"search_path": ...}`` does
-    not work here either; it does not survive the reset.
+    ``setup=`` (per acquire), NOT ``init=`` (once per connection): asyncpg runs ``RESET ALL``
+    on release, wiping a search_path set in ``init`` — so only the first acquire was isolated
+    and the rest silently wrote to ``public``. ``server_settings`` does not survive it either.
     """
     import asyncpg
 
@@ -101,12 +92,10 @@ def _payload(**overrides) -> dict:
 class _InterferingPool:
     """Real pool whose handed-out connection misbehaves once, on cue.
 
-    The two atomicity guarantees below are about what happens *between* two statements
-    inside one transaction — a row landing mid-purge, a crash between delete and
-    tombstone. Reproducing either with genuine concurrency needs a seam in production
-    code purely for the test; intercepting one call on the connection needs none, and
-    exercises the same branch deterministically. Everything not intercepted is forwarded
-    to the real connection, so the transaction, the rollback, and the SQL are all real.
+    The atomicity guarantees below are about what happens *between* two statements in one
+    transaction. Reproducing that with genuine concurrency would need a seam in production code
+    purely for the test; intercepting one call needs none and is deterministic. Everything else
+    forwards to the real connection, so the transaction, rollback, and SQL are all real.
     """
 
     def __init__(self, pool, *, count_lie: int | None = None, fail_on: str | None = None):
@@ -148,9 +137,7 @@ class _InterferingPool:
         return _Ctx()
 
 
-# ------------------------------------------------------------------------------------------------
-# Migrations
-# ------------------------------------------------------------------------------------------------
+# --- Migrations ---
 
 
 async def test_migrations_apply_once_then_noop(pool):
@@ -162,9 +149,7 @@ async def test_migrations_apply_once_then_noop(pool):
         assert await pool.fetchval("SELECT to_regclass($1)", table) is not None
 
 
-# ------------------------------------------------------------------------------------------------
-# Upsert / idempotency semantics (PRD v3 §2.3; invariant #8 groundwork)
-# ------------------------------------------------------------------------------------------------
+# --- Upsert / idempotency semantics (PRD v3 §2.3; invariant #8 groundwork) ---
 
 
 async def test_first_delivery_is_accepted_and_queued(pool):
@@ -235,9 +220,7 @@ async def test_content_hash_is_key_order_independent():
     assert content_hash(a) == content_hash(b)
 
 
-# ------------------------------------------------------------------------------------------------
-# Queue semantics (claim / finish / error)
-# ------------------------------------------------------------------------------------------------
+# --- Queue semantics (claim / finish / error) ---
 
 
 async def test_claim_marks_grading_and_next_claim_gets_a_different_row(pool):
@@ -311,9 +294,7 @@ async def test_reaper_requeues_only_claims_older_than_the_window(pool):
     assert str((await claim_next(pool))["submission_id"]) == stale
 
 
-# ------------------------------------------------------------------------------------------------
-# Cache, listing, delete
-# ------------------------------------------------------------------------------------------------
+# --- Cache, listing, delete ---
 
 
 async def test_llm_cache_round_trip_and_conflict_keeps_first(pool):
@@ -337,11 +318,8 @@ async def test_list_scopes_by_cohort(pool):
 
 
 async def test_summaries_drop_the_payload_and_the_essay_text(pool):
-    """The projection is real SQL (`audit_record - 'essays'`), so assert it against Postgres.
-
-    The API suite's fake store can only mimic this; if the SQL stopped stripping, nothing
-    there would notice and the most-hit endpoint would quietly start shipping essays again.
-    """
+    """The projection is real SQL, so assert it against Postgres — the API suite's fake store
+    only mimics it, and would not notice the most-hit endpoint shipping essays again."""
     sid = _sid()
     await upsert_application(pool, submission_id=sid, payload=_payload(), cohort_name="calib")
     await finish_graded(
@@ -410,12 +388,8 @@ async def test_delete_submission_hard_deletes_and_tombstones(pool):
 
 
 async def test_delete_and_tombstone_are_one_transaction(pool):
-    """PRD v3 §9: the removal-request path cannot delete without recording that it did.
-
-    A crash between the DELETE and the ledger INSERT must take the DELETE with it —
-    otherwise the one case where you later need to *prove* the removal happened is
-    exactly the case with no evidence.
-    """
+    """PRD v3 §9: a crash between the DELETE and the ledger INSERT must take the DELETE with it,
+    or the one case where you later need to *prove* the removal happened has no evidence."""
     sid = _sid()
     await upsert_application(pool, submission_id=sid, payload=_payload())
 
@@ -428,9 +402,7 @@ async def test_delete_and_tombstone_are_one_transaction(pool):
     ) == 0
 
 
-# ------------------------------------------------------------------------------------------------
-# Bulk purge (PRD v3 §9 close-cycle)
-# ------------------------------------------------------------------------------------------------
+# --- Bulk purge (PRD v3 §9 close-cycle) ---
 
 
 async def test_purge_preview_describes_the_scope_without_deleting(pool):
@@ -526,14 +498,10 @@ async def test_count_drift_aborts_the_purge_and_deletes_nothing(pool):
 
 
 async def test_a_row_landing_mid_purge_aborts_it_and_deletes_nothing(pool):
-    """The pre-count is not enough: FOR UPDATE is not a predicate lock.
-
-    It locks the rows it finds, so it cannot stop an INSERT committing between the count
-    and the DELETE — and the DELETE takes a fresh READ COMMITTED snapshot that would
-    include the new row. Here the pre-count is made to report 1 while 2 rows are really
-    in scope, which is exactly what that race looks like from inside the transaction.
-    The post-check must roll the whole thing back.
-    """
+    """The pre-count is not enough: FOR UPDATE locks the rows it finds, not a predicate, so an
+    INSERT can commit between the count and the DELETE — which takes a fresh snapshot and would
+    include it. The pre-count here reports 1 while 2 rows are in scope, which is what that race
+    looks like from inside the transaction, and the post-check must roll it all back."""
     a, b = _sid(), _sid()
     await upsert_application(pool, submission_id=a, payload=_payload(), cohort_name="calib")
     await upsert_application(pool, submission_id=b, payload=_payload(x=1), cohort_name="calib")

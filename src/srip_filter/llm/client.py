@@ -1,22 +1,15 @@
-"""LLM I/O boundary (Phase 0.4).
+"""LLM I/O boundary — a thin wrapper around OpenAI Structured Outputs, task-agnostic (prompts
+live in ``prompts/``). It caches by ``(task, sha256(input))``, bounds concurrency, and paces
+against a TPM ceiling.
 
-A thin, replaceable wrapper around OpenAI Structured Outputs. Responsibilities:
+**The two failure policies are the load-bearing part.** Conflating them cost a whole calibration
+run: a 30k-TPM rate limit turned 307 of 466 real applications into NEEDS_REVIEW (2026-07-29). A
+*transient* error (429, timeout, connection, 5xx) is retried with backoff to
+``llm.max_attempts``; a *terminal* one (unparseable output) gets the PRD §8 attempt-plus-retry
+and raises. Only terminal failures may become NEEDS_REVIEW — a rate limit is our problem, not
+the applicant's.
 
-* parse responses directly into the Task A/B/C/D pydantic models (PRD §8);
-* an **in-run cache** keyed by ``(task, sha256(input))`` so identical inputs and retries are
-  free within a single run (stateless: it does not persist across runs);
-* **bounded concurrency** via an ``asyncio.Semaphore`` sized from ``config.llm.max_concurrency``;
-* **two different failure policies**, because conflating them cost a whole calibration run
-  (2026-07-29: a 30k-TPM rate limit turned 307 of 466 real applications into NEEDS_REVIEW):
-  a *transient* error (429, timeout, connection, 5xx) is retried with exponential backoff up
-  to ``config.llm.max_attempts``, while a *terminal* one (unparseable/invalid output) gets
-  the PRD §8 initial-attempt-plus-one-retry and then raises ``LLMParseFailure``. Only the
-  latter should ever become a NEEDS_REVIEW row; a rate limit is our problem, not the
-  applicant's.
-
-Prompt templates live in ``prompts/`` and are passed in by the per-task modules; this client is
-task-agnostic. Every test uses :class:`FakeLLMClient` — no test calls a real model. The real
-OpenAI path is exercised by hand, via ``scripts/replay.py`` against a locally-run server.
+No test calls a real model; the OpenAI path is exercised by hand via ``scripts/replay.py``.
 """
 
 from __future__ import annotations
@@ -48,26 +41,19 @@ T = TypeVar("T", bound=BaseModel)
 
 logger = logging.getLogger(__name__)
 
-# Failures that say "ask again shortly", not "this input cannot be graded". Retrying these is
-# the difference between a slow drain and a needs-review queue full of healthy applications.
+# "Ask again shortly", not "this input cannot be graded". Retrying these is the difference
+# between a slow drain and a needs-review queue full of healthy applications.
 TRANSIENT_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
 
 
 class TokenBucket:
-    """Paces requests against a tokens-per-minute ceiling, so 429s never happen.
+    """Paces requests against a tokens-per-minute ceiling so 429s never happen — a batch becomes
+    *slower* rather than *lossy*. Refill is continuous, so a burst is smoothed instead of
+    slamming the first second of every minute.
 
-    Backoff alone is reactive: once demand exceeds the account's TPM, most calls fail once
-    before succeeding, and a long burst can exhaust a row's retry budget and route a healthy
-    application to a human. This bucket makes a batch *slower* instead of *lossy* — the drain
-    grades everything, just spread over more minutes.
-
-    Continuous refill (not per-minute buckets) so a burst is smoothed rather than allowed to
-    slam the first second of every minute.
-
-    ponytail: per-process, because the queue-claim model means one drain at a time. Two
-    overlapping drains would each hold their own bucket and collectively exceed the limit —
-    the transient backoff is the backstop for that. Move this into Postgres only if
-    overlapping drains ever become normal.
+    Per-process, because the queue-claim model means one drain at a time; two overlapping drains
+    would each hold a bucket and collectively exceed the limit, with the transient backoff as
+    the backstop. Move it into Postgres only if overlapping drains become normal.
     """
 
     def __init__(self, tokens_per_minute: int) -> None:
@@ -78,12 +64,9 @@ class TokenBucket:
         self._lock = asyncio.Lock()
 
     async def acquire(self, tokens: int) -> float:
-        """Wait until ``tokens`` are available, then spend them. Returns seconds waited.
-
-        A single request larger than the whole per-minute budget would never be satisfiable,
-        so it is clamped to the capacity — better one over-budget call (which backoff can
-        absorb) than a permanent hang.
-        """
+        """Wait until ``tokens`` are available, then spend them; returns seconds waited. A
+        request larger than the whole budget is clamped to capacity — better one over-budget
+        call, which backoff can absorb, than a permanent hang."""
         want = float(min(tokens, self.capacity))
         waited = 0.0
         while True:
@@ -103,13 +86,9 @@ class TokenBucket:
 
 
 class CacheBackend(Protocol):
-    """Durable second-level cache behind the in-run dict (P3, PRD v3 §5).
-
-    The Postgres implementation is :class:`srip_filter.db.PgCacheBackend`; tests use a
-    dict-backed fake. ``get`` returns the previously stored ``model_dump`` payload (or
-    None); the client re-validates it into the task schema, so a corrupt row degrades to
-    a cache miss, never a crash.
-    """
+    """Durable second-level cache behind the in-run dict (PRD v3 §5) — Postgres in production,
+    a dict in tests. ``get`` returns a stored ``model_dump`` payload, which the client
+    re-validates, so a corrupt row degrades to a cache miss rather than a crash."""
 
     async def get(self, task: str, input_sha256: str) -> dict | None: ...
 
@@ -117,11 +96,8 @@ class CacheBackend(Protocol):
 
 
 class LLMParseFailure(Exception):
-    """Raised when a response cannot be parsed/validated after one retry.
-
-    The pipeline catches this and routes the applicant to NEEDS_REVIEW with reason
-    "LLM_PARSE_FAILURE" — never a silent rejection (PRD §8).
-    """
+    """A response could not be parsed after one retry. The pipeline routes the applicant to
+    NEEDS_REVIEW — never a silent rejection (PRD §8)."""
 
     def __init__(self, task: str, detail: str) -> None:
         super().__init__(f"[{task}] {detail}")
@@ -130,20 +106,16 @@ class LLMParseFailure(Exception):
 
 
 class BaseLLMClient(ABC):
-    """Shared boundary behavior: in-run cache, bounded concurrency, retry-once fallback.
-
-    Subclasses implement :meth:`_call_once`, the one-shot parsed call.
-    """
+    """Shared boundary behavior: caching, bounded concurrency, and the retry policy. Subclasses
+    implement :meth:`_call_once`, the one-shot parsed call."""
 
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._cache: dict[tuple[str, str], BaseModel] = {}
         self._semaphore = asyncio.Semaphore(config.llm.max_concurrency)
-        # Optional durable cache (P3). Settable, not a constructor arg, so the many
-        # existing FakeLLMClient call sites stay untouched; None preserves v2 behavior.
+        # Settable rather than a constructor arg, so existing call sites stay untouched.
         self.cache_backend: CacheBackend | None = None
-        # Rate limiting belongs to the real network boundary only: OpenAILLMClient sets this,
-        # so FakeLLMClient (and therefore the whole test suite) is never paced.
+        # Only the real network boundary sets this, so the test suite is never paced.
         self.bucket: TokenBucket | None = None
 
     def model_for(self, task: TaskName) -> str:
@@ -165,10 +137,8 @@ class BaseLLMClient(ABC):
     ) -> T:
         """Run a structured task and return the parsed model.
 
-        Two cache levels, same key ``(task, sha256(cache_text or user))``: the in-run dict
-        (free retries within a process lifetime), then the optional durable backend —
-        Postgres ``llm_cache`` in production — so re-grades re-bill only changed fields
-        (PRD v3 §2.3). A backend row that fails schema validation degrades to a miss.
+        Two cache levels on one key: the in-run dict, then the durable backend, so re-grades
+        re-bill only changed fields (PRD v3 §2.3). A row that fails validation degrades to a miss.
         """
         key = self._cache_key(task, cache_text if cache_text is not None else user)
         cached = self._cache.get(key)
@@ -180,7 +150,7 @@ class BaseLLMClient(ABC):
             if stored is not None:
                 try:
                     result = schema.model_validate(stored)
-                except Exception:  # corrupt/stale row: treat as a miss, re-bill honestly
+                except Exception:  # corrupt row: treat as a miss and re-bill honestly
                     logger.warning("durable LLM cache row invalid task=%s; ignoring", task)
                 else:
                     logger.debug("durable LLM cache hit task=%s", task)
@@ -196,12 +166,9 @@ class BaseLLMClient(ABC):
         return result
 
     def _estimate_tokens(self, system: str, user: str) -> int:
-        """Rough token cost of one round trip: prompt chars/4 plus an output allowance.
-
-        Deliberately an estimate — importing a tokenizer to pace requests would add a
-        dependency and a model-version coupling to save a few percent of accuracy. Rounding
-        up is the safe direction: it paces slightly early.
-        """
+        """Rough token cost of one round trip. Deliberately an estimate: a tokenizer would add a
+        dependency and a model-version coupling for a few percent, and rounding up only paces
+        slightly early."""
         return (len(system) + len(user)) // 4 + self._config.llm.estimated_output_tokens
 
     def _backoff_seconds(self, attempt: int) -> float:
@@ -211,14 +178,8 @@ class BaseLLMClient(ABC):
     async def _complete_with_retry(
         self, task: TaskName, system: str, user: str, schema: type[T]
     ) -> T:
-        """Call the model, retrying by failure *kind* (see the module docstring).
-
-        Transient failures get ``max_attempts`` tries with exponential backoff — a sustained
-        rate limit must slow the pipeline down, never route healthy applications to a human.
-        Terminal failures keep the PRD §8 policy: initial attempt plus one retry, then
-        ``LLMParseFailure``. The raised message names the kind so the audit trail can say
-        *why* a row is unscoreable.
-        """
+        """Call the model, retrying by failure *kind* (see the module docstring). The raised
+        message names the kind, so the audit trail can say *why* a row is unscoreable."""
         model = self.model_for(task)
         max_attempts = max(2, self._config.llm.max_attempts)
         last_error: Exception | None = None
@@ -238,10 +199,8 @@ class BaseLLMClient(ABC):
                 transient = isinstance(error, TRANSIENT_ERRORS)
                 transient_seen = transient_seen or transient
                 # Class name, not str(error): a terminal failure's message can quote applicant
-                # content back at us (a pydantic ValidationError echoing the raw output, an
-                # OpenAI refusal naming what it refused), and logs are non-PII by law. The
-                # kind plus the attempt counter is what diagnoses a 429 storm; the full
-                # message still reaches the audit record via LLMParseFailure below.
+                # content back at us, and logs are non-PII. The kind plus the attempt counter
+                # diagnoses a 429 storm; the full message reaches the audit record below.
                 logger.warning(
                     "LLM task=%s attempt=%d/%d failed (%s): %s",
                     task,
@@ -250,8 +209,7 @@ class BaseLLMClient(ABC):
                     "transient" if transient else "terminal",
                     type(error).__name__,
                 )
-                # A non-transient error is a property of the input; one retry is the PRD §8
-                # allowance and a third attempt would just re-burn tokens.
+                # A terminal error is a property of the input: a third attempt re-burns tokens.
                 if not transient and attempt >= 1:
                     break
                 if attempt + 1 < max_attempts:
@@ -310,12 +268,9 @@ class OpenAILLMClient(BaseLLMClient):
 
 
 class FakeLLMClient(BaseLLMClient):
-    """Test double driven by a handler. No network, no API spend.
-
-    ``handler(task, user, schema)`` returns a parsed model (or an awaitable of one). Raise
-    :class:`LLMParseFailure` from it to exercise the NEEDS_REVIEW path, or any other exception
-    to exercise the retry. Each ``_call_once`` is recorded in :attr:`calls`.
-    """
+    """Test double driven by a handler — no network, no API spend. ``handler(task, user,
+    schema)`` returns a parsed model or an awaitable; raise :class:`LLMParseFailure` from it for
+    the NEEDS_REVIEW path, or anything else for the retry. Calls are recorded in :attr:`calls`."""
 
     def __init__(self, config: AppConfig, handler: FakeHandler | None = None) -> None:
         super().__init__(config)

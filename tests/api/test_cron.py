@@ -1,9 +1,8 @@
-"""P11.1–11.3 cron-drain tests — auth, ordering, and the row cap.
+"""Cron-drain tests — auth, ordering, and the row cap.
 
-No database and no pipeline: ``dbmod``'s two drain-time calls and ``process_one`` are
-monkeypatched, so what is under test is the endpoint's own contract — fail-closed auth,
-migrate → reap → drain ordering, and the bounded loop. Per-row isolation is already
-covered by ``tests/test_worker.py`` against the same unmodified ``process_one``.
+No database and no pipeline: the drain-time calls are monkeypatched, so what is under test is
+the endpoint's own contract. Per-row isolation is already covered in ``test_worker.py``,
+against the same unmodified ``process_one``.
 """
 
 from __future__ import annotations

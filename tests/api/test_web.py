@@ -1,9 +1,8 @@
-"""Server-rendered UI tests (Phase 10): page routes + static assets.
+"""Server-rendered UI tests: page routes and static assets.
 
 TestClient cannot run browser JS, so these cover what the server controls — each page renders
-(200, html, expected markers) and the static assets serve with sane content types. The
-interactive flows (sort/what-if) are verified manually in a browser.
-Zero LLM spend: nothing is graded here.
+with its expected markers, and assets serve with sane content types. The interactive flows are
+verified manually in a browser.
 """
 
 from __future__ import annotations
@@ -20,9 +19,7 @@ def client() -> TestClient:
     return TestClient(create_app(config=AppConfig()))
 
 
-# --------------------------------------------------------------------------------------------
-# Page routes
-# --------------------------------------------------------------------------------------------
+# --- Page routes ---
 
 
 def test_index_renders_live_dashboard(client: TestClient) -> None:
@@ -74,9 +71,7 @@ def test_pages_never_contain_pii_placeholders(client: TestClient) -> None:
         assert "@example.com" not in text  # no baked-in records
 
 
-# --------------------------------------------------------------------------------------------
-# Static assets
-# --------------------------------------------------------------------------------------------
+# --- Static assets ---
 
 
 def test_static_css_serves(client: TestClient) -> None:
@@ -112,9 +107,7 @@ def test_static_unknown_is_404_not_500(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
-# --------------------------------------------------------------------------------------------
-# Wiring regression — UI additions must not disturb the JSON API surface
-# --------------------------------------------------------------------------------------------
+# --- Wiring regression — UI additions must not disturb the JSON API surface ---
 
 
 def test_health_still_ok_with_ui_mounted(client: TestClient) -> None:
@@ -123,9 +116,7 @@ def test_health_still_ok_with_ui_mounted(client: TestClient) -> None:
     assert resp.json()["status"] == "ok"  # queue detail is covered by tests/api/test_health.py
 
 
-# --------------------------------------------------------------------------------------------
-# Bulk-purge control (PRD v3 §9) — rendered only where a session is required
-# --------------------------------------------------------------------------------------------
+# --- Bulk-purge control (PRD v3 §9) — rendered only where a session is required ---
 
 
 @pytest.mark.parametrize("path", ["/", "/audit", "/cohorts"])

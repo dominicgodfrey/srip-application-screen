@@ -46,9 +46,7 @@ def make_fetcher(cfg: AppConfig, responder) -> tuple[ResumeFetcher, CountingHand
     return ResumeFetcher(cfg, transport=httpx.MockTransport(handler)), handler
 
 
-# ------------------------------------------------------------------------------------------
-# URL validation (the SSRF policy) — pure, no transport involved
-# ------------------------------------------------------------------------------------------
+# --- URL validation (the SSRF policy) — pure, no transport involved ---
 
 
 def test_validate_accepts_allowed_https_url() -> None:
@@ -86,9 +84,7 @@ def test_empty_allowlist_means_nothing_fetchable() -> None:
     assert validate_resume_url(GOOD_URL, cfg) == FAIL_HOST_NOT_ALLOWED
 
 
-# ------------------------------------------------------------------------------------------
-# Fetching — MockTransport
-# ------------------------------------------------------------------------------------------
+# --- Fetching — MockTransport ---
 
 
 async def test_fetch_happy_path_returns_bytes() -> None:

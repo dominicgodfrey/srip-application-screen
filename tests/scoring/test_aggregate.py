@@ -1,12 +1,8 @@
-"""Tests for Stage 8 aggregation + ranking (Phase 7). Deterministic, no API spend.
+"""Tests for Stage 8 aggregation + ranking. Deterministic, no API spend.
 
-Organized by sub-task:
-  * 7.1 — :func:`compose_final_score` / :func:`finalize_score`: the §10.1 additive composition
-    and §12 #1 (no optional-signal absence ever lowers ``final_score``).
-  * 7.2 — :func:`rank_records`: outcome finalization, the deterministic tiebreaker chain, and
-    §12 #2 (no bonus changes a ``REJECTED`` outcome) / #5 (ranking stable across reruns).
-
-The consolidated §12 invariant suite (7.4) lives at the bottom of this file.
+Covers the §10.1 additive composition, outcome finalization, and the deterministic tiebreaker,
+plus the §12 invariants they own: absence never lowers a score, no bonus changes a rejection,
+and ranking is stable across reruns. The consolidated invariant suite is at the bottom.
 """
 
 from __future__ import annotations
@@ -38,9 +34,7 @@ def _scores(
     )
 
 
-# ------------------------------------------------------------------------------------------------
-# 7.1 — compose_final_score / finalize_score
-# ------------------------------------------------------------------------------------------------
+# --- 7.1 — compose_final_score / finalize_score ---
 
 
 def test_compose_sums_all_five_components() -> None:
@@ -100,9 +94,7 @@ def test_finalize_score_writes_into_record() -> None:
     assert rec.final_score == 75.0
 
 
-# ------------------------------------------------------------------------------------------------
-# 7.2 — rank_records
-# ------------------------------------------------------------------------------------------------
+# --- 7.2 — rank_records ---
 
 
 def _rec(
@@ -190,14 +182,10 @@ def test_ranking_stable_across_reruns() -> None:
     assert first["x"] < first["y"]  # 'x' < 'y' on the submission_id tiebreak
 
 
-# ================================================================================================
-# 7.4 — Consolidated PRD §12 invariant suite
-# ================================================================================================
-# A single synthetic population spanning all three outcomes, asserting the five §12 invariants
-# end-to-end at the aggregate/output level. (The full pipeline pass over a CSV is Phase 8.)
-# Note GPA points are an input to this stage (computed in gpa.py); §12 #4 is pinned here at the
-# composition level — an approved sub-threshold applicant arrives at the gradient bottom (0)
-# and the aggregate must carry, never inflate, it.
+# --- Consolidated PRD §12 invariant suite ---
+# One synthetic population spanning all three outcomes. GPA points are an input to this stage,
+# so #4 is pinned at the composition level: an approved sub-threshold applicant arrives at the
+# gradient bottom, and the aggregate must carry that, never inflate it.
 
 
 def _population() -> list[AuditRecord]:

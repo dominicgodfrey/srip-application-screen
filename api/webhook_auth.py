@@ -1,24 +1,18 @@
-"""Webhook authentication (P10, live scheme).
+"""Webhook authentication — the partner's dispatcher sends a static ``X-ATS-Secret`` header.
 
-The partner's dispatcher sends a single static header (`thinkNeuroWebsite/lib/ats.ts`)::
+Compared in constant time against any configured secret, current or previous, which is the
+zero-downtime rotation path. A failure raises :class:`WebhookAuthError` with a machine reason
+for the log while the response stays a generic 401, so probes learn nothing.
 
-    X-ATS-Secret: <ATS_WEBHOOK_SECRET>
+**Fail closed:** with no secrets configured every request is rejected. Their dispatcher omits
+the header entirely when its env var is unset, so an unset secret on either side looks like a
+healthy deploy that authenticates nothing.
 
-Rules: constant-time comparison; any configured secret (current or previous) may match —
-that is the zero-downtime rotation path. A failure raises :class:`WebhookAuthError` with a
-machine reason for the server log; the HTTP response stays a generic 401 so probes learn
-nothing (CLAUDE.md security rules).
+HMAC (timestamp, body binding, replay window) is the intended pre-production hardening and
+lives in git history; this module is the seam to restore it. A static secret over HTTPS is
+replayable and does not bind the body — accepted deliberately, revisit before go-live.
 
-**Fail closed:** with no secrets configured every request is rejected. Their dispatcher
-omits the header entirely when its env var is unset, so an unset secret on either side
-looks like a healthy deploy that authenticates nothing — rejecting is the safe read.
-
-HMAC (timestamp + body binding + replay window) was the v3 design and is the intended
-pre-production hardening; it lives in git history and this module is the
-seam to restore it. A static bearer secret over HTTPS is replayable and does not bind the
-body — accepted deliberately, revisit before go-live.
-
-Pure functions, no FastAPI imports — unit-testable and reusable by the replay tool.
+Pure functions, no FastAPI imports, so the replay tool shares them.
 """
 
 from __future__ import annotations
@@ -37,29 +31,20 @@ class WebhookAuthError(Exception):
 
 
 def constant_time_match(provided: str | None, secrets: tuple[str, ...]) -> bool:
-    """True when ``provided`` equals any configured secret, compared in constant time.
+    """True when ``provided`` equals any configured secret, compared in constant time. The one
+    primitive behind every header-secret check here, so the encoding rule lives in one place.
 
-    The shared primitive behind every header-secret check in the service (the webhook's
-    ``X-ATS-Secret`` and the cron drain's bearer token), so the encoding rule below lives
-    in exactly one place.
-
-    **Both sides are encoded to bytes first, and that is load-bearing.**
-    ``hmac.compare_digest`` refuses a non-ASCII ``str`` with a ``TypeError``, and ASGI
-    servers hand header values over latin-1 decoded — so a single byte above 0x7F in an
-    attacker-controlled header turned a 401 into an unhandled 500 on two unauthenticated
-    endpoints (never a bypass: the request still failed closed, but a 500 is a stack trace
-    in the platform log and violates the §2.1 "never a 500 on bad input" rule).
-
-    latin-1 round-trips the exact bytes the server read, and ``replace`` means even an
-    exotic codepoint from a non-conforming server degrades to a byte that matches nothing.
-    Configured secrets are encoded utf-8, which is how the environment delivers them; for
-    the ASCII secrets this service actually uses the two encodings are identical.
+    **Encoding both sides to bytes first is load-bearing.** ``compare_digest`` refuses a
+    non-ASCII ``str`` with a ``TypeError``, and ASGI servers hand header values over latin-1
+    decoded — so one byte above 0x7F in an attacker-controlled header turned a 401 into an
+    unhandled 500 on two unauthenticated endpoints. Never a bypass, but a 500 is a stack trace
+    in the platform log and breaks the §2.1 "never a 500 on bad input" rule. latin-1 round-trips
+    exactly what the server read, and ``replace`` degrades anything exotic to a non-match.
     """
     if not provided or not secrets:
         return False
     candidate = provided.encode("latin-1", "replace")
-    # Not short-circuited on the first match: every configured secret is compared so a
-    # rotation window cannot be distinguished by timing.
+    # Not short-circuited: every secret is compared, so timing cannot reveal a rotation.
     matched = False
     for secret in secrets:
         matched |= hmac.compare_digest(secret.encode("utf-8"), candidate)
@@ -67,11 +52,8 @@ def constant_time_match(provided: str | None, secrets: tuple[str, ...]) -> bool:
 
 
 def verify_webhook(secret_header: str | None, secrets: tuple[str, ...]) -> None:
-    """Raise :class:`WebhookAuthError` unless the header matches a configured secret.
-
-    ``secrets`` is (current,) or (current, previous) — any match passes. The comparison is
-    :func:`constant_time_match`, so timing reveals nothing about how close a guess got.
-    """
+    """Raise :class:`WebhookAuthError` unless the header matches a configured secret — either
+    current or previous, so a rotation window passes both."""
     if not secrets:
         raise WebhookAuthError("no_secrets_configured")
     if not secret_header:

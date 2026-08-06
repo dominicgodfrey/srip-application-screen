@@ -1,15 +1,7 @@
-"""Server-rendered page routes (Phase 10 UI).
+"""Server-rendered page routes: the dashboard, the audit browser, and the cohort what-if tool.
 
-Three thin HTML routes that return Jinja2-rendered shells; **all data fetching happens in the
-browser** via ``fetch`` against the existing JSON API (so these templates never contain applicant
-PII). Registered onto the app by :func:`register_pages` from ``api.main``, keeping ``main.py`` a
-clean JSON-API surface.
-
-* ``GET /``         → live cohort dashboard over the database (v3 screen 1)
-* ``GET /audit``    → per-applicant audit-record browser over the live DB
-* ``GET /cohorts``  → cohort what-if tool over the live DB
-
-``tags=["pages"]`` keeps them out of the JSON OpenAPI groupings.
+Thin Jinja2 shells — **all data fetching happens in the browser** against the JSON API, so
+these templates never contain applicant PII.
 """
 
 from __future__ import annotations
@@ -18,18 +10,16 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-# Branding (PRD visual-continuity decision): reuse ThinkNeuro identity, label the app clearly.
 BRAND = "ThinkNeuro"
 APP_TITLE = "SRIP Track 2 — Application Filter"
 
 
 def _ctx(**extra: object) -> dict[str, object]:
-    """Base template context shared by every page (non-PII only).
+    """Base template context shared by every page, non-PII only.
 
-    ``show_purge`` gates the bulk-purge control in ``base.html``. Only these three routes set
-    it, and they are all behind the session middleware — ``login.html`` extends the same base
-    but builds its context in ``api.main``, so the destructive control never renders to an
-    unauthenticated visitor.
+    ``show_purge`` gates the bulk-purge control, and only these session-gated routes set it —
+    ``login.html`` extends the same base but builds its context in ``api.main``, so the
+    destructive control never renders to an unauthenticated visitor.
     """
     return {"brand": BRAND, "app_title": APP_TITLE, "show_purge": True, **extra}
 

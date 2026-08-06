@@ -1,23 +1,14 @@
-"""Cohort assignment — the PRD §11 downstream layer (Phase 11, policy v2 in 11.5).
+"""Cohort assignment — the PRD §11 downstream layer. Deterministic, pure, and LLM-free.
 
-Turns the ranked filter output into program placements under the **tiered cost model**: the
-tiers are ordered by competitiveness *and* cost — HONORS > INTENSIVE > REGULAR (the configured
-``cohort.tiers`` order, most expensive first, is load-bearing). Staff caps honors/intensive
-(regular optionally); capped tiers fill **strictly by rank** among the students who chose them,
-and regular is the de-facto landing tier for applicants who listed it.
+Ranked output becomes program placements under the tiered cost model, where ``cohort.tiers``
+order (most expensive first) is load-bearing. Capped tiers fill strictly by rank among the
+students who chose them. Three hard rules:
 
-Hard policy rules:
-  * **Cost ceiling.** A student is never placed in a tier above their *first choice* — even one
-    they explicitly ranked #2/#3. Higher tiers cost the student more; the first choice caps what
-    they signed up to pay. Pruned tiers are reported in ``excluded_by_cost``.
-  * **No silent overflow.** A student whose eligible choices are all full is **waitlisted** with
-    a reason naming the chosen program(s) and their remaining regular eligibility — a manual
-    staff decision, never an automatic placement in a tier they didn't list.
-  * Only ``RANKED`` records are ever assignable (PRD §11: ``REJECTED`` can never resurface;
-    ``NEEDS_REVIEW`` is excluded with a warning — resolve, re-rank, rerun).
-
-Entirely deterministic, pure, and LLM-free; with no caps set, everyone lands in their first
-choice (the realistic case), and recomputation is instant for staff what-if iteration.
+  * **Cost ceiling.** Never place a student in a tier above their *first choice*, even one they
+    ranked #2 — higher tiers cost more, and the first choice caps what they signed up to pay.
+  * **No silent overflow.** A student whose eligible choices are all full is waitlisted for a
+    staff decision, never auto-placed in a tier they did not list.
+  * Only ``RANKED`` records are assignable; ``NEEDS_REVIEW`` is excluded with a warning.
 """
 
 from __future__ import annotations
@@ -42,14 +33,11 @@ COHORT_ASSIGNMENTS_FILE = "cohort_assignments.csv"
 
 
 def normalize_choices(choices: ProgramChoices, tiers: Sequence[str]) -> list[str]:
-    """Parse an applicant's free-text program choices into an ordered tier preference list.
+    """Parse free-text program choices into an ordered tier preference list.
 
-    The Fillout choice strings are inconsistent (``Summer 2026- INTENSIVE`` vs ``Summer 2026 -
-    INTENSIVE``), so each slot is matched by case-insensitive *containment* of exactly one
-    canonical tier token from ``tiers``. A slot containing zero tokens (blank / garbage) or more
-    than one (ambiguous) is dropped, never guessed. Repeated tiers dedupe to their first
-    occurrence — an applicant listing the same tier three times means "this tier or nothing",
-    not three choices.
+    The choice strings are inconsistently punctuated, so each slot matches by containment of
+    exactly one canonical tier token; zero tokens or more than one is dropped, never guessed.
+    Repeats dedupe — listing one tier three times means "this tier or nothing", not three choices.
     """
     preferences: list[str] = []
     for raw in (choices.first, choices.second, choices.third):
@@ -64,9 +52,7 @@ def normalize_choices(choices: ProgramChoices, tiers: Sequence[str]) -> list[str
     return preferences
 
 
-# ================================================================================================
-# 11.2 / 11.5 — rank-greedy assignment under the tiered cost model
-# ================================================================================================
+# --- Rank-greedy assignment under the tiered cost model ---
 
 
 def _waitlist_reason(eligible: list[str], excluded: list[str], lowest_tier: str) -> str:
@@ -87,14 +73,9 @@ def assign_cohorts(
 ) -> CohortResult:
     """Assign every ``RANKED`` applicant to a program tier (PRD §11). Pure and deterministic.
 
-    Walks the ranking top-down. Each student's listed choices are first pruned by the **cost
-    ceiling** (any tier above their first choice is excluded — reported in
-    ``excluded_by_cost``); they are then seated in the first eligible tier, in their listed
-    order, with an open seat. Capped tiers therefore fill strictly by rank among the students
-    who chose them. A student with no open eligible tier is **waitlisted** for manual staff
-    handling (the reason records their regular eligibility); a student with no parseable choice
-    at all is ``unassignable``. ``REJECTED`` is never seated; ``NEEDS_REVIEW`` is excluded with
-    a warning so staff can preview sizing before every case is resolved.
+    Walks the ranking top-down: each student's choices are pruned by the cost ceiling, then they
+    take the first one with an open seat. No open eligible tier means waitlisted; no parseable
+    choice at all means ``unassignable``.
     """
     tiers = list(cfg.cohort.tiers)
     tier_index = {tier: position for position, tier in enumerate(tiers)}
@@ -210,9 +191,7 @@ def assign_cohorts(
     )
 
 
-# ================================================================================================
-# 11.3 — output serialization (in-memory, stateless — same pattern as outputs.py)
-# ================================================================================================
+# --- Output serialization (in-memory, stateless — the outputs.py pattern) ---
 
 
 def _rank_key(entry: CohortAssignment) -> tuple[bool, int, str]:
@@ -220,14 +199,10 @@ def _rank_key(entry: CohortAssignment) -> tuple[bool, int, str]:
 
 
 def _cohort_sort_key(result: CohortResult) -> Callable[[CohortAssignment], tuple]:
-    """Sort key grouping rows by assigned cohort (tier order), then rank within each group.
-
-    Assigned rows come first, grouped in the configured tier order (the ``summary.tiers``
-    insertion order); waitlisted rows follow, then unassignable — so each cohort's roster
-    reads as one contiguous block.
-    """
+    """Sort key grouping rows by assigned cohort in tier order, then rank — so each cohort's
+    roster reads as one contiguous block, with waitlisted and unassignable rows after."""
     tier_order = {tier: position for position, tier in enumerate(result.summary.tiers)}
-    unplaced = len(tier_order)  # waitlist/unassignable sort after every real tier
+    unplaced = len(tier_order)  # sorts after every real tier
 
     def key(entry: CohortAssignment) -> tuple:
         group = tier_order.get(entry.assigned_tier or "", unplaced)
@@ -240,14 +215,8 @@ def _cohort_sort_key(result: CohortResult) -> Callable[[CohortAssignment], tuple
 
 
 def cohort_assignments_csv(result: CohortResult) -> str:
-    """All buckets as one CSV, **grouped by assigned cohort** (tier order, then rank within).
-
-    One row per ``RANKED`` applicant: each tier's roster is a contiguous block, followed by
-    the waitlist and any unassignable rows — so staff can read or split the file by cohort
-    directly. ``choices`` shows the normalized preference order joined with `` > ``;
-    ``excluded_by_cost`` lists tiers pruned by the first-choice cost ceiling, joined with
-    `` | ``.
-    """
+    """All buckets as one CSV, grouped by assigned cohort then rank, so staff can read or split
+    the file by cohort directly. One row per ``RANKED`` applicant."""
     header = [
         "assigned_tier",
         "rank",
@@ -292,11 +261,8 @@ def cohort_roster_filename(tier: str) -> str:
 
 
 def cohort_roster_csv(result: CohortResult, tier: str) -> str:
-    """One cohort's roster: the applicants assigned to ``tier``, by rank, with contact details.
-
-    The staff-facing per-cohort export (name, email, phone) used for outreach once an
-    allocation is settled. Contains only ``assigned`` rows for the requested tier.
-    """
+    """One cohort's roster by rank with contact details — the staff export for outreach once an
+    allocation is settled. Only ``assigned`` rows for the requested tier."""
     header = ["rank", "submission_id", "name", "email", "phone", "final_score"]
     members = sorted((a for a in result.assignments if a.assigned_tier == tier), key=_rank_key)
     rows: list[list[object]] = [

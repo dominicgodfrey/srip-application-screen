@@ -15,8 +15,8 @@ def test_defaults_match_prd() -> None:
     cfg = AppConfig()
     assert cfg.gpa.threshold == 3.3
     assert cfg.gpa.score_max == 40.0
-    # No essay_length section exists: no length rule decides anything, and a knob that
-    # cannot fire on a real applicant can only fire on a stale config (a false positive).
+    # No essay_length section exists: a knob that cannot fire on a real applicant can only
+    # fire on a stale config, i.e. as a false positive.
     assert not hasattr(cfg, "essay_length")
     assert cfg.essay_scoring.quality_max_each == 15  # v3 (SCORING.md)
     assert cfg.essay_scoring.grammar_penalty_max == 3

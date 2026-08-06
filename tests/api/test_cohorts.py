@@ -1,9 +1,9 @@
-"""``POST /cohorts`` tests. FastAPI ``TestClient``, synthetic data, no API spend.
+"""``POST /cohorts`` — the offline entry point, assigning from a re-uploaded
+``decisions.jsonl``. Synthetic data, no API spend.
 
-The offline/durable entry point: cohort assignment from a re-uploaded ``decisions.jsonl``.
-Covers capacity query params, the ``?format=csv`` download and per-tier rosters, and graceful
-413/422 on malformed uploads (never a 500, no applicant content echoed). The live-DB twin
-(``POST /api/cohorts``) is covered in ``test_admin_api.py``.
+Covers capacity query params, CSV downloads and per-tier rosters, and graceful 413/422 on
+malformed uploads: never a 500, and no applicant content echoed. The live-DB twin is covered
+in ``test_admin_api.py``.
 """
 
 from __future__ import annotations
@@ -51,9 +51,7 @@ def _jsonl_upload(records: list[AuditRecord]) -> dict:
     return {"file": ("decisions.jsonl", decisions_jsonl(records).encode("utf-8"))}
 
 
-# --------------------------------------------------------------------------------------------
-# POST /cohorts — re-uploaded decisions.jsonl (the durable entry point)
-# --------------------------------------------------------------------------------------------
+# --- POST /cohorts — re-uploaded decisions.jsonl (the durable entry point) ---
 
 
 def test_upload_cohorts_round_trips_decisions_jsonl() -> None:

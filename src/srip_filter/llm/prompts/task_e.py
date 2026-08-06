@@ -1,11 +1,7 @@
-"""Task E — resume signal extraction (PRD §7.2, Phase 12.4).
+"""Task E — resume signal extraction (PRD §7.2).
 
-Mechanical extraction (mini tier): turn the extracted plain text of a resume PDF into counted,
-classified signals. Output parses into :class:`srip_filter.models.TaskEOutput`.
-
-Bonus-only signal: nothing here can reject or block an applicant. The deterministic layer
-(:func:`srip_filter.scoring.resume.resume_signal_bonus`) prices the counts from config — the
-model's job is faithful *counting and classification*, never scoring (the Task C pattern).
+Mechanical extraction: a resume's plain text becomes counted, classified signals. Bonus-only,
+so nothing here can reject, and config prices the counts — the same split as Task C.
 """
 
 from __future__ import annotations

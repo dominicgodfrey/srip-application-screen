@@ -1,10 +1,8 @@
-"""P4 — v3 webhook pipeline end-to-end tests (PRD v3 §4 + §10 invariants, zero spend).
+"""Webhook pipeline end-to-end tests (PRD v3 §4), driven with synthetic payloads and a
+scripted ``FakeLLMClient``. Zero spend.
 
-Drives ``grade_webhook_applicant`` / ``make_grade_fn`` with synthetic payloads and a
-scripted ``FakeLLMClient``. The §10 invariants this file owns: (1) essay-3/coursework/
-school absence is neutral, (2) no bonus rescues a rejection, (3) every REJECTED names its
-gate, plus the v3 essay-model rules (profanity in the optional essay rejects; gibberish/
-off-topic there only zeroes the bonus; strict exact word bounds).
+Owns the essay-model rules: profanity anywhere stops the application, gibberish or off-topic
+in the optional essay only zeroes its bonus, and no length rule rejects anyone.
 """
 
 from __future__ import annotations
@@ -85,9 +83,7 @@ def _client(handler=_handler) -> FakeLLMClient:
     return FakeLLMClient(APP, handler=handler)
 
 
-# ------------------------------------------------------------------------------------------------
-# Survivor path + composition
-# ------------------------------------------------------------------------------------------------
+# --- Survivor path + composition ---
 
 
 async def test_survivor_ranked_with_composed_score_and_metadata() -> None:
@@ -123,9 +119,7 @@ async def test_essay3_absence_is_neutral_and_free() -> None:
     assert all(call[0] != "task_f" for call in client.calls)
 
 
-# ------------------------------------------------------------------------------------------------
-# Word bounds retired (owner, 2026-07-28) — the site server-validates them at submit
-# ------------------------------------------------------------------------------------------------
+# --- Word bounds retired (owner, 2026-07-28) — the site server-validates them at submit ---
 
 
 async def test_length_never_gates_a_required_essay() -> None:
@@ -150,9 +144,7 @@ async def test_length_never_gates_a_required_essay() -> None:
         assert client.calls  # graded for real, not short-circuited
 
 
-# ------------------------------------------------------------------------------------------------
-# Optional-essay gate semantics (owner decisions, 2026-07-04)
-# ------------------------------------------------------------------------------------------------
+# --- Optional-essay gate semantics (owner decisions, 2026-07-04) ---
 
 
 async def test_profanity_in_optional_essay_flags_whole_application_for_review() -> None:
@@ -251,9 +243,7 @@ async def test_gibberish_optional_essay_zeroes_bonus_never_rejects() -> None:
     assert rec.scores.technical_essay_bonus == 0.0
 
 
-# ------------------------------------------------------------------------------------------------
-# GPA routing (structured input)
-# ------------------------------------------------------------------------------------------------
+# --- GPA routing (structured input) ---
 
 
 async def test_weighted_only_gpa_routes_to_task_a_not_fraction_math() -> None:
@@ -280,9 +270,7 @@ async def test_weighted_only_gpa_routes_to_task_a_not_fraction_math() -> None:
     assert rec.gpa.normalized_gpa == pytest.approx(3.6)
 
 
-# ------------------------------------------------------------------------------------------------
-# make_grade_fn (worker seam)
-# ------------------------------------------------------------------------------------------------
+# --- make_grade_fn (worker seam) ---
 
 
 async def test_grade_fn_maps_db_row_to_result() -> None:

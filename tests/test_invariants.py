@@ -1,22 +1,9 @@
-"""PRD v3 §10 invariants, tested against the pipeline that actually runs.
+"""PRD v3 §10 invariants #1-#6, asserted against ``grade_webhook_applicant`` — the pipeline
+that actually runs, because an invariant about what the service decides is only worth
+anything on the live decision path.
 
-These lived in ``tests/test_pipeline.py`` and exercised ``grade_one``/``grade_batch`` — the
-v2 CSV batch path, which no route could reach. Deleting that code would have deleted the
-invariant coverage with it, so the assertions were ported here onto
-``grade_webhook_applicant``. That is where they belonged anyway: an invariant about what
-the service decides is only worth anything if it is asserted about the live decision path.
-
-Invariants owned here:
-
-  #1 no optional-signal absence (essay 3, coursework, school, resume) reduces final_score
-  #2 no bonus changes a REJECTED outcome
-  #3 every REJECTED record names its gate in primary_reason
-  #4 GPA below 3.3 yields points only via an approved Task B, and never above the bottom
-  #5 ranking is deterministic and stable across reruns
-  #6 nothing unscoreable is ever REJECTED
-
-(#7 unauthenticated writes, #8 idempotent re-delivery and #9 per-row isolation are
-transport/queue concerns and stay in tests/api/test_webhook.py and tests/test_worker.py.)
+(#7 unauthenticated writes, #8 idempotent re-delivery, and #9 per-row isolation are
+transport/queue concerns and live in tests/api/test_webhook.py and tests/test_worker.py.)
 
 Zero API spend: every model call goes through a scripted FakeLLMClient.
 """
@@ -114,9 +101,7 @@ def _client(handler=_handler) -> FakeLLMClient:
     return FakeLLMClient(APP, handler=handler)
 
 
-# ------------------------------------------------------------------------------------------------
-# #1 — no optional-signal absence ever reduces final_score
-# ------------------------------------------------------------------------------------------------
+# --- #1 — no optional-signal absence ever reduces final_score ---
 
 
 async def test_inv1_every_optional_signal_absent_scores_no_worse_than_present() -> None:
@@ -180,9 +165,7 @@ async def test_inv1_no_bonus_is_ever_negative() -> None:
         ) >= 0.0
 
 
-# ------------------------------------------------------------------------------------------------
-# #2 / #3 — bonuses never touch a rejection, and a rejection always names its gate
-# ------------------------------------------------------------------------------------------------
+# --- #2 / #3 — bonuses never touch a rejection, and a rejection always names its gate ---
 
 
 async def _rejected_by_gibberish() -> AuditRecord:
@@ -268,9 +251,7 @@ async def test_inv3_every_rejection_names_its_gate(case: str) -> None:
     assert rec.decided_at_stage, case
 
 
-# ------------------------------------------------------------------------------------------------
-# #4 — sub-threshold GPA
-# ------------------------------------------------------------------------------------------------
+# --- #4 — sub-threshold GPA ---
 
 
 async def test_inv4_below_threshold_needs_task_b_approval_and_lands_at_the_bottom() -> None:
@@ -325,9 +306,7 @@ async def test_inv4_the_hard_floor_takes_precedence_over_any_explanation() -> No
     assert "task_b" not in called  # zero token spend past the floor
 
 
-# ------------------------------------------------------------------------------------------------
-# #5 — deterministic, stable ranking
-# ------------------------------------------------------------------------------------------------
+# --- #5 — deterministic, stable ranking ---
 
 
 async def test_inv5_ranking_is_stable_across_reruns_and_input_order() -> None:
@@ -373,9 +352,7 @@ async def test_inv5_ties_break_deterministically_not_by_arrival() -> None:
     assert (x.rank, y.rank) == forward
 
 
-# ------------------------------------------------------------------------------------------------
-# #6 — unscoreable is never a rejection
-# ------------------------------------------------------------------------------------------------
+# --- #6 — unscoreable is never a rejection ---
 
 
 async def test_inv6_an_unresolvable_gpa_is_reviewed_never_rejected() -> None:
@@ -455,9 +432,7 @@ async def test_inv6_a_bonus_signal_parse_failure_only_zeroes_that_bonus() -> Non
     assert rec.scores.coursework_bonus == 0.0
 
 
-# ------------------------------------------------------------------------------------------------
-# Fail-fast spend discipline (PRD §0.1) — the reason the gate order exists
-# ------------------------------------------------------------------------------------------------
+# --- Fail-fast spend discipline (PRD §0.1) — the reason the gate order exists ---
 
 
 async def test_a_stage1_rejection_spends_zero_tokens() -> None:

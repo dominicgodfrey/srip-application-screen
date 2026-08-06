@@ -110,9 +110,7 @@ def task_e_client(cfg: AppConfig, signals: TaskEOutput | None = None) -> FakeLLM
     return FakeLLMClient(cfg, handler)
 
 
-# ================================================================================================
-# 12.4 — Task E prompt shape + pure signal-pricing math (zero spend)
-# ================================================================================================
+# --- 12.4 — Task E prompt shape + pure signal-pricing math (zero spend) ---
 
 
 def test_task_e_prompt_shape() -> None:
@@ -165,11 +163,11 @@ def test_signal_bonus_kill_switch_prices_everything_to_zero() -> None:
     assert resume_signal_bonus(out, _resume_cfg(bonus_max=0.0)) == 0.0
 
 
-# --- Calibration (owner-owned) ---------------------------------------------------------------
-# The shipped weights must actually use the 0-25 band. They previously did not: v2 values tuned
-# for a 10-point band were carried over unscaled, so an exceptional resume reached only ~56% of
-# the cap and the whole stage silently under-priced. These profiles are the check that a future
-# weight edit is deliberate — they use the SHIPPED defaults, not explicit overrides.
+# --- Calibration (owner-owned) ---
+# The shipped weights must actually use the 0-25 band. They once did not — values tuned for a
+# 10-point band were carried over unscaled, so an exceptional resume reached ~56% of the cap and
+# the stage silently under-priced. These profiles use the SHIPPED defaults, so a future weight
+# edit has to be deliberate.
 
 
 @pytest.mark.parametrize(
@@ -221,9 +219,7 @@ def test_realistic_resume_earns_a_meaningful_share_of_the_band() -> None:
     assert resume_signal_bonus(typical, cfg) / cfg.bonus_max >= 0.4
 
 
-# ================================================================================================
-# 12.5 — Stage 6 aggregator (MockTransport fetcher + FakeLLMClient; no spend, no network)
-# ================================================================================================
+# --- 12.5 — Stage 6 aggregator (MockTransport fetcher + FakeLLMClient; no spend, no network) ---
 
 
 async def test_score_resume_happy_path() -> None:

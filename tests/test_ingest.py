@@ -1,7 +1,7 @@
-"""Tests for the Stage 0 data contract (Phase 1.1): header resolution + ApplicantRow.
+"""Tests for the Stage 0 data contract: header resolution and ApplicantRow.
 
-Synthetic headers only — no real applicant content. The long question columns use realistic
-Fillout-style full-text titles to exercise the substring matchers.
+Synthetic headers only. The long question columns use realistic full-text titles, so the
+substring matchers are actually exercised.
 """
 
 from __future__ import annotations

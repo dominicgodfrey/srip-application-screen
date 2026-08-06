@@ -1,10 +1,9 @@
 """Core-logger wiring — ``srip_filter.*`` records must actually reach a handler.
 
-Regression test for a silent-observability bug: uvicorn and Vercel configure only their own
-loggers, so our records propagated to a bare root logger and were dropped. The pacing and
-rate-limit-retry lines in ``llm/client.py`` exist specifically to make a 429 storm visible,
-and a 42-minute paced calibration run (2026-07-29) emitted none of them. ``/health`` reports
-a *dead* drain, not a degraded one, so those lines are the only warning of a degraded one.
+Regression test for a silent-observability bug: our records propagated to a bare root logger
+and were dropped, so a 42-minute paced calibration run emitted none of the pacing lines that
+exist to make a 429 storm visible. ``/health`` reports a *dead* drain, not a degraded one, so
+those lines are the only warning of one.
 """
 
 from __future__ import annotations
@@ -21,10 +20,9 @@ from api.main import _wire_core_logging
 def wire_onto_bare_root(monkeypatch: pytest.MonkeyPatch) -> Callable[[], io.StringIO]:
     """Return a callable that wires logging as if no host had configured any.
 
-    The clearing must happen inside the test body, not here: pytest's logging plugin adds a
-    fresh root handler for each test *phase*, so anything removed during fixture setup is back
-    by the time the test runs — which would make ``basicConfig`` a no-op and the assertions
-    vacuous. Handlers are restored on teardown either way.
+    The clearing must happen inside the test body: pytest's logging plugin adds a fresh root
+    handler per test *phase*, so anything removed during fixture setup is back before the test
+    runs, making ``basicConfig`` a no-op and the assertions vacuous.
     """
     root = logging.getLogger()
     saved_handlers, saved_level = root.handlers[:], root.level

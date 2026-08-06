@@ -1,14 +1,14 @@
-"""`POST /webhooks/applications` — the website-facing front door (P2, PRD v3 §2).
+"""`POST /webhooks/applications` — the website-facing front door (PRD v3 §2).
 
-Handler discipline (CLAUDE.md security rules):
+Handler discipline:
 
-* **verify → validate → upsert → 202, nothing else.** Grading belongs to the worker (P3);
-  the website's dispatcher aborts at 15 s, so the ACK must be milliseconds.
-* **Bad auth touches nothing** (PRD v3 invariant #7): a 401 writes no row and no event —
-  an unauthenticated caller must not be able to fill the database or the ledger. The
-  reason is logged server-side only; the response body stays generic.
-* **Never a 500 on bad input:** oversize → 413, unparseable/unsupported/malformed → 422
-  with field locations only (no echoed values — payloads are minors' PII).
+* **verify → validate → upsert → 202, nothing else.** Grading belongs to the worker, and the
+  website's dispatcher aborts at 15 s, so the ACK must be milliseconds.
+* **Bad auth touches nothing** (invariant #7): a 401 writes no row and no event, so an
+  unauthenticated caller cannot fill the database or the ledger. The reason is logged
+  server-side only; the response body stays generic.
+* **Never a 500 on bad input:** oversize → 413, malformed → 422 with field locations only,
+  never echoed values — payloads are minors' PII.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def register_webhooks(app: FastAPI) -> None:
         try:
             verify_webhook(request.headers.get(SECRET_HEADER), secrets)
         except WebhookAuthError as err:
-            # Reason to the server log only; generic body out (probes learn nothing).
+            # Reason to the log only; generic body out, so probes learn nothing.
             logger.warning("webhook auth failed: %s", err.reason)
             return _error(401, "Invalid credentials.")
 
@@ -78,9 +78,8 @@ def register_webhooks(app: FastAPI) -> None:
         if not isinstance(data, dict):
             return _error(422, "Body must be a JSON object.")
 
-        # The admin panel's connectivity Test button: authenticated ⇒ 200, no row. Must
-        # short-circuit before validation — its `submission_id` is the literal
-        # "ats-connectivity-test", not a UUID, and it carries no application fields.
+        # The admin panel's connectivity Test button: authenticated ⇒ 200, no row. It has to
+        # short-circuit before validation — its `submission_id` is not a UUID.
         if data.get("_test") is True:
             return JSONResponse(status_code=200, content={"ok": True})
 
@@ -96,11 +95,9 @@ def register_webhooks(app: FastAPI) -> None:
         if pool is None:
             return _error(503, "Database is not configured.")
 
-        # Store every delivery; queue for grading only when essays were requested. A
-        # resume-only or finaid-only delivery lands terminal ("stored") so it is not
-        # re-claimed by every drain forever — spending tokens the partner explicitly did
-        # not ask for. A later delivery that does request essays resets it via the normal
-        # changed-hash path.
+        # Store every delivery, but queue for grading only when essays were requested: a
+        # resume-only delivery lands terminal so no drain re-claims it forever, spending
+        # tokens the partner did not ask for.
         result = await dbmod.upsert_application(
             pool,
             submission_id=str(payload.submission_id),

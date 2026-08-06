@@ -1,8 +1,7 @@
-"""Tests for Stages 2-3 GPA normalization and gate (Phase 3). Synthetic values only.
+"""Tests for Stages 2-3 GPA normalization and the gate. Synthetic values only.
 
-3.1 covers the deterministic normalizer; later sub-tasks append Task A/B (mocked) and the
-gate paths. All §2 GPA quirk shapes are exercised here so the deterministic majority is
-pinned with zero API spend.
+Every §2 GPA quirk shape is exercised here, so the deterministic majority is pinned with zero
+API spend; Tasks A and B are mocked.
 """
 
 from __future__ import annotations
@@ -30,9 +29,7 @@ def _norm(raw: str) -> GpaNormalization:
     return normalize_gpa_deterministic(raw, CFG)
 
 
-# ------------------------------------------------------------------------------------------------
-# Clean 4.0-scale values
-# ------------------------------------------------------------------------------------------------
+# --- Clean 4.0-scale values ---
 
 
 @pytest.mark.parametrize(
@@ -62,9 +59,7 @@ def test_trailing_label_stripped() -> None:
     assert not r.needs_llm
 
 
-# ------------------------------------------------------------------------------------------------
-# Percentages and fractions
-# ------------------------------------------------------------------------------------------------
+# --- Percentages and fractions ---
 
 
 @pytest.mark.parametrize(
@@ -123,9 +118,7 @@ def test_out_of_five_linear() -> None:
     assert _norm("4.5/5").normalized_gpa == pytest.approx(3.6)
 
 
-# ------------------------------------------------------------------------------------------------
-# Caps and routing to Task A (needs_llm) — no decision made here
-# ------------------------------------------------------------------------------------------------
+# --- Caps and routing to Task A (needs_llm) — no decision made here ---
 
 
 @pytest.mark.parametrize("raw", ["4.27", "4.635", "weighted: 4.4", "5.0", "4.5/4.0"])
@@ -163,9 +156,7 @@ def test_percentage_over_max_routes_to_llm() -> None:
     assert _norm("105/100").needs_llm is True
 
 
-# ------------------------------------------------------------------------------------------------
-# Blank -> manual review (NEVER a token, NEVER a rejection)
-# ------------------------------------------------------------------------------------------------
+# --- Blank -> manual review (NEVER a token, NEVER a rejection) ---
 
 
 @pytest.mark.parametrize("raw", ["", "   ", "\t\n"])
@@ -177,9 +168,7 @@ def test_blank_goes_to_manual_review_without_llm(raw: str) -> None:
     assert r.original_scale == "blank"
 
 
-# ------------------------------------------------------------------------------------------------
-# Hard invariant (PRD §6.2): the deterministic pass never decides a rejection.
-# ------------------------------------------------------------------------------------------------
+# --- Hard invariant (PRD §6.2): the deterministic pass never decides a rejection. ---
 
 
 @pytest.mark.parametrize(
@@ -197,9 +186,7 @@ def test_result_is_capped_at_gpa_max() -> None:
     assert _norm("4.0").normalized_gpa == pytest.approx(4.0)
 
 
-# ================================================================================================
-# 3.2 — Task A fallback + normalize_gpa orchestration (LLM, mocked; no API spend)
-# ================================================================================================
+# --- 3.2 — Task A fallback + normalize_gpa orchestration (LLM, mocked; no API spend) ---
 
 
 def _task_a(
@@ -289,9 +276,7 @@ async def test_identical_raw_dedups_within_run() -> None:
     assert len(client.calls) == 1  # cache_text=raw dedups the second call
 
 
-# ================================================================================================
-# 3.3 — GPA points gradient + deterministic gate paths (no LLM)
-# ================================================================================================
+# --- 3.3 — GPA points gradient + deterministic gate paths (no LLM) ---
 
 
 @pytest.mark.parametrize(
@@ -376,9 +361,7 @@ def test_gate_below_threshold_with_explanation_defers_to_task_b() -> None:
     assert res is None  # Phase 3.4 (Task B) decides this branch
 
 
-# ================================================================================================
-# 3.4 — Task B low-GPA adequacy + assess_gpa aggregator (LLM, mocked) + §12 invariants
-# ================================================================================================
+# --- 3.4 — Task B low-GPA adequacy + assess_gpa aggregator (LLM, mocked) + §12 invariants ---
 
 
 def _task_b(outcome: str = "rank", rationale: str = "task b rationale") -> TaskBOutput:
@@ -459,9 +442,8 @@ async def test_assess_below_threshold_task_b_reject() -> None:
     client = _client(_dispatch(task_b=_task_b("reject")))
     res = await assess_gpa(_row("2.4", "I did not feel like studying"), client, APP)
     assert res.verdict == "reject"
-    # §10 invariant #3: the gate names itself deterministically, and the model's rationale
-    # follows as detail. It used to BE the reason, which made naming the gate contingent on
-    # the model writing prose — an empty rationale left the rejection unexplained.
+    # §10 invariant #3: the gate names itself deterministically and the rationale follows as
+    # detail. As the whole reason, an empty rationale left the rejection unexplained.
     assert res.reason.startswith("GPA below 3.3; explanation judged inadequate")
     assert "task b rationale" in res.reason
     assert res.assessment.explanation_eval is not None

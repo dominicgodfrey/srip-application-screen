@@ -1,21 +1,7 @@
-"""Stages 2-3 — GPA normalization and gate (Phase 3).
+"""Stages 2-3 — GPA normalization (raw cell → 4.0 scale) and the GPA gate (PRD §6).
 
-Stage 2 converts a raw GPA cell to a 4.0-scale equivalent; Stage 3 turns that into a gate
-verdict (PRD §6). The work is split so the LLM-touching parts stay isolated and the
-deterministic majority is fully testable with zero API spend:
-
-  * 3.1 deterministic normalizer  — :func:`normalize_gpa_deterministic`   (this commit)
-  * 3.2 Task A fallback + orchestration                                   (next)
-  * 3.3 points gradient + deterministic gate paths
-  * 3.4 Task B low-GPA adequacy + Stage 2-3 aggregator
-
-Hard line (PRD §1/§6.2): an unresolvable or blank scale is ``NEEDS_REVIEW``, *never*
-``REJECTED`` — false-rejecting the large international contingent is the failure mode to avoid.
-This deterministic pass therefore never decides a rejection; it either resolves a value, flags
-it for LLM Task A (``needs_llm``), or — for a truly empty cell — flags it for manual review.
-
-The §6.1 percentage→4.0 table and the clean-scale ceiling live in ``config.yaml``
-(``gpa.normalization``); this module hard-codes no thresholds. Pure functions, no I/O, no LLM.
+An unresolvable or blank scale is ``NEEDS_REVIEW``, never ``REJECTED`` — false-rejecting the
+large international contingent is the failure mode to avoid. Thresholds live in ``config.yaml``.
 """
 
 from __future__ import annotations
@@ -38,16 +24,13 @@ from ..models import (
     TaskBOutput,
 )
 
-# Internal Stage-3 verdict. Distinct from the final Outcome: "pass" means the GPA gate is
-# cleared and scoring continues (essays still run) — it is not yet RANKED.
+# Internal to this stage: "pass" clears the GPA gate and continues scoring — not yet RANKED.
 GpaGateVerdict = Literal["pass", "reject", "needs_review"]
 
-# A fraction "a/b" (e.g. 85/100, 4.5/5, 3.8/4.0). Checked before a bare number so the
-# denominator can pick the scale.
+# "a/b" — checked before a bare number so the denominator can pick the scale.
 _FRACTION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)")
-# An explicit percentage "92%", "95.2 %".
 _PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
-# First signed/unsigned decimal anywhere in the string (handles trailing labels: "3.97 GPA").
+# First decimal anywhere, so trailing labels ("3.97 GPA") still parse.
 _FLOAT_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 # Denominators we recognize deterministically; anything else routes to Task A.
@@ -60,19 +43,8 @@ _DENOM_TOL = 1e-9
 
 @dataclass(frozen=True)
 class GpaNormalization:
-    """Stage-2 normalization outcome for one applicant (PRD §6.1 output shape + a routing flag).
-
-    Exactly one of three dispositions holds:
-
-    * **resolved** — ``normalized_gpa`` is set, ``needs_llm`` and ``requires_manual_review`` both
-      False. ``below_threshold`` reflects ``normalized_gpa < threshold``.
-    * **route to LLM** — ``needs_llm`` True, ``normalized_gpa`` None. Stage 3.2 will call Task A.
-      No decision is made here.
-    * **manual review** — ``requires_manual_review`` True (empty cell). Stage 3 sends it to
-      ``NEEDS_REVIEW`` without spending a token.
-
-    Stage 3.3 maps this onto the audit ``GpaAssessment`` block.
-    """
+    """Stage-2 outcome: exactly one of resolved (``normalized_gpa`` set), ``needs_llm`` (Task A
+    decides), or ``requires_manual_review`` (empty cell → NEEDS_REVIEW, no token spent)."""
 
     normalized_gpa: float | None
     original_scale: str
@@ -85,11 +57,8 @@ class GpaNormalization:
 
 
 def _percentage_to_gpa(pct: float, ncfg: GpaNormalizationConfig) -> float:
-    """Map a 0-100 percentage onto the 4.0 scale via the §6.1 table.
-
-    A percentage at or above a band's ``min_pct`` takes that band's GPA; below the lowest band
-    the value scales linearly toward 0, anchored on the lowest band's ``(min_pct, gpa)`` point.
-    """
+    """Map a 0-100 percentage onto the 4.0 scale via the §6.1 table; below the lowest band it
+    scales linearly toward 0."""
     bands = sorted(ncfg.percentage_table, key=lambda b: b.min_pct, reverse=True)
     for band in bands:
         if pct >= band.min_pct:
@@ -109,7 +78,7 @@ def _resolved(gpa_value: float, scale: str, method: str, cfg: GpaConfig) -> GpaN
         below_threshold=capped < cfg.threshold,
         requires_manual_review=False,
         source="deterministic",
-        needs_llm=False,  # resolved: never routed
+        needs_llm=False,
     )
 
 
@@ -164,13 +133,10 @@ def _from_fraction(num: float, denom: float, cfg: GpaConfig) -> GpaNormalization
 
 
 def normalize_gpa_deterministic(raw: str, cfg: GpaConfig) -> GpaNormalization:
-    """Convert a raw GPA cell to the 4.0 scale deterministically where possible (PRD §6.1).
+    """Convert a raw GPA cell to the 4.0 scale where possible (PRD §6.1).
 
-    Resolution order: explicit percentage (``%``) → explicit fraction (``a/b``, scale from the
-    denominator) → bare number on a clean ``0..gpa_max`` scale. A bare value above ``gpa_max``
-    (weighted, or a bare percentage/out-of-N with no denominator) and any string without a
-    parseable number route to LLM Task A (``needs_llm=True``). A genuinely empty cell goes to
-    manual review without a token. Pure function — no decision/rejection is made here.
+    Order: percentage → fraction (scale from the denominator) → bare number on a clean
+    ``0..gpa_max`` scale. Anything else routes to Task A; an empty cell goes to manual review.
     """
     text = raw.strip()
     if not text:
@@ -193,21 +159,15 @@ def normalize_gpa_deterministic(raw: str, cfg: GpaConfig) -> GpaNormalization:
 
     number = _FLOAT_RE.search(text)
     if not number:
-        return _route_to_llm("unknown")  # text present but no number (IGCSE letters, "N/A", ...)
+        return _route_to_llm("unknown")  # text but no number (IGCSE letters, "N/A", ...)
     value = float(number.group(0))
     if 0.0 <= value <= cfg.normalization.gpa_max:
         return _resolved(value, "four_point", "clean_4_scale", cfg)
-    # Out of the clean 0..4.0 band: weighted (>4), a bare percentage/out-of-N, or negative.
+    # Outside the clean band: weighted (>4), a bare percentage/out-of-N, or negative.
     return _route_to_llm("weighted_gt_4" if value > cfg.normalization.gpa_max else "unknown")
 
 
-# ================================================================================================
-# 3.2 — Task A fallback + Stage 2 orchestration (LLM)
-# ================================================================================================
-# normalize_gpa runs the deterministic path first and calls Task A *only* for the values it
-# flagged (needs_llm). Task A's estimate is capped at gpa_max; a value Task A cannot safely place
-# (requires_manual_review, or a null estimate) becomes requires_manual_review=True -> NEEDS_REVIEW
-# at the gate. An LLM parse failure routes to manual review too — never a rejection (PRD §8).
+# --- Task A fallback + Stage 2 orchestration (LLM) ---
 
 
 def _manual_review_from_llm(scale: str, method: str, confidence: Confidence) -> GpaNormalization:
@@ -244,18 +204,12 @@ def _from_task_a(out: TaskAOutput, cfg: GpaConfig) -> GpaNormalization:
 async def normalize_gpa(
     raw: str, client: BaseLLMClient, cfg: AppConfig, *, force_task_a: bool = False
 ) -> GpaNormalization:
-    """Stage 2: normalize a raw GPA, deterministic-first, with LLM Task A as the fallback.
+    """Stage 2: normalize a raw GPA, deterministic-first, with Task A as the fallback.
 
-    Resolves and returns immediately for any value the deterministic parser handled or sent to
-    manual review. Only a ``needs_llm`` value reaches Task A; its estimate is capped at
-    ``gpa_max`` and an unplaceable result (or an :class:`LLMParseFailure` after the client's
-    retry) becomes ``requires_manual_review`` — i.e. ``NEEDS_REVIEW``, never a rejection. The raw
-    string is used as ``cache_text`` so identical GPAs dedup within a run.
-
-    ``force_task_a`` (v3): a weighted-only submission must NOT take the deterministic
-    fraction path — "4.4 / 5.0" *weighted* is not an unweighted /5 scale, so the parser's
-    linear conversion would be wrong. The caller flags it and Task A judges instead
-    (PRD v3 §4 Stage 2). A blank value still short-circuits to manual review.
+    An unplaceable result or a parse failure becomes ``requires_manual_review``, never a
+    rejection. ``force_task_a`` keeps a weighted-only submission off the deterministic fraction
+    path — "4.4 / 5.0" *weighted* is not an unweighted /5 scale, so linear conversion would be
+    wrong. A blank value still short-circuits to manual review.
     """
     det = normalize_gpa_deterministic(raw, cfg.gpa)
     if not det.needs_llm and not (force_task_a and det.normalized_gpa is not None):
@@ -269,29 +223,18 @@ async def normalize_gpa(
             cache_text=raw,
         )
     except LLMParseFailure:
-        # Keep the deterministic scale guess; mark unscoreable for a human (reason set at gate).
+        # Keep the deterministic scale guess; mark unscoreable (reason set at the gate).
         return _manual_review_from_llm(det.original_scale, "llm_parse_failure", "low")
     return _from_task_a(out, cfg.gpa)
 
 
-# ================================================================================================
-# 3.3 — GPA points gradient + deterministic gate paths (Stage 3, PRD §8.1 / §6.2)
-# ================================================================================================
-# gpa_points is the pure §8.1 gradient (3.3 -> 0, 3.65 -> 20, 4.0 -> 40). gpa_gate_deterministic
-# decides the branches that need no LLM: an unresolved/manual-review scale -> NEEDS_REVIEW (never
-# REJECTED); >= threshold -> PASS + points; < threshold with a blank explanation -> REJECTED. The
-# remaining branch (< threshold WITH an explanation) needs LLM Task B and is wired in Phase 3.4;
-# this function returns None for it.
+# --- Points gradient + deterministic gate paths (Stage 3, PRD §8.1 / §6.2) ---
 
 
 @dataclass(frozen=True)
 class GpaGateResult:
-    """Stage-3 GPA gate outcome for one applicant.
-
-    ``verdict`` drives the pipeline ("pass" continues to essay scoring; "reject"/"needs_review"
-    are terminal for this stage). ``assessment`` and ``gate`` drop straight into the audit record
-    (``AuditRecord.gpa`` and ``AuditRecord.gates.gpa_gate``). ``gpa_points`` is 0 unless passed.
-    """
+    """Stage-3 gate outcome. ``assessment`` and ``gate`` drop straight into the audit record;
+    ``gpa_points`` is 0 unless the verdict is "pass"."""
 
     verdict: GpaGateVerdict
     gpa_points: float
@@ -301,11 +244,8 @@ class GpaGateResult:
 
 
 def gpa_points(normalized_gpa: float, cfg: GpaConfig) -> float:
-    """PRD §8.1 linear gradient over ``[threshold, gpa_max]`` → ``[0, score_max]``, clamped.
-
-    3.3 → 0, 3.65 → 20, 4.0 → 40 with the defaults. Below the threshold clamps to 0; above
-    ``gpa_max`` clamps to ``score_max`` (the normalizer already caps GPA at ``gpa_max``). Pure.
-    """
+    """PRD §8.1 linear gradient over ``[threshold, gpa_max]`` → ``[0, score_max]``, clamped
+    at both ends — with the defaults, 3.3 → 0, 3.65 → 20, 4.0 → 40."""
     span = cfg.normalization.gpa_max - cfg.threshold
     if span <= 0:
         return 0.0
@@ -321,9 +261,8 @@ def build_assessment(
 ) -> GpaAssessment:
     """Project a :class:`GpaNormalization` onto the audit ``GpaAssessment`` block (PRD §9).
 
-    ``explanation_eval`` is the Task B output, populated only when Task B ran.
-    ``explanation`` is the applicant's extenuating-circumstances text, carried verbatim so the
-    audit UI can show the reason that rescued (or failed to rescue) a sub-threshold GPA.
+    ``explanation`` is carried verbatim so the audit UI can show the text that rescued (or
+    failed to rescue) a sub-threshold GPA; ``explanation_eval`` is set only when Task B ran.
     """
     return GpaAssessment(
         raw=raw or None,
@@ -342,20 +281,11 @@ def build_assessment(
 def gpa_gate_deterministic(
     raw: str, norm: GpaNormalization, explanation: str, cfg: GpaConfig
 ) -> GpaGateResult | None:
-    """Decide the GPA gate branches that need no LLM; return ``None`` if Task B is required.
-
-    * blank GPA cell with a blank explanation → ``reject`` (nothing offered to evaluate);
-    * unresolved scale otherwise (null GPA or ``requires_manual_review``) → ``needs_review``
-      (never a rejection — protects the international contingent);
-    * GPA < ``hard_floor`` → ``reject`` regardless of explanation (no Task B call);
-    * GPA ≥ ``threshold`` → ``pass`` with gradient points;
-    * GPA < ``threshold`` with a blank explanation → ``reject``;
-    * GPA < ``threshold`` with an explanation present → ``None`` (Task B decides).
-    """
+    """Decide the GPA gate branches that need no LLM; return ``None`` when Task B must judge
+    (sub-threshold GPA with an explanation present)."""
     if norm.normalized_gpa is None or norm.requires_manual_review:
-        # A truly empty GPA cell with no extenuating-circumstances text is an affirmative
-        # non-answer, not an unresolvable scale — reject it. Anything else unresolved (foreign
-        # scales, "school doesn't offer GPAs", or blank-with-explanation) stays human-reviewed.
+        # An empty GPA cell with no explanation is an affirmative non-answer, not an
+        # unresolvable scale — reject it. Anything else unresolved stays human-reviewed.
         if not raw.strip() and not explanation.strip():
             reason = "No GPA provided and no explanation given"
             return GpaGateResult(
@@ -407,17 +337,10 @@ def gpa_gate_deterministic(
             gate=GpaGate(passed=False, reason=reason),
         )
 
-    return None  # < threshold with an explanation -> LLM Task B (Phase 3.4)
+    return None  # < threshold with an explanation -> Task B
 
 
-# ================================================================================================
-# 3.4 — Task B low-GPA adequacy + Stage 2-3 aggregator (LLM)
-# ================================================================================================
-# assess_gpa ties Stage 2 (normalize) to Stage 3 (gate). The only branch left for the LLM is a
-# sub-threshold GPA WITH an explanation: Task B decides rank vs reject, with a bar that scales to
-# the size of the deficit. An approved low GPA still lands at the bottom of the gradient (points
-# clamp to 0 below the threshold) — the deficit is reflected, never erased (PRD §8.1). A Task B
-# parse failure is unscoreable -> NEEDS_REVIEW, never a silent rejection (PRD §8).
+# --- Task B low-GPA adequacy + Stage 2-3 aggregator (LLM) ---
 
 
 def _with_detail(gate_reason: str, rationale: str) -> str:
@@ -436,15 +359,12 @@ def _task_b_result(
 ) -> GpaGateResult:
     """Turn a Task B verdict into a gate result; store the eval in the assessment either way.
 
-    The rejection reason is composed deterministically and only *then* extended with the
-    model's prose. Passing ``out.rationale`` through as the whole reason made invariant #3
-    ("every REJECTED record names the failing gate") depend on the model choosing to write
-    something: an empty rationale produced a rejection that could not say what rejected it.
-    The rationale is real evidence and stays — as detail after the gate, not instead of it.
+    The reason is composed deterministically and only *then* extended with the model's prose:
+    as the whole reason, an empty rationale left a rejection that could not name its gate.
     """
     assessment = build_assessment(raw, norm, out, explanation=explanation)
     if out.recommended_outcome == "rank":
-        # Below threshold -> gpa_points clamps to 0: deficit reflected, never erased (§8.1).
+        # Below threshold -> points clamp to 0: deficit reflected, never erased (§8.1).
         return GpaGateResult(
             verdict="pass",
             gpa_points=gpa_points(normalized_gpa, cfg),
@@ -475,18 +395,14 @@ async def assess_gpa(
 ) -> GpaGateResult:
     """Stages 2-3 end to end: normalize the GPA, then gate it (PRD §6).
 
-    Deterministic and Task-A paths resolve most applicants without reaching Task B. The single
-    LLM-judgment branch — a sub-threshold GPA with an explanation present — calls Task B with the
-    GPA and its gap below the threshold; ``rank`` passes (with bottom-of-gradient points),
-    ``reject`` fails. Any LLM parse failure routes to ``needs_review``. Never rejects an
-    unscoreable applicant.
+    Only one branch reaches Task B — a sub-threshold GPA with an explanation. A parse failure
+    routes to ``needs_review``; an unscoreable applicant is never rejected.
     """
     norm = await normalize_gpa(row.gpa, client, cfg, force_task_a=force_task_a)
     det = gpa_gate_deterministic(row.gpa, norm, row.gpa_explanation, cfg.gpa)
     if det is not None:
         return det
 
-    # Sub-threshold GPA with an explanation: only reachable when normalized_gpa is a real number.
     normalized_gpa = norm.normalized_gpa
     assert normalized_gpa is not None  # guaranteed by gpa_gate_deterministic returning None
     gap = round(cfg.gpa.threshold - normalized_gpa, 4)

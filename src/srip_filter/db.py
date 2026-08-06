@@ -1,18 +1,10 @@
-"""Persistence layer (P1) — asyncpg pool, migrations, and the typed store functions.
+"""Persistence layer — asyncpg pool, migrations, and the typed store functions (PRD v3 §1.1).
 
-The only module that speaks SQL. Everything above it passes/receives pydantic models or
-plain dicts; everything below it is one Neon Postgres database owned exclusively by this
-service (PRD v3 §1.1). Plain SQL, no ORM — three tables:
+The only module that speaks SQL, over three tables: ``applications`` (one row per submission,
+with the grading queue as its ``status`` column), ``llm_cache``, and ``events`` — a non-PII
+ledger, so **never** pass essay/explanation/resume text into ``details``.
 
-  * ``applications`` — one row per submission; per-mode webhook payloads + content hashes;
-    the grading queue is the ``status`` column (claimed with ``FOR UPDATE SKIP LOCKED``).
-  * ``llm_cache``    — persistent ``(task, sha256(input))`` cache; re-grades re-bill only
-    changed fields (PRD v3 §2.3).
-  * ``events``       — non-PII operational ledger. **Never** pass essay/explanation/resume
-    text into ``details`` — submission ids and structural facts only.
-
-Connection strings come from the environment (``DATABASE_URL`` / ``DATABASE_URL_TEST``),
-never config.yaml — they contain credentials.
+Connection strings come from the environment, never config.yaml — they carry credentials.
 """
 
 from __future__ import annotations
@@ -32,18 +24,15 @@ logger = logging.getLogger(__name__)
 
 MIGRATIONS_DIR = project_root() / "db" / "migrations"
 
-# Arbitrary but stable key for the pg advisory lock that serializes migrations (P11.3).
+# Arbitrary but stable key for the advisory lock that serializes migrations.
 _MIGRATION_LOCK_KEY = 3_771_020_301
 
 UpsertResult = Literal["accepted", "unchanged"]
 
 
 class PurgeCountMismatch(Exception):
-    """The live row count moved between the confirmation dialog and the confirm click.
-
-    Deliveries arrive continuously, so a purge is only safe if it destroys exactly the rows the
-    operator was shown a count for. Raised instead of deleting; the caller re-previews.
-    """
+    """The live row count moved between the preview and the confirm click. Deliveries arrive
+    continuously, so a purge may only destroy the exact rows the operator was shown."""
 
     def __init__(self, *, expected: int, actual: int) -> None:
         super().__init__(
@@ -52,7 +41,7 @@ class PurgeCountMismatch(Exception):
         self.expected = expected
         self.actual = actual
 
-# Application lifecycle states (the queue). Mirrors the 001_init CHECK constraint.
+# The queue's lifecycle states; mirrors the 001_init CHECK constraint.
 STATUS_RECEIVED = "received"
 STATUS_GRADING = "grading"
 STATUS_GRADED = "graded"
@@ -61,43 +50,34 @@ STATUS_STORED = "stored"  # delivered but essay grading not requested — termin
 
 
 def content_hash(payload: dict[str, Any]) -> str:
-    """Canonical sha256 of a JSON payload — the per-mode idempotency key (PRD v3 §2.3).
-
-    Canonical = sorted keys, compact separators, UTF-8; two semantically identical
-    payloads always hash identically regardless of key order in transit.
-    """
+    """Canonical sha256 of a payload — the idempotency key (PRD v3 §2.3). Sorted keys and
+    compact separators, so key order in transit never changes the hash."""
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 async def create_pool(dsn: str, *, min_size: int = 0, max_size: int = 2) -> asyncpg.Pool:
-    """Create the asyncpg pool. One pool per process, closed at shutdown (lifespan).
+    """Create the asyncpg pool — one per process, closed at shutdown.
 
-    ``statement_cache_size=0`` is mandatory against Neon's **pooled** (``-pooler``)
-    endpoint (P11.4): PgBouncer in transaction mode hands each transaction a different
-    server connection, so asyncpg's cached prepared statements go missing — and they fail
-    intermittently under load, not cleanly. Harmless on a direct endpoint, so it is set
-    unconditionally rather than sniffed from the DSN.
+    ``statement_cache_size=0`` is mandatory against Neon's pooled endpoint: PgBouncer in
+    transaction mode hands each transaction a different server connection, so cached prepared
+    statements go missing — intermittently under load, not cleanly. It is harmless on a direct
+    endpoint, so it is set unconditionally rather than sniffed from the DSN.
     """
     return await asyncpg.create_pool(
         dsn, min_size=min_size, max_size=max_size, statement_cache_size=0
     )
 
 
-# ================================================================================================
-# Migrations
-# ================================================================================================
+# --- Migrations ---
 
 
 async def apply_migrations(pool: asyncpg.Pool, migrations_dir: Path = MIGRATIONS_DIR) -> list[str]:
-    """Apply unapplied ``*.sql`` files in filename order; each in its own transaction.
+    """Apply unapplied ``*.sql`` files in filename order, each in its own transaction, tracking
+    them in ``schema_migrations``. Returns what this call applied; re-running applies nothing.
 
-    Tracks applied filenames in ``schema_migrations`` (created here on first run).
-    Returns the filenames applied this call. Idempotent: re-running applies nothing.
-
-    Serverless-safe (P11.3): the whole pass runs under a session-level advisory lock, so
-    concurrent cold starts / drains cannot race the same DDL. A caller that loses the race
-    returns ``[]`` immediately rather than waiting — the winner is doing the work.
+    The pass runs under an advisory lock so concurrent cold starts cannot race the same DDL.
+    A caller that loses the race returns ``[]`` immediately — the winner is doing the work.
     """
     async with pool.acquire() as conn:
         if not await conn.fetchval("SELECT pg_try_advisory_lock($1)", _MIGRATION_LOCK_KEY):
@@ -130,9 +110,7 @@ async def apply_migrations(pool: asyncpg.Pool, migrations_dir: Path = MIGRATIONS
             await conn.execute("SELECT pg_advisory_unlock($1)", _MIGRATION_LOCK_KEY)
 
 
-# ================================================================================================
-# Applications — upsert (webhook ingest) and queue (worker)
-# ================================================================================================
+# --- Applications — upsert (webhook ingest) and queue (worker) ---
 
 
 async def upsert_application(
@@ -149,20 +127,12 @@ async def upsert_application(
 ) -> UpsertResult:
     """Idempotently store one webhook payload for one submission (PRD v3 §2.3).
 
-    The content hash decides everything:
+    The content hash decides: an identical re-delivery touches nothing and returns
+    ``"unchanged"`` (invariant #8), a changed one replaces the payload and resets status so the
+    worker re-grades. ``FOR UPDATE`` serializes concurrent deliveries of the same submission.
 
-    * no row → insert → ``"accepted"``;
-    * row exists, hash identical → nothing touched → ``"unchanged"`` (invariant #8: a
-      re-delivery changes no outcome and re-bills nothing);
-    * row exists, hash differs (re-submission) → payload replaced, identity refreshed,
-      status reset so the worker re-grades → ``"accepted"``.
-
-    ``grade`` comes from ``"essays" in ats_run``. False parks the row in terminal
-    ``'stored'`` so no drain ever claims it; a later delivery that does request essays
-    flips it back through the changed-hash path.
-
-    The row lock (``FOR UPDATE``) serializes concurrent deliveries of the same submission
-    (admin re-runs / ``untested_only`` races are harmless).
+    ``grade`` comes from ``"essays" in ats_run``; False parks the row in terminal ``'stored'``
+    so no drain ever claims it, until a later delivery asks for essays.
     """
     new_hash = content_hash(payload)
     status = STATUS_RECEIVED if grade else STATUS_STORED
@@ -221,11 +191,8 @@ async def upsert_application(
 
 
 async def claim_next(pool: asyncpg.Pool) -> dict[str, Any] | None:
-    """Claim one ``received`` row for grading (``status → grading``); None if queue empty.
-
-    ``FOR UPDATE SKIP LOCKED`` makes concurrent claims contention-free: two workers never
-    receive the same row. Oldest-updated first so re-submissions queue fairly.
-    """
+    """Claim one ``received`` row for grading; None if the queue is empty. ``SKIP LOCKED`` means
+    two workers never receive the same row, and oldest-first queues re-submissions fairly."""
     async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
             """
@@ -248,11 +215,10 @@ async def claim_next(pool: asyncpg.Pool) -> dict[str, Any] | None:
 
 
 async def reap_stale_claims(pool: asyncpg.Pool, stale_seconds: float) -> int:
-    """Return rows stuck in ``grading`` to ``received``; returns how many (P11.2).
+    """Return rows stuck in ``grading`` to ``received``, and report how many.
 
-    An always-on worker drained gracefully on shutdown. A serverless invocation killed
-    mid-row cannot — without this, one timeout parks that application in ``grading``
-    forever and no drain ever looks at it again.
+    A serverless invocation killed mid-row cannot drain gracefully; without this, one timeout
+    parks that application in ``grading`` forever and no drain looks at it again.
     """
     result = await pool.execute(
         """
@@ -267,13 +233,12 @@ async def reap_stale_claims(pool: asyncpg.Pool, stale_seconds: float) -> int:
 
 
 async def oldest_pending_seconds(pool: asyncpg.Pool) -> float | None:
-    """Age in seconds of the oldest row still waiting to be graded; None if none are.
+    """Age in seconds of the oldest row still waiting to be graded; None when none are.
 
-    The one number that reveals a dead grading path. If the cron stops firing, the drain
-    starts erroring, or claims keep failing, this climbs without bound — and it stays
-    ``None`` when there is simply nothing to do, so an idle service never looks broken.
-    Deliberately an age and not a count: ``/health`` is public, and an age leaks no
-    information about application volume.
+    The one number that reveals a dead grading path: it climbs without bound if the cron stops
+    firing or claims keep failing, yet stays ``None`` when there is nothing to do, so an idle
+    service never looks broken. An age rather than a count because ``/health`` is public and an
+    age leaks nothing about application volume.
     """
     age = await pool.fetchval(
         """
@@ -282,8 +247,8 @@ async def oldest_pending_seconds(pool: asyncpg.Pool) -> float | None:
         """,
         STATUS_RECEIVED,
     )
-    # EXTRACT returns Postgres `numeric`, which asyncpg hands back as `Decimal` — and
-    # Decimal is not JSON-serializable, so /health would 500 on the degraded path only.
+    # EXTRACT yields a `Decimal`, which is not JSON-serializable — /health would 500 on the
+    # degraded path only.
     return None if age is None else float(age)
 
 
@@ -312,10 +277,8 @@ async def finish_graded(
 
 
 async def mark_error(pool: asyncpg.Pool, submission_id: str, note: str) -> None:
-    """Release a row whose grading crashed (``status → error``; PRD v3 invariant #9).
-
-    ``note`` goes to ``events`` — structural facts only, never applicant content.
-    """
+    """Release a row whose grading crashed (invariant #9). ``note`` goes to ``events``, so it
+    carries structural facts only, never applicant content."""
     await pool.execute(
         "UPDATE applications SET status = $2, updated_at = NOW() WHERE submission_id = $1",
         submission_id,
@@ -324,9 +287,7 @@ async def mark_error(pool: asyncpg.Pool, submission_id: str, note: str) -> None:
     await add_event(pool, "grading_error", submission_id=submission_id, details={"note": note})
 
 
-# ================================================================================================
-# Applications — reads and lifecycle (UI / exports / retention)
-# ================================================================================================
+# --- Applications: reads and lifecycle (UI / exports / retention) ---
 
 
 async def get_application(pool: asyncpg.Pool, submission_id: str) -> dict[str, Any] | None:
@@ -338,8 +299,8 @@ async def get_application(pool: asyncpg.Pool, submission_id: str) -> dict[str, A
 
 _ORDER = "ORDER BY submitted_at ASC NULLS LAST"  # stable base order: oldest submission first
 
-# Everything except the two heavyweight blobs. `audit_record - 'essays'` drops the verbatim
-# essay text (a jsonb key delete, done in Postgres); `payload` is replaced by a boolean.
+# Everything except the two heavyweight blobs: the essay text is deleted from the audit record
+# in Postgres, and `payload` collapses to a boolean.
 _SUMMARY_COLUMNS = """
     submission_id, cohort_name, user_email, student_name, sub_track,
     submitted_at, created_at, updated_at, status, outcome, final_score,
@@ -352,11 +313,11 @@ _SUMMARY_COLUMNS = """
 async def list_applications(
     pool: asyncpg.Pool, *, cohort_name: str | None = None
 ) -> list[dict[str, Any]]:
-    """Every column of every application (optionally one cohort) — payload and essays included.
+    """Every column of every application, payload and essays included.
 
-    The heavy read, and deliberately so: exports serialize the full audit record, and the
-    manual-promote path re-grades from the stored payload. **For listing, ranking, counting
-    or cohort maths use :func:`list_application_summaries` instead** — see its docstring.
+    The heavy read, and deliberately so: exports serialize the full audit record and the
+    manual-promote path re-grades from the stored payload. **For listing, ranking, counting or
+    cohort maths use :func:`list_application_summaries` instead.**
     """
     where = "" if cohort_name is None else "WHERE cohort_name = $1"
     args = [] if cohort_name is None else [cohort_name]
@@ -369,18 +330,12 @@ async def list_application_summaries(
 ) -> list[dict[str, Any]]:
     """Same rows, without the two payloads nothing on a listing screen reads.
 
-    ``SELECT *`` here was the dominant cost in the service. Every dashboard load, summary,
-    cohort what-if and audit-detail open pulled `payload` (the whole submitted application)
-    **and** `audit_record` (which embeds the essay text a second time) for every row, then
-    JSON-decoded both in Python. At the ~2 000-application design target that is tens of MB
-    off Neon per request, on a serverless function, to render a table of names and scores.
-    Opening one applicant's audit detail did it for their entire cohort, just to compute one
-    rank.
+    ``SELECT *`` here was the dominant cost in the service: every dashboard load and audit
+    detail pulled the whole submitted application *and* the essay text a second time inside the
+    audit record, for every row in the cohort, to render a table of names and scores.
 
-    Projecting the columns and deleting the ``essays`` key in Postgres leaves the audit
-    record complete enough for :class:`~srip_filter.models.AuditRecord` to validate
-    (``essays`` has a default) and for read-time ranking, which needs only outcome, score,
-    cohort and the tiebreakers.
+    The projection still leaves the audit record complete enough to validate (``essays`` has a
+    default) and to rank, which needs only outcome, score, cohort, and the tiebreakers.
     """
     where = "" if cohort_name is None else "WHERE cohort_name = $1"
     args = [] if cohort_name is None else [cohort_name]
@@ -403,13 +358,9 @@ async def count_by_outcome(
 
 
 async def delete_submission(pool: asyncpg.Pool, submission_id: str) -> bool:
-    """Hard-delete one applicant (individual removal request, PRD v3 §9). Tombstoned.
-
-    Delete and tombstone share one transaction, matching :func:`purge_applications` and
-    the §9 guarantee. This is the removal-request path — the one case where being able to
-    show *that the deletion happened* matters later — so it must not be possible to lose
-    the ledger entry to a crash between two separate statements.
-    """
+    """Hard-delete one applicant on a removal request (PRD v3 §9), tombstoned in the same
+    transaction: this is the one path where proving the deletion happened matters later, so a
+    crash between two statements must not be able to lose the ledger entry."""
     async with pool.acquire() as conn, conn.transaction():
         status = await conn.execute(
             "DELETE FROM applications WHERE submission_id = $1", submission_id
@@ -427,15 +378,12 @@ async def delete_submission(pool: asyncpg.Pool, submission_id: str) -> bool:
 async def purge_preview(
     pool: asyncpg.Pool, *, cohort_name: str | None = None
 ) -> dict[str, Any]:
-    """Exactly what a purge of this scope would destroy (PRD v3 §9 close-cycle).
+    """Exactly what a purge of this scope would destroy (PRD v3 §9).
 
-    Feeds the confirmation dialog, so it must describe the *scale* honestly rather than
-    reassuringly: row count, per-outcome split, the cohorts affected, and the submission-date
-    span. ``cohort_name=None`` means every cohort — a full wipe, which also clears ``llm_cache``
-    (see :func:`purge_applications` for why the cache cannot be scoped to one cohort).
-
-    Read-only. Counts are a snapshot: deliveries keep arriving, which is why
-    :func:`purge_applications` takes an ``expected_count`` rather than trusting this.
+    Feeds the confirmation dialog, so it describes the scale honestly rather than reassuringly.
+    ``cohort_name=None`` is a full wipe, which also clears ``llm_cache``. Read-only, and the
+    counts are a snapshot — deliveries keep arriving, which is why :func:`purge_applications`
+    takes an ``expected_count`` rather than trusting this.
     """
     where, args = ("WHERE cohort_name = $1", [cohort_name]) if cohort_name else ("", [])
     summary = await pool.fetchrow(
@@ -466,7 +414,7 @@ async def purge_preview(
         "latest": summary["latest"],
         "by_outcome": {r["label"]: r["n"] for r in outcomes},
         "by_cohort": {r["cohort_name"]: r["n"] for r in cohorts},
-        # Only a full wipe clears the cache, so a scoped purge must say what it leaves behind.
+        # Only a full wipe clears the cache; a scoped purge must say what it leaves behind.
         "llm_cache_rows": await pool.fetchval("SELECT COUNT(*) FROM llm_cache"),
         "llm_cache_cleared": cohort_name is None,
     }
@@ -477,32 +425,25 @@ async def purge_applications(
 ) -> dict[str, Any]:
     """Hard-delete every application in scope; return a non-PII receipt (PRD v3 §9).
 
-    ``expected_count`` must equal the live row count or nothing is deleted and
-    :class:`PurgeCountMismatch` is raised. Webhook deliveries continue during the seconds a
-    human spends reading the confirmation dialog, so without this guard a purge could destroy
-    rows nobody was shown — the count is the only thing the operator actually consented to.
+    ``expected_count`` must equal the live row count or nothing is deleted. Deliveries keep
+    arriving while a human reads the dialog, and that count is the only thing the operator
+    actually consented to.
 
-    A full wipe (``cohort_name=None``) also truncates ``llm_cache``. The cache is keyed
-    ``(task, sha256(input))`` with no cohort column, so it cannot be scoped; and its ``output``
-    holds model-generated commentary derived from essay text, which has no business outliving
-    the applications it describes. The cost is re-billing a re-grade, which is exactly the
-    tradeoff a full wipe implies. Deliberately NOT touched by a scoped purge.
+    **It is verified twice, before and after the delete.** ``FOR UPDATE`` locks the rows it
+    *finds*, not a predicate, so under READ COMMITTED an INSERT can still land between the
+    count and the DELETE — which takes a fresh snapshot and would happily include it.
+    Re-checking the number deleted closes that window by rolling back instead.
 
-    Everything runs in one transaction, so a mid-purge failure leaves the table untouched
-    rather than half-deleted. The tombstone carries counts and a timestamp only.
-
-    **The count is verified twice, before and after the delete.** ``FOR UPDATE`` locks the
-    rows it *finds*; it is not a predicate lock, so under READ COMMITTED it cannot stop an
-    INSERT landing between the count and the DELETE — and the DELETE takes a fresh snapshot
-    that would happily include the new row. Re-checking the number actually deleted closes
-    that window: a purge that would destroy a different set than the operator was shown
-    aborts and rolls back instead.
+    A full wipe also truncates ``llm_cache``: it is keyed ``(task, sha256(input))`` with no
+    cohort column, so it cannot be scoped, and its ``output`` holds model commentary derived
+    from essay text, which has no business outliving the applications. One transaction
+    throughout, so a mid-purge failure leaves the table untouched rather than half-deleted.
     """
     where, args = ("WHERE cohort_name = $1", [cohort_name]) if cohort_name else ("", [])
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Locks the rows we are about to delete, so a concurrent *update* cannot move a
-            # row out of scope underneath us. Arriving rows are caught by the post-check.
+            # Locks the rows in scope so a concurrent *update* cannot move one out from
+            # under us; arriving rows are caught by the post-check.
             live = await conn.fetchval(
                 f"SELECT COUNT(*) FROM (SELECT 1 FROM applications {where} FOR UPDATE) t",
                 *args,
@@ -523,8 +464,8 @@ async def purge_applications(
                 "llm_cache_rows_deleted": cache_cleared,
                 "scope": cohort_name or "ALL_COHORTS",
             }
-            # Same connection/transaction: the tombstone is part of the purge, not a follow-up
-            # that could be lost if the process died between the two.
+            # Same transaction: the tombstone is part of the purge, not a follow-up that a
+            # crash could lose.
             await conn.execute(
                 "INSERT INTO events (kind, submission_id, details) VALUES ($1, $2, $3)",
                 "purge",
@@ -540,9 +481,7 @@ async def purge_applications(
     return receipt
 
 
-# ================================================================================================
-# LLM cache + events
-# ================================================================================================
+# --- LLM cache + events ---
 
 
 async def cache_get(pool: asyncpg.Pool, task: str, input_sha256: str) -> dict[str, Any] | None:
@@ -571,11 +510,8 @@ async def cache_put(
 
 
 class PgCacheBackend:
-    """Adapter satisfying :class:`srip_filter.llm.client.CacheBackend` over ``llm_cache``.
-
-    Handed to the LLM client at startup (``client.cache_backend = PgCacheBackend(pool)``)
-    so every structured call is durably memoized (PRD v3 §5).
-    """
+    """Adapter satisfying :class:`srip_filter.llm.client.CacheBackend` over ``llm_cache``, handed
+    to the client at startup so every structured call is durably memoized (PRD v3 §5)."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
@@ -594,11 +530,8 @@ async def add_event(
     submission_id: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> None:
-    """Append to the non-PII operational ledger.
-
-    ``details`` must contain structural facts only (counts, stage names, error classes)
-    — NEVER essay, explanation, or resume text (CLAUDE.md security rules).
-    """
+    """Append to the non-PII operational ledger. ``details`` carries structural facts only —
+    counts, stage names, error classes — never essay, explanation, or resume text."""
     await pool.execute(
         "INSERT INTO events (kind, submission_id, details) VALUES ($1, $2, $3)",
         kind,
@@ -607,23 +540,17 @@ async def add_event(
     )
 
 
-# ================================================================================================
-# Helpers
-# ================================================================================================
+# --- Helpers ---
 
 async def count_recent_events(
     pool: asyncpg.Pool, kind: str, within_seconds: float, *, actor: str | None = None
 ) -> int:
-    """How many ``kind`` events landed inside the window (P12.2 login throttle).
+    """How many ``kind`` events landed inside the window — the login throttle's counter.
 
-    The throttle has to be shared across serverless instances, and ``events`` is already
-    the cross-instance ledger. Safe for this use: a failed login is a structural fact
-    about a single shared credential — no identity, no PII.
-
-    ``actor`` narrows the count to one ``details->>'actor'`` bucket, which is how the
-    per-client tier is counted. That value is a salted hash produced by
-    :func:`api.auth.client_key`, never an address — see its docstring for why the ledger
-    must not learn one.
+    The throttle must hold across serverless instances and ``events`` is already the
+    cross-instance ledger; a failed login against a shared credential carries no PII.
+    ``actor`` narrows to one bucket for the per-client tier, and is a salted hash from
+    :func:`api.auth.client_key`, never an address.
     """
     if actor is None:
         return await pool.fetchval(

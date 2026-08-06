@@ -1,10 +1,10 @@
 """The canonical live webhook payload, as one shared test builder.
 
-Mirrors `thinkNeuroWebsite/lib/ats.ts::buildAtsPayload` against the live **SP27-CSE**
-question config (read 2026-07-28), so every suite exercises the real shape instead of four
-hand-rolled approximations. Synthetic values only — never real applicant content.
+Mirrors the partner's dispatcher against the live question config (read 2026-07-28), so every
+suite exercises the real shape rather than four hand-rolled approximations. Synthetic values
+only — never real applicant content.
 
-Field facts worth keeping straight (all verified, not assumed):
+Field facts worth keeping straight, all verified rather than assumed:
 
 * ``all_answers`` is the only place ``field_key`` appears; the essay arrays carry question
   text and answer alone.

@@ -1,16 +1,9 @@
-"""FastAPI application factory (v3 webhook receiver + session-gated admin UI).
-
-The core stays HTTP-free — everything web lives here. Routes:
-
-  * ``GET  /health``  — liveness + grading-queue health (503 when the queue is not draining)
-  * ``POST /webhooks/applications`` — the partner's per-application delivery (``api.webhooks``)
-  * ``/api/*``        — DB-backed admin/review endpoints (``api.admin_api``)
-  * ``POST /cohorts`` — what-if cohort assignment from a re-uploaded ``decisions.jsonl``
+"""FastAPI application factory — webhook receiver plus session-gated admin UI. The core stays
+HTTP-free; everything web lives here.
 
 ``create_app`` takes its dependencies as arguments so tests can inject a config and a
-``FakeLLMClient`` for a zero-spend suite. In production the LLM client is built once at startup
-(lifespan) from config/secrets. The module-level ``app`` is the uvicorn entry point
-(``uvicorn api.main:app``).
+``FakeLLMClient`` for a zero-spend suite; in production they are built once in the lifespan.
+The module-level ``app`` is the uvicorn entry point.
 """
 
 from __future__ import annotations
@@ -62,46 +55,36 @@ _HERE = Path(__file__).parent
 
 
 class _RevalidatedStaticFiles(StaticFiles):
-    """StaticFiles that always revalidates (Cache-Control: no-cache).
-
-    Without a Cache-Control header browsers apply heuristic freshness and keep serving a stale
-    app.js/app.css for minutes after a deploy or restart. ``no-cache`` still allows conditional
-    (ETag/304) requests, so the cost is one revalidation round-trip per asset per load.
-    """
+    """StaticFiles that always revalidates. Without a Cache-Control header browsers apply
+    heuristic freshness and serve a stale app.js for minutes after a deploy; ``no-cache`` still
+    allows conditional requests, so the cost is one revalidation per asset per load."""
 
     def file_response(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         response = super().file_response(*args, **kwargs)
         response.headers["Cache-Control"] = "no-cache"
         return response
 
-# Dev/demo only: launch with SRIP_DEV_FAKE_LLM=1 to wire a zero-spend, no-key FakeLLMClient backed
-# by api.demo.demo_handler, so the whole UI can be demoed end-to-end without an OpenAI key. Never
-# set this in production — it does not call any model.
+# Dev/demo only: a zero-spend, no-key FakeLLMClient so the UI can be demoed end to end without
+# an OpenAI key. Never set in production — it calls no model.
 _DEV_FAKE_LLM_ENV = "SRIP_DEV_FAKE_LLM"
 
-# Local dev only (P11.6): start the in-process grading loop. Unset on Vercel, where the
-# per-minute cron drain (POST /api/cron/drain) is the sole driver — a polling loop per
-# serverless instance is constant DB churn for no gain.
+# Local dev only: the in-process grading loop. Unset on Vercel, where the per-minute cron drain
+# is the sole driver — a polling loop per serverless instance is DB churn for no gain.
 _LOCAL_WORKER_ENV = "SRIP_LOCAL_WORKER"
 
-# Per-tier seat cap as a query param (Phase 11.4): omitted/None = unlimited. Module-level so the
-# stringified annotation (PEP 563) resolves when FastAPI builds the route signature.
+# Omitted/None = unlimited. Module-level so the stringified annotation resolves when FastAPI
+# builds the route signature.
 _Capacity = Annotated[int | None, Query(ge=0, description="Seat cap; omit for unlimited.")]
 
 
 def _wire_core_logging() -> None:
     """Give the root logger a stderr handler so ``srip_filter.*`` records are visible.
 
-    uvicorn (and Vercel) configure only their own loggers, so our records propagate to a root
-    logger with no handler attached and are dropped. Measured 2026-07-29: a 42-minute
-    calibration run that provably paced against the TPM bucket for its whole duration emitted
-    zero ``paced ... to stay under TPM`` lines, so a sustained 429 storm would slow the drain
-    with no trace anywhere. ``/health`` only reports a *dead* drain, not a degraded one.
-
-    One handler on the root logger is the whole fix: uvicorn's own loggers set
-    ``propagate=False``, so nothing double-logs through it, and ``basicConfig`` is a no-op
-    when the host (or pytest) has already installed handlers of its own. Level follows
-    uvicorn's ``--log-level`` when it set one (NOTSET/0 otherwise, hence the INFO fallback).
+    uvicorn and Vercel configure only their own loggers, so ours propagate to a handler-less
+    root and vanish: a 42-minute calibration run that paced against the TPM bucket throughout
+    emitted zero pacing lines (2026-07-29), and ``/health`` only reports a *dead* drain, not a
+    degraded one. One root handler is the whole fix — uvicorn's loggers set ``propagate=False``
+    so nothing double-logs, and ``basicConfig`` no-ops when the host already installed handlers.
     """
     logging.basicConfig(
         level=logging.getLogger("uvicorn.error").level or logging.INFO,
@@ -118,21 +101,18 @@ def create_app(
     webhook_secrets: tuple[str, ...] | None = None,
     admin_password_hash: str | None = None,
 ) -> FastAPI:
-    """Build the FastAPI app with its (optional) injected LLM client.
+    """Build the FastAPI app with its optionally injected dependencies.
 
-    ``config`` defaults to the project ``config.yaml``. ``client`` is the LLM boundary the
-    grading worker uses; when left ``None`` it is built once at startup from config/secrets
-    (a real :class:`~srip_filter.llm.client.OpenAILLMClient`). Tests inject a ``FakeLLMClient`` so
-    no startup build — and no API spend — happens. Dependencies live on ``app.state`` so route
-    handlers read them without globals.
+    Anything left ``None`` is built at startup from config and secrets; tests inject fakes so no
+    build — and no API spend — happens. Everything lands on ``app.state``, so route handlers
+    read their dependencies without globals.
     """
     _wire_core_logging()
     cfg = config if config is not None else get_config()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # v3 (P2): build the Postgres pool once, only if a test hasn't injected one and a
-        # DSN is configured. Migrations apply at startup — single instance, tiny schema.
+        # Build the pool once, only if a test hasn't injected one and a DSN is configured.
         owns_pool = False
         if app.state.db_pool is None:
             dsn = get_secrets().database_url
@@ -143,13 +123,10 @@ def create_app(
                     max_size=app.state.config.db.pool_max_size,
                 )
                 owns_pool = True
-                # P11.3: migrations do NOT run here. On a serverless host the lifespan is
-                # a cold start — it fires per instance, concurrently, with no release
-                # phase to own DDL. The advisory-locked pass lives in the cron drain, with
-                # POST /api/admin/migrate for the manual first run.
-        # Build the client once, only if a test hasn't injected one. Done in the lifespan (not at
-        # import) so importing this module never needs an API key. The dev/demo flag swaps in a
-        # zero-spend FakeLLMClient; the default path is the real OpenAI client.
+                # Migrations deliberately do NOT run here: on a serverless host the lifespan
+                # is a cold start, firing per instance and concurrently, with no release phase
+                # to own DDL. The advisory-locked pass lives in the cron drain instead.
+        # In the lifespan rather than at import, so importing this module never needs a key.
         if app.state.llm_client is None:
             if os.getenv(_DEV_FAKE_LLM_ENV) == "1":
                 from .demo import demo_handler
@@ -161,15 +138,12 @@ def create_app(
                 app.state.llm_client = FakeLLMClient(app.state.config, demo_handler)
             else:
                 app.state.llm_client = OpenAILLMClient(app.state.config)
-        # v3 (P4): with a real pool, wire the durable LLM cache. `hasattr acquire` guards
-        # against test sentinels injected as db_pool.
+        # `hasattr acquire` guards against test sentinels injected as db_pool.
         worker_stop = asyncio.Event()
         worker_task: asyncio.Task | None = None
         has_pool = app.state.db_pool is not None and hasattr(app.state.db_pool, "acquire")
         if has_pool:
             app.state.llm_client.cache_backend = dbmod.PgCacheBackend(app.state.db_pool)
-        # P11.6: the in-process loop is local-dev only. On Vercel every instance would run
-        # its own polling loop; POST /api/cron/drain is the one driver there.
         if has_pool and os.getenv(_LOCAL_WORKER_ENV) == "1":
             worker_task = asyncio.create_task(
                 run_worker(
@@ -183,7 +157,7 @@ def create_app(
             yield
         finally:
             if worker_task is not None:
-                worker_stop.set()  # graceful: finish the in-flight row, then exit
+                worker_stop.set()  # finish the in-flight row, then exit
                 await worker_task
             if owns_pool and app.state.db_pool is not None:
                 await app.state.db_pool.close()
@@ -197,8 +171,8 @@ def create_app(
     )
     app.state.config = cfg
     app.state.llm_client = client
-    # v3 (P2): DB pool + webhook HMAC secrets. Tests inject both; production fills the pool
-    # in the lifespan and reads secrets from the environment here (no secret ever in config).
+    # Tests inject both; production fills the pool in the lifespan and reads secrets from the
+    # environment here — no secret ever lives in config.
     app.state.db_pool = db_pool
     if webhook_secrets is not None:
         app.state.webhook_secrets = webhook_secrets
@@ -207,33 +181,30 @@ def create_app(
         app.state.webhook_secrets = tuple(
             s for s in (env.ats_webhook_secret, env.ats_webhook_secret_previous) if s
         )
-    # P11.1: the cron drain authenticates itself with a bearer token (Vercel sets it on
-    # scheduled invocations), so it carries no session — see auth.OPEN_PREFIXES.
+    # The cron drain authenticates with a bearer token, so it carries no session — see
+    # auth.OPEN_PREFIXES.
     app.state.cron_secret = get_secrets().cron_secret
     register_webhooks(app)
     register_cron(app)
-    register_admin_api(app)  # v3 (P6): DB-backed review endpoints, session-gated by P5
+    register_admin_api(app)
 
-    # -- Server-rendered UI shell (Phase 10; created before auth so /login can render) -----------
-    # Same-origin Jinja2 templates + static assets; the browser drives everything via fetch
-    # against the JSON API, so no CORS. Paths are resolved off this file so CWD doesn't matter.
+    # -- UI shell (before auth, so /login can render) ---------------------------------------
+    # Same-origin templates and assets; the browser drives everything by fetch against the
+    # JSON API, so no CORS. Paths resolve off this file so CWD doesn't matter.
     templates = Jinja2Templates(directory=str(_HERE / "templates"))
     app.state.templates = templates
     app.mount("/static", _RevalidatedStaticFiles(directory=str(_HERE / "static")), name="static")
     register_pages(app, templates)
 
-    # -- Admin auth (P5, PRD v3 §6) --------------------------------------------------------------
-    # Default-deny: every route needs a session except auth.OPEN_PREFIXES (health, the
-    # HMAC-verified webhook, the login page, static assets). Shared-password login → opaque
-    # server-side session token in an HttpOnly cookie; global sliding lockout on failures.
+    # -- Admin auth (PRD v3 §6) -------------------------------------------------------------
+    # Default-deny: every route needs a session except auth.OPEN_PREFIXES.
     app.state.admin_password_hash = (
         admin_password_hash
         if admin_password_hash is not None
         else get_secrets().admin_password_hash
     )
-    # P12.1: the session cookie is signed with the admin password hash — no separate
-    # secret to deploy, and changing the password invalidates every live session, which is
-    # the only revocation lever a stateless scheme has.
+    # The session cookie is signed with the password hash: no separate secret to deploy, and
+    # changing the password invalidates every session — a stateless scheme's only revocation.
     app.state.session_secret = app.state.admin_password_hash or ""
     app.state.login_throttle = LoginThrottle(
         max_attempts=cfg.auth.max_attempts,
@@ -241,11 +212,9 @@ def create_app(
         max_attempts_global=cfg.auth.max_attempts_global,
     )
 
-    # One answer to "is this deployment served over https", used by both the Secure cookie
-    # flag and HSTS. The dev/demo flag (never set in production — see its declaration) means
-    # a local http:// server, which must neither set a Secure cookie it cannot send back nor
-    # advertise HSTS. Browsers ignore HSTS from a plaintext response anyway, so this is
-    # consistency rather than a hole — but two copies of the rule is how they diverge.
+    # One answer to "is this served over https", shared by the Secure cookie flag and HSTS.
+    # The demo flag means a local http:// server, which must neither set a Secure cookie it
+    # cannot send back nor advertise HSTS — and two copies of that rule is how they diverge.
     https_mode = cfg.auth.cookie_secure and os.getenv(_DEV_FAKE_LLM_ENV) != "1"
 
     def _client_key(request) -> str:  # type: ignore[no-untyped-def]
@@ -256,8 +225,8 @@ def create_app(
             app.state.session_secret or "unconfigured",
         )
 
-    # P12.2: with a database the lockout windows are counted over `events`, so they hold
-    # across serverless instances; the in-memory throttle is the local-dev fallback.
+    # With a database the lockout windows count over `events`, so they hold across serverless
+    # instances; the in-memory throttle is the local-dev fallback.
     async def locked_out(actor: str) -> bool:
         pool = app.state.db_pool
         if pool is None:
@@ -281,11 +250,8 @@ def create_app(
 
     @app.middleware("http")
     async def require_admin(request, call_next):  # type: ignore[no-untyped-def]
-        """Default-deny session gate, and the one place security headers are stamped.
-
-        Headers go on *every* response — error pages, redirects and static assets
-        included — so there is no route that can be added later and quietly miss them.
-        """
+        """Default-deny session gate, and the one place security headers are stamped — on
+        *every* response, so no route added later can quietly miss them."""
         headers = security_headers(https_only=https_mode)
         path = request.url.path
         if is_open_path(path) or valid_session(
@@ -295,8 +261,7 @@ def create_app(
         elif wants_html(request.headers.get("accept")):
             from fastapi.responses import RedirectResponse
 
-            # `path` is this server's own routing path, not user-supplied content, but it
-            # still lands in a URL — quote it rather than reflect it verbatim.
+            # Our own routing path, not user content, but it still lands in a URL.
             response = RedirectResponse(
                 url=f"/login?next={quote(safe_next_path(path), safe='/')}", status_code=303
             )
@@ -362,9 +327,8 @@ def create_app(
 
     @app.post("/logout", tags=["auth"])
     async def logout(request: Request):  # type: ignore[no-untyped-def]
-        """Clear the cookie. Stateless sessions cannot be revoked server-side (P12.1) —
-        a copy taken before logout stays valid until it expires; rotating the admin
-        password is the lever that kills every session at once."""
+        """Clear the cookie. Stateless sessions cannot be revoked server-side, so a copy taken
+        before logout stays valid until it expires; rotating the password kills them all."""
         from fastapi.responses import RedirectResponse
 
         response = RedirectResponse(url="/login", status_code=303)
@@ -375,20 +339,17 @@ def create_app(
     async def health() -> Response:
         """Liveness **and** grading-queue health — the one thing an external monitor watches.
 
-        200 ``{"status": "ok"}`` while applications are being graded; **503**
-        ``{"status": "degraded"}`` when the oldest ungraded row is older than
-        ``worker.queue_alert_seconds``, or when the database cannot be reached. A non-2xx is
-        what makes any off-the-shelf uptime check alert, which is the whole point: the cron
-        drain failing silently is otherwise invisible until someone opens the dashboard.
-
-        An empty queue is healthy — an idle service must not look broken. Reports an age, not
-        a count: this route is unauthenticated and a count would leak application volume.
+        503 when the oldest ungraded row exceeds ``worker.queue_alert_seconds`` or the database
+        is unreachable, because a non-2xx is what makes an off-the-shelf uptime check alert:
+        the cron drain failing silently is otherwise invisible until someone opens the
+        dashboard. An empty queue is healthy, and it reports an age rather than a count —
+        this route is unauthenticated and a count would leak application volume.
         """
         from fastapi.responses import JSONResponse
 
         pool = app.state.db_pool
         if pool is None or not hasattr(pool, "fetchval"):
-            # No database configured (local dev, or a test sentinel): liveness only.
+            # No database configured: liveness only.
             return JSONResponse(content={"status": "ok", "queue": "not_configured"})
         try:
             age = await dbmod.oldest_pending_seconds(pool)
@@ -408,10 +369,9 @@ def create_app(
             logger.error("health: queue not draining; oldest pending row is %.0fs old", age)
         return JSONResponse(status_code=503 if stalled else 200, content=body)
 
-    # -- Cohort assignment (Phase 11, PRD §11) ---------------------------------------------------
-    # Capacities are per-request staff knobs (None/omitted = unlimited), so they ride as query
-    # params; synchronous (pure milliseconds-fast core, nothing stored). The live-DB equivalent
-    # is POST /api/cohorts (admin_api); this one is the offline/durable entry point.
+    # -- Cohort assignment (PRD §11) --------------------------------------------------------
+    # Capacities are per-request staff knobs, so they ride as query params. The live-DB
+    # equivalent is POST /api/cohorts; this one is the offline, durable entry point.
 
     @app.post(
         "/cohorts",
@@ -436,9 +396,8 @@ def create_app(
     ) -> Response:
         """Cohort assignment from a re-uploaded ``decisions.jsonl`` (PRD §11).
 
-        The durable entry point: works in a later session, or after a cohort has been closed out
-        and purged — upload the ``decisions.jsonl`` you exported and the same deterministic
-        assignment is recomputed. Malformed input is a graceful 4xx, never a 500.
+        The durable entry point: it still works after a cohort is closed out and purged —
+        upload the export and the same assignment recomputes. Malformed input is a 4xx.
         """
         raw = await read_upload_capped(file, cfg.api.max_upload_bytes)
         records = parse_decisions_jsonl(raw, cfg.api.max_rows)

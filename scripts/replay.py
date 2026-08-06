@@ -1,25 +1,17 @@
-"""Replay tool (P7) — fire signed webhook POSTs at an ATS from a CSV or synthetic fixtures.
+"""Replay tool — fire authenticated webhook POSTs at an ATS from a CSV or synthetic fixtures.
 
-The website dispatcher's stand-in for development, integration testing, load testing, and
-the v2→v3 calibration run:
+The website dispatcher's stand-in for development, integration testing, and calibration runs::
 
-    # 3 synthetic applications against a local server:
     uv run python scripts/replay.py --secret dev-secret --fixtures 3
-
-    # replay a Fillout CSV export (the 466-row calibration source — LOCAL ONLY, PII):
     uv run python scripts/replay.py --secret dev-secret --csv path/to/export.csv
-
-    # inspect the payloads without sending:
     uv run python scripts/replay.py --csv path/to/export.csv --dry-run
 
-Signing matches `api/webhook_auth.py` exactly (same module — the single source of the
-rule), so a replayed POST is indistinguishable from the website's once request signing
-lands. CSV rows are converted to the PRD v3 §2.2 PROPOSED essays-mode contract;
-Fillout's non-UUID submission ids are mapped deterministically via uuid5 so re-replays
-hit the same rows (idempotency exercises for free).
+Auth imports `api/webhook_auth.py`, the single source of the rule, so a replayed POST is
+indistinguishable from the website's. Non-UUID submission ids map deterministically via uuid5,
+so re-replays hit the same rows and exercise idempotency for free.
 
-Never point this at a production ATS with real data unless that is exactly what you
-mean to do. Nothing here is imported by the service.
+Never point this at a production ATS with real data unless that is exactly what you mean.
+Nothing here is imported by the service.
 """
 
 from __future__ import annotations
@@ -46,11 +38,8 @@ from srip_filter.ingest import (  # noqa: E402
     validate_headers,
 )
 
-# Deterministic namespace for mapping Fillout's non-UUID submission ids onto the UUID
-# column: uuid5(NS, raw_id) is stable across replays, so idempotency works end to end.
+# Stable across replays, so non-UUID ids map onto the UUID column identically every time.
 _SID_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # RFC 4122 NS_DNS
-
-# The v2 form's fixed word bounds — the CSV path predates per-essay payload metadata.
 
 
 def to_submission_uuid(raw_id: str) -> str:
@@ -69,14 +58,12 @@ def _answers(pairs: dict[str, str | None]) -> list[dict]:
     ]
 
 
-# The partner stamps submitted_at in U.S. Pacific with an offset, not UTC "Z" (verified
-# verified against their dispatcher). Replays carry a real offset so that parse path is
-# actually exercised.
+# The partner stamps submitted_at in U.S. Pacific with an offset, not UTC "Z", so replays
+# carry a real offset and actually exercise that parse path.
 #
-# It MUST be deterministic, not wall-clock: `content_hash` covers the whole payload, so a
-# timestamp that moves between runs changes payload_hash, which re-grades every row on a
-# re-replay — silently re-billing the whole batch. A fixed base + per-row offset keeps
-# replays byte-identical, which is what makes the idempotency check meaningful.
+# It MUST be deterministic rather than wall-clock: `content_hash` covers the whole payload, so
+# a moving timestamp changes payload_hash and silently re-grades — and re-bills — every row on
+# a re-replay. A fixed base plus a per-row offset keeps replays byte-identical.
 _PACIFIC = timezone(timedelta(hours=-7))
 _REPLAY_EPOCH = datetime(2026, 7, 6, 11, 20, tzinfo=_PACIFIC)
 

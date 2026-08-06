@@ -1,12 +1,8 @@
 """Load ``.env`` before test collection.
 
-``tests/test_db.py`` reads ``DATABASE_URL_TEST`` from ``os.environ`` at import time to
-decide whether to skip, so without this the DB suite silently stays skipped even when the
-DSN is sitting in ``.env``. pytest imports conftest before the test modules beside it, so
-this runs early enough.
-
-``load_dotenv`` does not override variables already in the environment, so an explicitly
-exported DSN still wins over the file.
+``test_db.py`` reads ``DATABASE_URL_TEST`` at import time to decide whether to skip, so
+without this the DB suite stays silently skipped even with the DSN sitting in ``.env``.
+``load_dotenv`` never overrides the environment, so an exported DSN still wins.
 """
 
 from __future__ import annotations

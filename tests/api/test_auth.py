@@ -1,8 +1,7 @@
-"""P5 admin-auth tests — the real barrier (marked ``real_auth`` to skip the conftest bypass).
+"""Admin-auth tests — the real barrier, marked ``real_auth`` to skip the conftest bypass.
 
-Covers: password hashing, signed-cookie sessions, the global login throttle, the default-deny
-middleware (redirect for browsers, 401 for API callers, allowlist for health/webhook/
-static), the login/logout flow with cookies, and the open-redirect guard on ``next``.
+Covers password hashing, signed-cookie sessions, both throttle tiers, the default-deny
+middleware and its allowlist, the login/logout flow, and the open-redirect guard on ``next``.
 """
 
 from __future__ import annotations
@@ -30,9 +29,7 @@ HASH = hash_password(PASSWORD, iterations=1_000)  # low iterations: keep the sui
 pytestmark = pytest.mark.real_auth
 
 
-# ------------------------------------------------------------------------------------------------
-# Pure pieces
-# ------------------------------------------------------------------------------------------------
+# --- Pure pieces ---
 
 
 def test_password_hash_round_trip() -> None:
@@ -99,16 +96,13 @@ def test_open_path_allowlist() -> None:
         assert is_open_path(path), path
     for path in ("/", "/api/applications", "/api/exports/decisions", "/audit", "/cohorts",
                  "/healthz", "/webhooksx",
-                 # The bulk purge is irreversible and destroys minors' PII: it must never
-                 # drift onto the allowlist, and /api/cron/ sitting there makes that a real
-                 # hazard rather than a theoretical one.
+                 # The purge is irreversible: it must never drift onto the allowlist, and
+                 # /api/cron/ sitting there makes that a real hazard, not a theoretical one.
                  "/api/admin/purge", "/api/admin/purge-preview"):
         assert not is_open_path(path), path
 
 
-# ------------------------------------------------------------------------------------------------
-# Middleware + login flow (TestClient)
-# ------------------------------------------------------------------------------------------------
+# --- Middleware + login flow (TestClient) ---
 
 
 def _client(admin_hash: str | None = HASH, *, db_pool: object | None = None) -> TestClient:
@@ -301,9 +295,7 @@ def test_a_legitimate_next_path_still_round_trips() -> None:
     assert resp.headers["location"] == "/audit?cohort=su26-cs"
 
 
-# ------------------------------------------------------------------------------------------------
-# Security response headers
-# ------------------------------------------------------------------------------------------------
+# --- Security response headers ---
 
 
 @pytest.mark.parametrize(
@@ -388,10 +380,8 @@ def test_logout_revokes_session() -> None:
 
 
 def test_unconfigured_hash_fails_closed() -> None:
-    # "" (not None) is how create_app spells *unconfigured*: None means "fall back to the
-    # environment", so passing it here made this test silently depend on whether the
-    # developer's .env happened to be empty — it started failing the moment
-    # ADMIN_PASSWORD_HASH was set locally.
+    # "" (not None) is how create_app spells *unconfigured*: None falls back to the
+    # environment, which made this test depend on whether the developer's .env was empty.
     client = _client(admin_hash="")
     # Login refuses (503) and protected routes stay locked — never silently open.
     assert client.post("/login", data={"password": "anything"}).status_code == 503

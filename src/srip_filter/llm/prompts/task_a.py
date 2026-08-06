@@ -1,10 +1,8 @@
-"""Task A — GPA normalization for ambiguous / non-standard values (PRD §6.1, §8).
+"""Task A — GPA normalization for ambiguous or non-standard values (PRD §6.1, §8).
 
-Fires only for values the deterministic parser cannot confidently resolve: weighted GPAs
-above 4.0, non-numeric scales (IGCSE letter strings, "average is 8"), foreign curricula with a
-stated max, and any other unparseable string. The job is mechanical estimation — convert to a
-4.0-scale equivalent with a confidence level, or say it cannot be safely placed. Output parses
-into :class:`srip_filter.models.TaskAOutput`.
+Fires only for what the deterministic parser cannot resolve: weighted GPAs above 4.0,
+non-numeric or foreign scales, and unparseable strings. Mechanical estimation — convert to a
+4.0-scale equivalent with a confidence level, or say it cannot be safely placed.
 """
 
 from __future__ import annotations

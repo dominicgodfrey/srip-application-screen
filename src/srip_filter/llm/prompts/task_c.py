@@ -1,13 +1,8 @@
-"""Task C — relevant-coursework decomposition + relevance classification (PRD §5, §8.4).
+"""Task C — coursework decomposition and relevance classification (PRD §5, §8.4).
 
-Mechanical extraction (mini tier): turn the free-text ``Relevant Coursework`` cell into a list
-of individual courses, each classified by relevance to software engineering and with its grade
-normalized to a 0-100 percentage. Output parses into :class:`srip_filter.models.TaskCOutput`.
-
-Bonus-only signal: nothing here can reject or block an applicant. The deterministic layer
-(:func:`srip_filter.scoring.coursework.coursework_bonus`) recomputes each course's weight and
-``counts`` flag from config — the model's job is faithful *extraction and classification*, not
-scoring — so the SYSTEM prompt asks for categories and normalized grades, not point values.
+Mechanical extraction: the free-text cell becomes a list of classified courses with normalized
+grades. Bonus-only, so nothing here can reject. The deterministic layer recomputes every weight
+and ``counts`` flag from config, which is why this prompt asks for categories, never points.
 """
 
 from __future__ import annotations

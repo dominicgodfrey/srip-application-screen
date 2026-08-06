@@ -1,13 +1,8 @@
-"""Tests for the cohort assignment layer (Phase 11, tiered cost model since 11.5).
-Deterministic, no API spend.
+"""Tests for the cohort assignment layer. Deterministic, no API spend.
 
-Organized by sub-task:
-  * 11.1 — :func:`normalize_choices`: tier-token parsing of the messy free-text choice strings.
-  * 11.2/11.5 — :func:`assign_cohorts`: rank-greedy assignment under the tiered cost model and
-    its invariants (only RANKED assignable, strict first-choice cost ceiling, capped tiers fill
-    strictly by rank, no silent overflow — waitlist is a manual-review bucket, capacity sweeps,
-    monotonicity, determinism, NEEDS_REVIEW warning).
-  * 11.3 — :func:`cohort_assignments_csv`: the single rank-ordered CSV artifact.
+Covers tier-token parsing of the messy free-text choices, rank-greedy assignment under the
+tiered cost model and its invariants (only RANKED assignable, strict first-choice ceiling,
+capped tiers filling by rank, no silent overflow), and the CSV artifact.
 """
 
 from __future__ import annotations
@@ -73,9 +68,7 @@ def _entry(result: CohortResult, sid: str):
     raise AssertionError(f"{sid} missing from result")
 
 
-# ------------------------------------------------------------------------------------------------
-# 11.1 — normalize_choices
-# ------------------------------------------------------------------------------------------------
+# --- 11.1 — normalize_choices ---
 
 
 def test_parses_both_dash_formats_seen_in_the_form() -> None:
@@ -133,9 +126,7 @@ def test_all_empty_yields_no_preferences() -> None:
     assert normalize_choices(_choices("", "", ""), TIERS) == []
 
 
-# ------------------------------------------------------------------------------------------------
-# 11.2 — assign_cohorts: the realistic (unbounded) case
-# ------------------------------------------------------------------------------------------------
+# --- 11.2 — assign_cohorts: the realistic (unbounded) case ---
 
 
 def test_no_caps_everyone_gets_first_choice() -> None:
@@ -168,9 +159,7 @@ def test_repeated_tier_assigned_as_choice_one() -> None:
     assert entry.choices == ["regular"]
 
 
-# ------------------------------------------------------------------------------------------------
-# 11.2 — only RANKED is assignable (PRD §11: REJECTED can never resurface)
-# ------------------------------------------------------------------------------------------------
+# --- 11.2 — only RANKED is assignable (PRD §11: REJECTED can never resurface) ---
 
 
 def test_rejected_and_needs_review_are_never_assigned() -> None:
@@ -191,9 +180,7 @@ def test_rejected_and_needs_review_are_never_assigned() -> None:
     assert any("NEEDS_REVIEW" in w for w in result.summary.warnings)
 
 
-# ------------------------------------------------------------------------------------------------
-# 11.5 — strict first-choice cost ceiling
-# ------------------------------------------------------------------------------------------------
+# --- 11.5 — strict first-choice cost ceiling ---
 
 
 def test_cost_ceiling_blocks_listed_higher_tiers() -> None:
@@ -238,9 +225,7 @@ def test_honors_first_can_fall_through_all_listed_tiers() -> None:
     assert entry.excluded_by_cost == []
 
 
-# ------------------------------------------------------------------------------------------------
-# 11.5 — capped tiers fill strictly by rank; waitlist is a manual-review bucket
-# ------------------------------------------------------------------------------------------------
+# --- 11.5 — capped tiers fill strictly by rank; waitlist is a manual-review bucket ---
 
 
 def test_capacity_binds_in_rank_order() -> None:
@@ -313,9 +298,7 @@ def test_zero_capacity_closes_a_tier() -> None:
     assert result.summary.tiers["honors"].open_seats == 0
 
 
-# ------------------------------------------------------------------------------------------------
-# 11.2 — unassignable, summary facts, and warnings
-# ------------------------------------------------------------------------------------------------
+# --- 11.2 — unassignable, summary facts, and warnings ---
 
 
 def test_unparseable_choices_are_unassignable_never_seated() -> None:
@@ -364,9 +347,7 @@ def test_missing_rank_is_processed_last_with_warning() -> None:
     assert any("no rank" in w for w in result.summary.warnings)
 
 
-# ------------------------------------------------------------------------------------------------
-# Global invariants: capacity, monotonicity, determinism (brute-force over cap combos)
-# ------------------------------------------------------------------------------------------------
+# --- Global invariants: capacity, monotonicity, determinism (brute-force over cap combos) ---
 
 _POPULATION = [
     _rec("s1", 1, "honors", "intensive"),
@@ -420,9 +401,7 @@ def test_assignment_is_deterministic_across_reruns() -> None:
     assert first.model_dump() == second.model_dump()
 
 
-# ------------------------------------------------------------------------------------------------
-# 11.3 — cohort_assignments_csv
-# ------------------------------------------------------------------------------------------------
+# --- 11.3 — cohort_assignments_csv ---
 
 
 def test_csv_has_pinned_columns_and_every_record_once() -> None:

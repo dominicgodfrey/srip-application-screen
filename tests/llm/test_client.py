@@ -145,10 +145,8 @@ async def test_transient_errors_are_retried_to_the_full_budget(monkeypatch) -> N
 async def test_retry_warning_names_the_kind_but_not_the_error_text(monkeypatch, caplog) -> None:
     """The retry warning is the 429-storm signal, so it must be safe to emit.
 
-    A terminal failure's message can quote applicant content back at us (a pydantic
-    ValidationError echoing raw output, an OpenAI refusal naming what it refused). These records
-    now reach real handlers (api.main._wire_core_logging), so on Vercel they land in function
-    logs. The kind plus the attempt counter is what diagnoses a storm; the message belongs in
+    A terminal failure's message can quote applicant content back at us, and these records reach
+    real handlers. The kind plus the attempt counter diagnoses a storm; the message belongs in
     the audit record, which LLMParseFailure still carries.
     """
     monkeypatch.setattr("srip_filter.llm.client.asyncio.sleep", _no_sleep)

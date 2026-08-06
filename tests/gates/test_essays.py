@@ -32,8 +32,8 @@ def _write_wordlist(tmp_path: Path, lines: list[str]) -> Path:
     return path
 
 
-# A pool of distinct, letter-varied real words used to synthesize valid essays that are NOT
-# gibberish (high entropy, high unique-word ratio) at any target length.
+# Distinct, letter-varied real words, so a synthesized essay of any length reads as
+# non-gibberish: high entropy, high unique-word ratio.
 _WORD_POOL = (
     "the quick brown fox jumps over a lazy dog while bright morning sunlight covers green "
     "valleys near an old river where many curious children gladly play music during warm "
@@ -319,8 +319,8 @@ def test_a_flagged_application_never_carries_a_silent_reason():
 
 
 def test_default_matcher_allows_clinical_terms_from_resources_file():
-    # Regression for real false positives observed in the reference dataset: better-profanity's
-    # default list flags these innocuous/clinical words; resources/profanity.txt allowlists them.
+    # Regression for real false positives in the reference dataset: the default list flags
+    # these clinical words, and resources/profanity.txt allowlists them.
     matcher = build_profanity_matcher()  # the real committed wordlist
     for phrase in (
         "apps that support stroke awareness campaigns",

@@ -1,10 +1,8 @@
-"""P6a — DB-backed admin API tests (list/detail, promote/demote, delete, exports, what-if).
+"""DB-backed admin API tests: list/detail, promote/demote, delete, exports, what-if.
 
-The store boundary is an in-memory fake (same pattern as the worker tests): SKIP LOCKED
-and upsert semantics were proven in test_db.py; here we prove the endpoints' behavior on
-top of them — read-time per-cohort ranks, override persistence with decided_by events,
-and honest 404/409s. Auth is bypassed by the conftest fixture; the barrier itself is
-proven in test_auth.py.
+The store boundary is an in-memory fake — its semantics were proven against real Postgres in
+test_db.py, so what is under test here is the endpoints: read-time per-cohort ranks, override
+persistence with decided_by events, and honest 404/409s.
 """
 
 from __future__ import annotations
@@ -192,9 +190,7 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-# ------------------------------------------------------------------------------------------------
-# Listing + read-time ranks
-# ------------------------------------------------------------------------------------------------
+# --- Listing + read-time ranks ---
 
 
 def test_listing_assigns_per_cohort_ranks(client: TestClient, store: _FakeStore) -> None:
@@ -311,9 +307,7 @@ def test_detail_404_and_full_record(client: TestClient, store: _FakeStore) -> No
     assert body["has_payload"] is True
 
 
-# ------------------------------------------------------------------------------------------------
-# Promote / demote
-# ------------------------------------------------------------------------------------------------
+# --- Promote / demote ---
 
 
 def test_promote_rescores_with_gates_bypassed_and_tombstones(
@@ -371,9 +365,7 @@ def test_demote_requires_ranked(client: TestClient, store: _FakeStore) -> None:
     assert client.post(f"/api/applications/{sid}/demote").status_code == 409
 
 
-# ------------------------------------------------------------------------------------------------
-# Delete + exports + summary
-# ------------------------------------------------------------------------------------------------
+# --- Delete + exports + summary ---
 
 
 def test_delete_204_then_404(client: TestClient, store: _FakeStore) -> None:
@@ -424,9 +416,7 @@ def test_cohort_whatif_runs_over_live_ranking(client: TestClient,
     assert body["summary"]["total_ranked"] == 1
 
 
-# ------------------------------------------------------------------------------------------------
-# Bulk purge (PRD v3 §9) — the endpoints behind the confirmation dialog
-# ------------------------------------------------------------------------------------------------
+# --- Bulk purge (PRD v3 §9) — the endpoints behind the confirmation dialog ---
 
 
 def test_purge_preview_is_read_only(client: TestClient, store: _FakeStore) -> None:

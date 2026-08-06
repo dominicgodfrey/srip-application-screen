@@ -1,8 +1,7 @@
-"""Tests for Stage 4 essay LLM grading (Phase 4, Task D). Synthetic data only, no API spend.
+"""Tests for Stage 4 essay grading (Task D). Synthetic data only, no API spend.
 
-4.1 pins the Task D prompt shape; 4.2 pins the pure post-processing math; 4.3 drives the
-aggregator with a :class:`FakeLLMClient` (reject-on-either-essay, parse-failure routing,
-total-score composition, and that a gated essay yields no score).
+Pins the prompt shape, the pure post-processing math, and the aggregator: rejection on either
+essay, parse-failure routing, score composition, and that a gated essay yields nothing.
 """
 
 from __future__ import annotations
@@ -38,9 +37,7 @@ def _task_d(
     )
 
 
-# ------------------------------------------------------------------------------------------------
-# 4.1 — Task D prompt shape
-# ------------------------------------------------------------------------------------------------
+# --- 4.1 — Task D prompt shape ---
 
 
 def test_system_prompt_is_json_only_and_esl_safe() -> None:
@@ -58,9 +55,7 @@ def test_user_prompt_renders_template() -> None:
     assert 'ESSAY: """Because I love code."""' in rendered
 
 
-# ------------------------------------------------------------------------------------------------
-# 4.2 — score_one_essay (pure)
-# ------------------------------------------------------------------------------------------------
+# --- 4.2 — score_one_essay (pure) ---
 
 
 def test_clean_essay_scores_quality_minus_grammar_penalty() -> None:
@@ -114,9 +109,7 @@ def test_off_topic_essay_is_gated_and_scores_zero() -> None:
     assert r.score == 0.0
 
 
-# ------------------------------------------------------------------------------------------------
-# 4.3 — grade_essays aggregator (mocked Task D)
-# ------------------------------------------------------------------------------------------------
+# --- 4.3 — grade_essays aggregator (mocked Task D) ---
 
 
 def _row(essay1: str = "essay one text", essay2: str = "essay two text") -> ApplicantRow:

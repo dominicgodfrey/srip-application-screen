@@ -1,14 +1,12 @@
-"""Cohort endpoint helpers (Phase 11.4, PRD §11).
+"""Cohort endpoint helpers (PRD §11).
 
-Both cohort routes are thin, synchronous shells over the pure
-:func:`srip_filter.cohort.assign_cohorts`: assignment over ≤2000 records takes milliseconds, so
-there is no background job, no registry entry, and nothing stored — the response *is* the whole
-result, and every call recomputes from scratch. That statelessness is the feature: staff can
-iterate capacities ("what if honors takes 40?") and watch the assignment move live.
+Both routes are thin synchronous shells over the pure :func:`srip_filter.cohort.assign_cohorts`:
+assignment over ≤2000 records takes milliseconds, so nothing is queued or stored and every call
+recomputes. That statelessness is the feature — staff iterate capacities and watch the
+assignment move live.
 
-Validation mirrors the upload edge in :mod:`api.jobs`: every rejection is a graceful 4xx (413
-too-large via :func:`api.jobs.read_upload_capped`, 422 unparseable) — never a 500 — and error
-messages carry line numbers, never applicant content.
+Every rejection is a graceful 4xx, never a 500, and error messages carry line numbers rather
+than applicant content.
 """
 
 from __future__ import annotations
@@ -35,9 +33,8 @@ CohortFormat = Literal["json", "csv"]
 def parse_decisions_jsonl(raw: bytes, max_rows: int) -> list[AuditRecord]:
     """Parse an uploaded ``decisions.jsonl`` back into audit records. Raises HTTP 4xx, never 500.
 
-    Accepts exactly what :func:`srip_filter.outputs.decisions_jsonl` emits (UTF-8, one record per
-    line; blank lines tolerated). Errors echo a line number only — no applicant content ever
-    appears in a response body.
+    Accepts exactly what :func:`srip_filter.outputs.decisions_jsonl` emits. Errors echo a line
+    number only — no applicant content ever appears in a response body.
     """
     try:
         text = raw.decode("utf-8-sig")

@@ -1,9 +1,8 @@
 """Task B — low-GPA extenuating-circumstances adequacy (PRD §6.2, §8.2).
 
-Fires only when a normalized GPA is below the 3.3 threshold *and* the applicant supplied an
-explanation. Decides whether the circumstance justifies keeping (and ranking) the applicant —
-the further below 3.3 the GPA is, the stronger, more specific, and more realistic the reason
-must be. This task CAN reject. Output parses into :class:`srip_filter.models.TaskBOutput`.
+Fires only for a sub-threshold GPA *with* an explanation, and decides whether the circumstance
+justifies ranking the applicant — the further below the threshold, the higher the bar. **This
+task can reject.**
 """
 
 from __future__ import annotations
